@@ -31,6 +31,9 @@ interface Transition {
   /** wall-clock продолжительность склейки (мс) */
   durationMs: number;
   uiSwitched: boolean;
+  initialRateB: number;
+  lastRateB: number;
+  lastRateAt: number;
   lastVolA?: number;
   lastVolB?: number;
 }
@@ -205,7 +208,7 @@ export class AudioEngine {
     if (!t) return;
     safe(() => {
       this.A.replace({ uri: t.uri });
-      this.A.setPlaybackRate(1, 'high');
+      this.A.setPlaybackRate(1, 'low');
       this.A.volume = this.state.volume;
     });
     this.updateLockScreen(this.A, t);
@@ -308,7 +311,7 @@ export class AudioEngine {
     safe(() => {
       this.B.pause();
       this.A.replace({ uri: t.uri });
-      this.A.setPlaybackRate(1, 'high');
+      this.A.setPlaybackRate(1, 'low');
       this.A.volume = this.state.volume;
       this.A.play();
     });
@@ -498,17 +501,15 @@ export class AudioEngine {
 
     const master = this.state.volume;
 
-    // ── Beat-sync: выравниваем темп трека B с треком A ───────────────────────────────
-    // Устанавливаем скорость трека B один раз ДО его запуска (пока громкость 0),
-    // чтобы AVPlayer подготовил аудио-поток без щелчков.
+    // ── Beat-sync: подгоняем темп трека B под трек A ───────────────────────────────
+    // Трек B стартует с темпом трека A (наложение в ритм), а за время перехода
+    // плавно выравнивается на свою родную скорость 1.0 (BPM трека B).
+    // Используем 'low' (.varispeed) — чистый аналоговый питч-шифт без пересборки CoreAudio графа.
     const now = Date.now();
-    const targetRateB = plan.tempo ? clamp(plan.bpmA / plan.targetBpm, 0.90, 1.10) : 1;
+    const initialRateB = plan.tempo ? clamp(plan.bpmA / plan.targetBpm, 0.88, 1.12) : 1;
     safe(() => {
-      // Подстраиваем BPM трека B заранее (пока громкость = 0 и звук не идёт),
-      // чтобы нативно подготовить аудио-поток без малейшего заикания.
-      // Играющий трек A намеренно НЕ трогаем на лету, избегая сброса буферов AVPlayer на iOS.
-      if (plan.tempo && Math.abs(targetRateB - 1) > 0.01) {
-        idle.setPlaybackRate(targetRateB);
+      if (plan.tempo && Math.abs(initialRateB - 1) > 0.005) {
+        idle.setPlaybackRate(initialRateB, 'low');
       }
       idle.volume = 0;      // ← стартуем строго с 0, driveTransition плавно поднимет громкость
       idle.play();
@@ -524,6 +525,9 @@ export class AudioEngine {
       startedAt: now,
       durationMs: this.dj.crossfadeDuration * 1000,
       uiSwitched: false,
+      initialRateB,
+      lastRateB: initialRateB,
+      lastRateAt: now,
       lastVolA: master,
       lastVolB: 0,
     };
@@ -533,11 +537,9 @@ export class AudioEngine {
   private driveTransition(_pos: number, _dur: number) {
     const t = this.trans!;
 
-    // ── Прогресс по wall-clock времени (абсолютно монотонно и надёжно) ────────────────
+    // ── Прогресс по wall-clock времени (строго монотонно и без преждевременных срывов) ──
     const elapsed = Date.now() - t.startedAt;
-    const aStopped = !(safe(() => t.from.playing) ?? true);
-    const ended = elapsed >= t.durationMs || aStopped;
-    const p = ended ? 1 : clamp(elapsed / t.durationMs, 0, 1);
+    const p = clamp(elapsed / t.durationMs, 0, 1);
 
     const { volA, volB } = volumesAt(p, this.dj.fadeVolumeEnabled);
     const master = this.state.volume;
@@ -545,7 +547,6 @@ export class AudioEngine {
     const targetVolB = volB * master;
 
     // Обновляем громкость плавно (равномерная по мощности кривая cos/sin)
-    // Порог 0.005 отсекает избыточные вызовы bridge
     if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.005 || p >= 1) {
       safe(() => (t.from.volume = targetVolA));
       t.lastVolA = targetVolA;
@@ -553,6 +554,19 @@ export class AudioEngine {
     if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.005 || p >= 1) {
       safe(() => (t.to.volume = targetVolB));
       t.lastVolB = targetVolB;
+    }
+
+    // ── Плавное перетекание скорости трека B в его родной темп (1.0) ──────────────────
+    if (t.plan.tempo && Math.abs(t.initialRateB - 1.0) > 0.005) {
+      const now = Date.now();
+      if (now - t.lastRateAt >= 250) {
+        const curRateB = t.initialRateB + (1.0 - t.initialRateB) * p;
+        if (Math.abs(curRateB - t.lastRateB) >= 0.005) {
+          safe(() => t.to.setPlaybackRate(curRateB, 'low'));
+          t.lastRateB = curRateB;
+        }
+        t.lastRateAt = now;
+      }
     }
 
     if (p >= 0.5 && !t.uiSwitched) this.switchUiToIncoming();
@@ -581,6 +595,9 @@ export class AudioEngine {
     safe(() => {
       t.from.pause();
       t.from.volume = 0;
+      if (t.plan.tempo && Math.abs(t.lastRateB - 1.0) > 0.002) {
+        t.to.setPlaybackRate(1.0, 'low');
+      }
       t.to.volume = master;
     });
     this.active = this.players.indexOf(t.to);
@@ -601,6 +618,7 @@ export class AudioEngine {
     safe(() => {
       t.to.pause();
       t.to.volume = 0;
+      t.to.setPlaybackRate(1.0, 'low');
       t.from.volume = this.state.volume;
     });
     this.trans = null;
@@ -609,15 +627,14 @@ export class AudioEngine {
     this.set({ mixing: false, player: this.A });
   }
 
-  /* ───────────── экран блокировки ───────────── */
+  /* ───────────── экран блокировки и Dynamic Island ───────────── */
 
   private updateLockScreen(player: AudioPlayer, t: TrackFile) {
     safe(() =>
       player.setActiveForLockScreen(
         true,
         { title: t.title, artist: t.artist, albumTitle: t.album || 'Woufy', artworkUrl: t.artworkUri },
-        // next/prev для одиночного AudioPlayer в expo-audio не доставляются в JS — не показываем «мёртвые» кнопки
-        { showNextTrack: false, showPreviousTrack: false, showSeekForward: false, showSeekBackward: false, isLiveStream: false }
+        { showNextTrack: true, showPreviousTrack: true, showSeekForward: true, showSeekBackward: true, isLiveStream: false }
       )
     );
   }

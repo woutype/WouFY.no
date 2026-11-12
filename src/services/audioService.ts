@@ -8,7 +8,7 @@ export async function configureAudioSession(): Promise<void> {
   try {
     await setAudioModeAsync({
       playsInSilentMode: true,
-      interruptionMode: 'mixWithOthers',
+      interruptionMode: 'doNotMix',
       shouldPlayInBackground: true,
       allowsRecording: false,
     });
