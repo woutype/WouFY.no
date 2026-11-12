@@ -1,22 +1,22 @@
 import { Platform } from 'react-native';
 
 /**
- * Дизайн-система Woufy: графитовая монохромная палитра, мягкое «жидкое стекло»,
- * никакого неонового свечения. Белый — единственный акцент.
+ * Дизайн-система Woufy: бездонный чёрный фон, чистое матовое стекло без эффектов,
+ * никакого неона и 3D-засветов. Единственный акцент — чистый белый.
  */
 export const colors = {
-  bg: '#0A0A0B',
-  bgElevated: '#141416',
-  glass: 'rgba(255,255,255,0.07)',
-  glassStrong: 'rgba(255,255,255,0.12)',
-  glassPressed: 'rgba(255,255,255,0.16)',
-  stroke: 'rgba(255,255,255,0.12)',
-  strokeSoft: 'rgba(255,255,255,0.07)',
-  highlight: 'rgba(255,255,255,0.28)',
+  bg: '#080808',
+  bgElevated: '#111113',
+  glass: 'rgba(255,255,255,0.055)',
+  glassStrong: 'rgba(255,255,255,0.09)',
+  glassPressed: 'rgba(255,255,255,0.13)',
+  stroke: 'rgba(255,255,255,0.08)',
+  strokeSoft: 'rgba(255,255,255,0.04)',
+  highlight: 'rgba(255,255,255,0.22)',
   text: '#FFFFFF',
-  text2: 'rgba(255,255,255,0.64)',
-  text3: 'rgba(255,255,255,0.38)',
-  onAccent: '#0A0A0B',
+  text2: 'rgba(255,255,255,0.55)',
+  text3: 'rgba(255,255,255,0.30)',
+  onAccent: '#080808',
   accent: '#FFFFFF',
   danger: '#FF6B6B',
 };

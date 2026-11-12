@@ -206,7 +206,6 @@ export const NowPlayingCard: React.FC<Props> = ({
       {/* Фон полного плеера: размытая обложка */}
       <Animated.View style={[StyleSheet.absoluteFill, styles.bgFull, { opacity: bgOpacity }]} pointerEvents="none">
         <AmbientBackground uri={track?.artworkUri} />
-        <View style={styles.topHairline} />
       </Animated.View>
 
       {/* Полный плеер */}
@@ -217,14 +216,14 @@ export const NowPlayingCard: React.FC<Props> = ({
         <View style={[styles.topBar, { height: m.topbarH }]} {...topPan.panHandlers}>
           <IconButton
             name="pulse"
-            size={20}
+            size={18}
             glass
-            box={40}
+            box={36}
             active={showWave}
             onPress={() => setShowWave((v) => !v)}
           />
           <View style={styles.grabber} />
-          <IconButton name="options" size={20} glass box={40} onPress={onOpenSettings} />
+          <IconButton name="options" size={18} glass box={36} onPress={onOpenSettings} />
         </View>
         {/* Отступ под обложкой */}
         <View style={{ height: m.cover + 8 }} pointerEvents="none" />
@@ -344,18 +343,8 @@ const styles = StyleSheet.create({
   card: { position: 'absolute', top: 0, left: 0, zIndex: 100 },
   abs: { position: 'absolute' },
   bgFull: {
-    borderTopLeftRadius: 38,
-    borderTopRightRadius: 38,
     overflow: 'hidden',
     backgroundColor: colors.bg,
-  },
-  topHairline: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: StyleSheet.hairlineWidth * 2,
-    backgroundColor: 'rgba(255,255,255,0.18)',
   },
   topBar: {
     flexDirection: 'row',
@@ -363,7 +352,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 20,
   },
-  grabber: { width: 38, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.3)' },
+  grabber: { width: 32, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)' },
   miniContent: {
     flex: 1,
     flexDirection: 'row',

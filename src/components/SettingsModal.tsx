@@ -206,9 +206,9 @@ export const SettingsModal: React.FC<Props> = ({
 
 const styles = StyleSheet.create({
   overlay: { flex: 1, justifyContent: 'flex-end' },
-  sheet: { height: '82%', borderTopLeftRadius: 32, borderTopRightRadius: 32, overflow: 'hidden', borderTopWidth: StyleSheet.hairlineWidth * 2, borderColor: colors.stroke },
+  sheet: { height: '82%', borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden' },
   grabArea: { alignItems: 'center', paddingTop: 10, paddingBottom: 6 },
-  grabber: { width: 38, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.3)', marginBottom: 10 },
+  grabber: { width: 32, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)', marginBottom: 10 },
   headerBar: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20 },
   closeBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.glassStrong, alignItems: 'center', justifyContent: 'center' },
   content: { paddingHorizontal: 20, paddingBottom: 48 },

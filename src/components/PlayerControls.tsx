@@ -166,9 +166,9 @@ const styles = StyleSheet.create({
   time: { ...type.mono, color: colors.text3 },
   controls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   playBtn: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
+    width: 68,
+    height: 68,
+    borderRadius: 34,
     backgroundColor: colors.accent,
     alignItems: 'center',
     justifyContent: 'center',

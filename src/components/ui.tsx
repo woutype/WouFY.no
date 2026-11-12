@@ -11,7 +11,6 @@ import {
   ViewStyle,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { colors, radius, springs } from '../theme';
@@ -25,16 +24,11 @@ interface GlassProps {
   children?: React.ReactNode;
 }
 
-/** Матовое стекло: размытие + лёгкая подсветка верхней грани + тонкая обводка. Без свечения. */
-export const Glass: React.FC<GlassProps> = ({ style, radius: r = radius.lg, intensity = 40, children }) => (
+/** Матовое стекло: лёгкое размытие + почти невидимая заливка + тончайшая обводка. Без 3D-засветов. */
+export const Glass: React.FC<GlassProps> = ({ style, radius: r = radius.lg, intensity = 36, children }) => (
   <View style={[{ borderRadius: r, overflow: 'hidden' }, styles.glassBorder, { borderRadius: r }, style]}>
     <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
     <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.glass }]} />
-    <LinearGradient
-      colors={['rgba(255,255,255,0.10)', 'rgba(255,255,255,0)']}
-      style={[StyleSheet.absoluteFill, { height: '55%' }]}
-      pointerEvents="none"
-    />
     {children}
   </View>
 );
@@ -148,9 +142,9 @@ export const CoverArt: React.FC<CoverArtProps> = ({ uri, size, radius: r = 24, s
     {uri ? (
       <Image source={{ uri }} style={{ width: size, height: size }} resizeMode="cover" fadeDuration={0} />
     ) : (
-      <LinearGradient colors={['#2A2A2E', '#161618']} style={styles.center}>
-        <Ionicons name="musical-notes" size={Math.max(14, size * 0.28)} color="rgba(255,255,255,0.35)" />
-      </LinearGradient>
+      <View style={[styles.center, { backgroundColor: colors.bgElevated }]}>
+        <Ionicons name="musical-notes" size={Math.max(14, size * 0.26)} color="rgba(255,255,255,0.22)" />
+      </View>
     )}
   </View>
 );
@@ -168,10 +162,10 @@ export const AmbientBackground: React.FC<{ uri?: string }> = ({ uri }) => {
     if (uri === current) return;
     if (showingB.current) {
       setA(uri);
-      Animated.timing(mix, { toValue: 0, duration: 600, useNativeDriver: true }).start();
+      Animated.timing(mix, { toValue: 0, duration: 700, useNativeDriver: true }).start();
     } else {
       setB(uri);
-      Animated.timing(mix, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+      Animated.timing(mix, { toValue: 1, duration: 700, useNativeDriver: true }).start();
     }
     showingB.current = !showingB.current;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -181,7 +175,7 @@ export const AmbientBackground: React.FC<{ uri?: string }> = ({ uri }) => {
     u ? (
       <Animated.Image
         source={{ uri: u }}
-        blurRadius={50}
+        blurRadius={80}
         resizeMode="cover"
         style={[styles.ambientImg, { opacity }]}
       />
@@ -192,10 +186,8 @@ export const AmbientBackground: React.FC<{ uri?: string }> = ({ uri }) => {
       <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.bg }]} />
       {layer(a, mix.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }))}
       {layer(b, mix)}
-      <LinearGradient
-        colors={['rgba(10,10,11,0.55)', 'rgba(10,10,11,0.82)', 'rgba(10,10,11,0.96)']}
-        style={StyleSheet.absoluteFill}
-      />
+      {/* Тёмное покрывало — без градиента, просто однородная полупрозрачность */}
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(8,8,8,0.72)' }]} />
     </View>
   );
 };
