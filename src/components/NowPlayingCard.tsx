@@ -3,6 +3,7 @@ import { Animated, Easing, PanResponder, Pressable, StyleSheet, Text, View } fro
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { AudioEngine, EngineState } from '../services/audioEngine';
+import { TrackFile } from '../types';
 import { Metrics } from '../layout';
 import { colors, radius, type } from '../theme';
 import { AmbientBackground, CoverArt, Glass, IconButton, PressableScale } from './ui';
@@ -29,13 +30,37 @@ interface Props {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-// MiniProgress bar in mini-player
-const MiniProgress: React.FC<{ engine: AudioEngine; duration: number }> = ({ engine, duration }) => {
+const fmtSec = (sec: number) => {
+  if (!sec || isNaN(sec) || sec < 0) return '0:00';
+  const mins = Math.floor(sec / 60);
+  const secs = Math.floor(sec % 60);
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+};
+
+// Блок по центру мини-плеера: название, время, исполнитель и таймлайн ПОД текстом
+const MiniTrackCenter: React.FC<{
+  track?: TrackFile;
+  engine: AudioEngine;
+  duration: number;
+}> = ({ track, engine, duration }) => {
   const pos = usePosition(engine, 250);
   const ratio = duration > 0 ? clamp(pos / duration, 0, 1) : 0;
   return (
-    <View style={styles.miniProgressTrack}>
-      <View style={[styles.miniProgressFill, { width: `${ratio * 100}%` }]} />
+    <View style={styles.miniCenterCol}>
+      <View style={styles.miniTextRow}>
+        <Text style={styles.miniTitle} numberOfLines={1}>
+          {track?.title ?? 'Нет треков'}
+        </Text>
+        <Text style={styles.miniTime}>
+          {fmtSec(pos)} / {fmtSec(duration)}
+        </Text>
+      </View>
+      <Text style={styles.miniArtist} numberOfLines={1}>
+        {track?.artist ?? ''}
+      </Text>
+      <View style={styles.miniTimelineTrack}>
+        <View style={[styles.miniTimelineFill, { width: `${ratio * 100}%` }]} />
+      </View>
     </View>
   );
 };
@@ -259,32 +284,30 @@ export const NowPlayingCard: React.FC<Props> = ({
         <Glass radius={m.miniH / 2} intensity={60} style={{ flex: 1 }}>
           <Pressable style={styles.miniContent} onPress={() => onSettle(1)}>
             {/* Слот под виниловую обложку (сама обложка перетекает через shared element) */}
-            <View style={{ width: m.thumb, height: m.thumb, marginLeft: 2, marginRight: 6 }} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.miniTitle} numberOfLines={1}>
-                {track?.title ?? 'Нет треков'}
-              </Text>
-              <Text style={styles.miniArtist} numberOfLines={1}>
-                {track?.artist ?? ''}
-              </Text>
+            <View style={{ width: m.thumb, height: m.thumb, marginLeft: 2, marginRight: 8 }} />
+            
+            {/* Текст + таймлайн ПОД текстом (между обложкой и кнопками) */}
+            <MiniTrackCenter track={track} engine={engine} duration={state.duration} />
+
+            {/* Блок из трёх кнопок справа */}
+            <View style={styles.miniBtnGroup}>
+              <PressableScale onPress={() => engine.previous()} haptic="light" hitSlop={8}>
+                <View style={styles.miniBtn}>
+                  <Ionicons name="play-skip-back" size={19} color={colors.text} />
+                </View>
+              </PressableScale>
+              <PressableScale onPress={() => engine.togglePlay()} haptic="light" hitSlop={8}>
+                <View style={styles.miniBtn}>
+                  <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={23} color={colors.text} style={{ marginLeft: state.isPlaying ? 0 : 2 }} />
+                </View>
+              </PressableScale>
+              <PressableScale onPress={() => engine.next()} haptic="light" hitSlop={8}>
+                <View style={styles.miniBtn}>
+                  <Ionicons name="play-skip-forward" size={19} color={colors.text} />
+                </View>
+              </PressableScale>
             </View>
-            <PressableScale onPress={() => engine.previous()} haptic="light" hitSlop={10}>
-              <View style={styles.miniBtn}>
-                <Ionicons name="play-skip-back" size={20} color={colors.text} />
-              </View>
-            </PressableScale>
-            <PressableScale onPress={() => engine.togglePlay()} haptic="light" hitSlop={10}>
-              <View style={styles.miniBtn}>
-                <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={24} color={colors.text} style={{ marginLeft: state.isPlaying ? 0 : 2 }} />
-              </View>
-            </PressableScale>
-            <PressableScale onPress={() => engine.next()} haptic="light" hitSlop={10}>
-              <View style={styles.miniBtn}>
-                <Ionicons name="play-skip-forward" size={20} color={colors.text} />
-              </View>
-            </PressableScale>
           </Pressable>
-          <MiniProgress engine={engine} duration={state.duration} />
         </Glass>
       </Animated.View>
 
@@ -346,22 +369,39 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 8,
+  },
+  miniCenterCol: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingRight: 6,
+  },
+  miniTextRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 4,
   },
-  miniTitle: { ...type.headline, fontSize: 15, color: colors.text },
-  miniArtist: { ...type.caption, color: colors.text2, marginTop: 1 },
-  miniBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  miniProgressTrack: {
-    position: 'absolute',
-    left: 22,
-    right: 22,
-    bottom: 5,
-    height: 2,
-    borderRadius: 1,
+  miniTitle: { ...type.headline, fontSize: 13, color: colors.text, flex: 1 },
+  miniTime: { ...type.caption, fontSize: 10, color: colors.text3, fontVariant: ['tabular-nums'] },
+  miniArtist: { ...type.caption, fontSize: 11, color: colors.text2, marginTop: 1 },
+  miniTimelineTrack: {
+    height: 3,
+    borderRadius: 2,
     backgroundColor: 'rgba(255,255,255,0.12)',
     overflow: 'hidden',
+    marginTop: 4,
+    width: '100%',
   },
-  miniProgressFill: { height: 2, backgroundColor: 'rgba(255,255,255,0.75)', borderRadius: 1 },
+  miniTimelineFill: {
+    height: 3,
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    borderRadius: 2,
+  },
+  miniBtnGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  miniBtn: { width: 34, height: 38, alignItems: 'center', justifyContent: 'center' },
 });
 
 void radius;

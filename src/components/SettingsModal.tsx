@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Animated, Modal, PanResponder, ScrollView, StyleSheet, Switch, Text, View, Pressable } from 'react-native';
 import { BlurView } from 'expo-blur';
 import Slider from '@react-native-community/slider';
+import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { DJSettings } from '../types';
 import { colors, type } from '../theme';
@@ -53,11 +54,24 @@ export const SettingsModal: React.FC<Props> = ({
 
   const pan = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
-      onPanResponderMove: (_, g) => g.dy > 0 && y.setValue(g.dy),
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => g.dy > 4 && Math.abs(g.dy) > Math.abs(g.dx),
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        y.stopAnimation();
+      },
+      onPanResponderMove: (_, g) => {
+        if (g.dy > 0) y.setValue(g.dy);
+      },
       onPanResponderRelease: (_, g) => {
-        if (g.dy > 90 || g.vy > 0.6) onClose();
-        else Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 20, stiffness: 240, mass: 1 }).start();
+        if (g.dy > 80 || g.vy > 0.4) {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          Animated.timing(y, { toValue: 700, duration: 200, useNativeDriver: true }).start(() => {
+            onClose();
+          });
+        } else {
+          Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 260, mass: 0.9 }).start();
+        }
       },
     })
   ).current;
@@ -79,13 +93,21 @@ export const SettingsModal: React.FC<Props> = ({
         <Animated.View style={[styles.sheet, { transform: [{ translateY: y }] }]}>
           <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
           <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(18,18,20,0.72)' }]} />
+          
+          {/* Верхняя зона: полоска + заголовок DJ-склейка (можно тянуть вниз для закрытия) */}
           <View {...pan.panHandlers} style={styles.grabArea}>
             <View style={styles.grabber} />
+            <View style={styles.headerBar}>
+              <Text style={styles.h1}>DJ-склейка</Text>
+              <PressableScale onPress={onClose} hitSlop={12}>
+                <View style={styles.closeBtn}>
+                  <Ionicons name="close" size={18} color={colors.text2} />
+                </View>
+              </PressableScale>
+            </View>
           </View>
 
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
-            <Text style={styles.h1}>DJ-склейка</Text>
-
             <View style={styles.row}>
               <View style={styles.info}>
                 <Text style={styles.rowTitle}>Склейка треков</Text>
@@ -136,7 +158,7 @@ export const SettingsModal: React.FC<Props> = ({
             )}
 
             <View style={styles.presets}>
-              {[3, 5, 8].map((d) => {
+              {[3, 5, 10].map((d) => {
                 const on = settings.crossfadeEnabled && settings.crossfadeDuration === d;
                 return (
                   <PressableScale key={d} style={{ flex: 1 }} onPress={() => set({ crossfadeEnabled: true, crossfadeDuration: d })}>
@@ -185,10 +207,12 @@ export const SettingsModal: React.FC<Props> = ({
 const styles = StyleSheet.create({
   overlay: { flex: 1, justifyContent: 'flex-end' },
   sheet: { height: '82%', borderTopLeftRadius: 32, borderTopRightRadius: 32, overflow: 'hidden', borderTopWidth: StyleSheet.hairlineWidth * 2, borderColor: colors.stroke },
-  grabArea: { alignItems: 'center', paddingVertical: 12 },
-  grabber: { width: 38, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.3)' },
+  grabArea: { alignItems: 'center', paddingTop: 10, paddingBottom: 6 },
+  grabber: { width: 38, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.3)', marginBottom: 10 },
+  headerBar: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20 },
+  closeBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.glassStrong, alignItems: 'center', justifyContent: 'center' },
   content: { paddingHorizontal: 20, paddingBottom: 48 },
-  h1: { ...type.largeTitle, fontSize: 26, color: colors.text, marginBottom: 12 },
+  h1: { ...type.largeTitle, fontSize: 26, color: colors.text },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8 },
   sub: { marginTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.stroke, paddingTop: 14 },
   info: { flex: 1, marginRight: 14 },

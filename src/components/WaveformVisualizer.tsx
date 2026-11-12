@@ -129,16 +129,27 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
     });
   }, [isPlaying, bars, levels]);
 
-  const barH = size * 0.5;
+  const barH = size * 0.45;
   return (
     <View style={[styles.wrap, { borderRadius: radius }]} pointerEvents="none">
       <View style={[styles.row, { height: barH }]}>
-        {bars.map((v, i) => (
-          <Animated.View
-            key={i}
-            style={[styles.bar, { height: barH, transform: [{ scaleY: v }] }]}
-          />
-        ))}
+        {bars.map((v, i) => {
+          const centerDist = Math.abs(i - (BARS - 1) / 2) / ((BARS - 1) / 2);
+          const barOpacity = 0.72 + (1 - centerDist) * 0.28;
+          return (
+            <Animated.View
+              key={i}
+              style={[
+                styles.bar,
+                {
+                  height: barH,
+                  opacity: barOpacity,
+                  transform: [{ scaleY: v }],
+                },
+              ]}
+            />
+          );
+        })}
       </View>
     </View>
   );
@@ -147,18 +158,26 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
 const styles = StyleSheet.create({
   wrap: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(10,10,11,0.62)',
-    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(10,10,11,0.58)',
+    justifyContent: 'center',
+    alignItems: 'center',
     paddingHorizontal: 22,
-    paddingBottom: 26,
     overflow: 'hidden',
   },
-  row: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
   bar: {
     flex: 1,
     marginHorizontal: 1.5,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    transformOrigin: 'bottom',
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#FFFFFF',
+    shadowOpacity: 0.45,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
   },
 });

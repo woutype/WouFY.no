@@ -2,6 +2,7 @@ import { createAudioPlayer, AudioPlayer, AudioStatus } from 'expo-audio';
 import { DJSettings, DEFAULT_DJ, RepeatMode, TrackFile } from '../types';
 import { planMix, ratesAt, volumesAt, MixPlan } from './djMix';
 import { configureAudioSession } from './audioService';
+import { volumeService } from './volumeService';
 
 export interface EngineState {
   queue: TrackFile[];
@@ -89,6 +90,15 @@ export class AudioEngine {
       this.subs.push(sub);
     });
     this.timer = setInterval(this.tick, TICK_MS);
+
+    // Синхронизация с громкостью телефона (кнопки громкости iPhone)
+    volumeService.addListener((vol) => {
+      if (Math.abs(this.state.volume - vol) >= 0.015) {
+        this.set({ volume: vol });
+        if (!this.trans) safe(() => (this.A.volume = vol));
+        this.persist();
+      }
+    });
   }
 
   /* ───────────── подписка ───────────── */
@@ -263,6 +273,7 @@ export class AudioEngine {
   setVolume(v: number) {
     const volume = clamp(v, 0, 1);
     this.set({ volume });
+    volumeService.setVolume(volume);
     if (!this.trans) safe(() => (this.A.volume = volume));
     this.persist();
   }
@@ -467,6 +478,15 @@ export class AudioEngine {
     const { volA, volB } = volumesAt(p0, this.dj.fadeVolumeEnabled);
     const master = this.state.volume;
     safe(() => {
+      if (plan.tempo) {
+        const beatLenA = 60 / plan.bpmA;
+        const phaseA = pos % beatLenA;
+        const beatLenB = 60 / plan.targetBpm;
+        const initialOffsetB = (phaseA / beatLenA) * beatLenB;
+        if (initialOffsetB > 0.02) {
+          idle.seekTo(initialOffsetB);
+        }
+      }
       idle.setPlaybackRate(rateB);
       idle.volume = volB * master;
       idle.play();

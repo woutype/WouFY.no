@@ -64,7 +64,8 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 
 export function ratesAt(plan: MixPlan, p: number): { rateA: number; rateB: number } {
   if (!plan.tempo) return { rateA: 1, rateB: 1 };
-  const mixBpm = plan.bpmA + (plan.targetBpm - plan.bpmA) * smooth(clamp(p, 0, 1));
+  const q = clamp(p, 0, 1);
+  const mixBpm = plan.bpmA + (plan.targetBpm - plan.bpmA) * q;
   return {
     rateA: clamp(mixBpm / plan.bpmA, 0.5, 2),
     rateB: clamp(mixBpm / plan.targetBpm, 0.5, 2),

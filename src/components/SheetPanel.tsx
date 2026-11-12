@@ -89,8 +89,8 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 4, paddingBottom: 8 },
   grabber: { position: 'absolute', top: 0, left: '50%', marginLeft: -19, width: 38, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.22)' },
   tabs: { flexDirection: 'row', gap: 24, flex: 1, paddingTop: 10 },
-  tab: { paddingVertical: 6 },
+  tab: { paddingVertical: 6, alignItems: 'center' },
   tabText: { ...type.largeTitle, fontSize: 30, color: colors.text },
-  underline: { marginTop: 4, height: 3, width: 28, borderRadius: 2, backgroundColor: colors.text },
+  underline: { marginTop: 4, height: 3, width: '100%', borderRadius: 2, backgroundColor: colors.text },
   close: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.glassStrong, alignItems: 'center', justifyContent: 'center' },
 });

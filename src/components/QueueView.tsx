@@ -62,7 +62,13 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
       style={[
         styles.row,
         p.dragging && styles.rowDragging,
-        { transform: [{ translateY: p.dragging ? p.dragY : shiftAnim }], zIndex: p.dragging ? 99 : 0 },
+        {
+          transform: [
+            { translateY: p.dragging ? p.dragY : shiftAnim },
+            { scale: p.dragging ? 1.02 : 1 },
+          ],
+          zIndex: p.dragging ? 99 : 0,
+        },
       ]}
     >
       <PressableScale onPress={p.onPress} scaleTo={0.98} style={styles.rowMain} haptic="light">
@@ -120,23 +126,28 @@ export const QueueView: React.FC<Props> = ({
   const [drag, setDrag] = useState<{ from: number; hover: number } | null>(null);
   const dragY = useRef(new Animated.Value(0)).current;
 
+  const [localTracks, setLocalTracks] = useState(tracks);
+  useEffect(() => {
+    if (!drag) setLocalTracks(tracks);
+  }, [tracks, drag]);
+
   const filtering = searchQuery.trim().length > 0;
   const data = useMemo(() => {
-    const items = tracks.map((track, qi) => ({ track, qi }));
+    const items = localTracks.map((track, qi) => ({ track, qi }));
     if (!filtering) return items;
     const q = searchQuery.toLowerCase();
     return items.filter(
       ({ track: t }) =>
         t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.filename.toLowerCase().includes(q)
     );
-  }, [tracks, searchQuery, filtering]);
+  }, [localTracks, searchQuery, filtering]);
 
   // перетаскивание (только когда нет фильтра: позиции строк = индексы очереди)
   const scrollY = useRef(0);
   const dragInfo = useRef({ from: -1, startScroll: 0, dy: 0, hover: -1, listH: 600 });
   const autoScroll = useRef<ReturnType<typeof setInterval> | null>(null);
-  const tracksLen = useRef(tracks.length);
-  tracksLen.current = tracks.length;
+  const tracksLen = useRef(localTracks.length);
+  tracksLen.current = localTracks.length;
 
   const updateHover = useCallback(() => {
     const d = dragInfo.current;
@@ -197,11 +208,17 @@ export const QueueView: React.FC<Props> = ({
     if (from < 0) return;
     dragInfo.current.from = -1;
     if (hover === from) {
-      Animated.timing(dragY, { toValue: 0, duration: 100, useNativeDriver: true }).start(() => {
+      Animated.timing(dragY, { toValue: 0, duration: 80, useNativeDriver: true }).start(() => {
         setDrag(null);
       });
     } else {
-      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 90, useNativeDriver: true }).start(() => {
+      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 80, useNativeDriver: true }).start(() => {
+        setLocalTracks((prev) => {
+          const next = [...prev];
+          const [moved] = next.splice(from, 1);
+          next.splice(hover, 0, moved);
+          return next;
+        });
         dragY.setValue(0);
         setDrag(null);
         onMove(from, hover);
@@ -332,14 +349,22 @@ const styles = StyleSheet.create({
   searchInner: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 8 },
   searchInput: { flex: 1, color: colors.text, fontSize: 15, paddingVertical: 0 },
   count: { ...type.caption, color: colors.text3, marginTop: 8, marginLeft: 4 },
-  row: { height: ROW_H, flexDirection: 'row', alignItems: 'center' },
+  row: {
+    height: ROW_H,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+  },
   rowDragging: {
-    backgroundColor: 'rgba(40,40,44,0.96)',
-    borderRadius: 14,
-    shadowColor: '#000',
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(255,255,255,0.45)',
+    shadowColor: '#FFFFFF',
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
   },
   rowMain: { flexDirection: 'row', alignItems: 'center', flex: 1, paddingVertical: 10 },
   rowText: { flex: 1, marginLeft: 12 },
