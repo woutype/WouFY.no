@@ -198,7 +198,7 @@ const styles = StyleSheet.create({
   badge: { ...type.mono, fontSize: 13, color: colors.text, fontWeight: '700' },
   scale: { ...type.caption, color: colors.text3 },
   presets: { flexDirection: 'row', gap: 8, marginTop: 14 },
-  pill: { height: 38, borderRadius: 19, backgroundColor: colors.glass, borderWidth: StyleSheet.hairlineWidth * 2, borderColor: colors.stroke, alignItems: 'center', justifyContent: 'center' },
+  pill: { height: 42, borderRadius: 21, backgroundColor: colors.glass, borderWidth: StyleSheet.hairlineWidth * 2, borderColor: colors.stroke, alignItems: 'center', justifyContent: 'center', flex: 1 },
   pillOn: { backgroundColor: colors.accent },
   pillText: { ...type.body, fontWeight: '600', color: colors.text },
   link: { ...type.body, fontWeight: '700', color: colors.text },

@@ -90,20 +90,20 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics }) =>
     <Glass radius={H / 2} style={{ height: H }}>
       <View style={styles.fill} onLayout={onLayout}>
         {/* Слева — текст песни */}
-        <PressableScale onPress={onOpenLyrics} style={[styles.slot, { left: PAD }]} scaleTo={0.92}>
+        <PressableScale onPress={onOpenLyrics} style={styles.slot} scaleTo={0.92}>
           <Animated.View style={{ opacity: leftOpacity, alignItems: 'center' }}>
             <Ionicons name="text" size={20} color={colors.text} />
           </Animated.View>
         </PressableScale>
 
         {/* Справа — очередь */}
-        <PressableScale onPress={onOpenQueue} style={[styles.slot, { right: PAD }]} scaleTo={0.92}>
+        <PressableScale onPress={onOpenQueue} style={styles.slot} scaleTo={0.92}>
           <Animated.View style={{ opacity: rightOpacity, alignItems: 'center' }}>
             <Ionicons name="list" size={22} color={colors.text} />
           </Animated.View>
         </PressableScale>
 
-        {/* Ползунок */}
+        {/* Ползунок — абсолютно позиционирован по центру */}
         <Animated.View
           style={[styles.thumb, { left: (width - THUMB_W) / 2, transform: [{ translateX: x }] }]}
           {...responder.panHandlers}
@@ -120,10 +120,8 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics }) =>
 };
 
 const styles = StyleSheet.create({
-  fill: { flex: 1, justifyContent: 'center' },
+  fill: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: PAD },
   slot: {
-    position: 'absolute',
-    top: (H - THUMB_H) / 2,
     width: THUMB_W,
     height: THUMB_H,
     alignItems: 'center',

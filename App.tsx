@@ -164,7 +164,7 @@ function Root() {
         pointerEvents={expanded ? 'none' : 'auto'}
       >
         <AmbientBackground uri={track?.artworkUri} />
-        <SheetPanel mode={sheet} onModeChange={setSheet} onClose={() => settle(1)} topInset={m.top}>
+        <SheetPanel mode={sheet} onModeChange={setSheet} progress={progress} onSettle={settle} topInset={m.top}>
           {sheet === 'queue' ? (
             <QueueView
               tracks={state.queue}

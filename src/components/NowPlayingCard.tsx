@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { AudioEngine, EngineState } from '../services/audioEngine';
@@ -38,6 +38,59 @@ const MiniProgress: React.FC<{ engine: AudioEngine; duration: number }> = ({ eng
     </View>
   );
 };
+
+/** Вращающаяся обложка как виниловая пластинка */
+const SpinningArtwork: React.FC<{ uri?: string; size: number; isPlaying: boolean }> = ({ uri, size, isPlaying }) => {
+  // Use a rotation value that just counts full rotations — we keep it small with modulo resets
+  const rot = useRef(new Animated.Value(0)).current;
+  const animRef = useRef<Animated.CompositeAnimation | null>(null);
+  const pausedAt = useRef(0);
+
+  useEffect(() => {
+    if (isPlaying) {
+      animRef.current?.stop();
+      // Start from where we paused; go around many times
+      const start = pausedAt.current;
+      const target = start + 360 * 500; // 500 full rotations (essentially infinite)
+      const duration = (target - start) * (8000 / 360); // 8 seconds per full rotation
+      const loop = Animated.loop(
+        Animated.timing(rot, {
+          toValue: start + 360,
+          duration: 8000,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        })
+      );
+      // Reset to small number to avoid interpolate overflow, then loop
+      rot.setValue(start % 360);
+      animRef.current = Animated.loop(
+        Animated.timing(rot, {
+          toValue: (start % 360) + 360,
+          duration: 8000,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        })
+      );
+      void loop; void duration;
+      animRef.current.start(({ finished }) => {
+        if (finished) rot.setValue((start % 360));
+      });
+    } else {
+      animRef.current?.stop();
+      animRef.current = null;
+      rot.stopAnimation((v) => { pausedAt.current = v; });
+    }
+  }, [isPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const spin = rot.interpolate({ inputRange: [0, 360], outputRange: ['0deg', '360deg'] });
+
+  return (
+    <Animated.View style={{ width: size, height: size, borderRadius: size / 2, overflow: 'hidden', transform: [{ rotate: spin }] }}>
+      <CoverArt uri={uri} size={size} radius={size / 2} />
+    </Animated.View>
+  );
+};
+
 
 /**
  * Одна карточка — два состояния. Прогресс `progress` (0…1) управляет всем:
@@ -95,6 +148,20 @@ export const NowPlayingCard: React.FC<Props> = ({
   const miniPan = useRef(makePan((dx, dy) => dy < -6 && Math.abs(dy) > Math.abs(dx))).current;
   const topPan = useRef(makePan((dx, dy) => dy > 6 && Math.abs(dy) > Math.abs(dx))).current;
 
+  // свайп вниз по обложке → открывает очередь
+  const artworkPan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => g.dy > 10 && Math.abs(g.dy) > Math.abs(g.dx) * 1.5,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderRelease: (_, g) => {
+        if (g.dy > 60 || g.vy > 0.5) {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          onOpenSheet('queue');
+        }
+      },
+    })
+  ).current;
+
   /* ───────── интерполяции ───────── */
   const cardY = e.interpolate({ inputRange: [0, 1], outputRange: [m.collapsedTop, 0] });
   const bgOpacity = e.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1], extrapolate: 'clamp' });
@@ -137,7 +204,8 @@ export const NowPlayingCard: React.FC<Props> = ({
           <View style={styles.grabber} />
           <IconButton name="options" size={20} glass box={40} onPress={onOpenSettings} />
         </View>
-        <View style={{ height: m.cover + 8 }} pointerEvents="none" />
+        {/* Невидимая зона под обложкой для свайпа вниз → очередь */}
+        <View style={{ height: m.cover + 8 }} pointerEvents="box-none" {...artworkPan.panHandlers} />
         <PlayerControls
           engine={engine}
           state={state}
@@ -179,8 +247,11 @@ export const NowPlayingCard: React.FC<Props> = ({
       >
         <Glass radius={m.miniH / 2} intensity={60} style={{ flex: 1 }}>
           <Pressable style={styles.miniContent} onPress={() => onSettle(1)}>
-            <View style={{ width: m.thumb + 10 }} />
-            <View style={{ flex: 1 }}>
+            {/* Вращающаяся обложка как vinyl */}
+            <View style={{ marginLeft: 4, marginRight: 2 }}>
+              <SpinningArtwork uri={track?.artworkUri} size={m.thumb - 2} isPlaying={state.isPlaying} />
+            </View>
+            <View style={{ flex: 1, marginLeft: 6 }}>
               <Text style={styles.miniTitle} numberOfLines={1}>
                 {track?.title ?? 'Нет треков'}
               </Text>
@@ -188,6 +259,11 @@ export const NowPlayingCard: React.FC<Props> = ({
                 {track?.artist ?? ''}
               </Text>
             </View>
+            <PressableScale onPress={() => engine.previous()} haptic="light" hitSlop={10}>
+              <View style={styles.miniBtn}>
+                <Ionicons name="play-skip-back" size={20} color={colors.text} />
+              </View>
+            </PressableScale>
             <PressableScale onPress={() => engine.togglePlay()} haptic="light" hitSlop={10}>
               <View style={styles.miniBtn}>
                 <Ionicons name={state.isPlaying ? 'pause' : 'play'} size={24} color={colors.text} style={{ marginLeft: state.isPlaying ? 0 : 2 }} />
@@ -195,7 +271,7 @@ export const NowPlayingCard: React.FC<Props> = ({
             </PressableScale>
             <PressableScale onPress={() => engine.next()} haptic="light" hitSlop={10}>
               <View style={styles.miniBtn}>
-                <Ionicons name="play-skip-forward" size={22} color={colors.text} />
+                <Ionicons name="play-skip-forward" size={20} color={colors.text} />
               </View>
             </PressableScale>
           </Pressable>
@@ -223,6 +299,7 @@ export const NowPlayingCard: React.FC<Props> = ({
     </Animated.View>
   );
 };
+
 
 const styles = StyleSheet.create({
   card: { position: 'absolute', top: 0, left: 0, zIndex: 100 },
