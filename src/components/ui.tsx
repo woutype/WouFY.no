@@ -65,10 +65,20 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
   const scale = useRef(new Animated.Value(1)).current;
   const to = (v: number) =>
     Animated.spring(scale, { toValue: v, useNativeDriver: true, ...springs.snappy }).start();
+
+  const flat = (StyleSheet.flatten(style) || {}) as Record<string, any>;
+  const pressableStyle: Record<string, any> = {};
+  if (flat.flex !== undefined) pressableStyle.flex = flat.flex;
+  if (flat.flexGrow !== undefined) pressableStyle.flexGrow = flat.flexGrow;
+  if (flat.flexShrink !== undefined) pressableStyle.flexShrink = flat.flexShrink;
+  if (flat.alignSelf !== undefined) pressableStyle.alignSelf = flat.alignSelf;
+  if (flat.width !== undefined) pressableStyle.width = flat.width;
+
   return (
     <Pressable
       disabled={disabled}
       hitSlop={hitSlop}
+      style={pressableStyle}
       onPressIn={() => to(scaleTo)}
       onPressOut={() => to(1)}
       onLongPress={onLongPress}

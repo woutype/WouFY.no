@@ -434,7 +434,7 @@ export class AudioEngine {
     if (this.mixBlockedFor === this.currentTrack.id) return;
     const nextIdx = this.nextIndexAuto();
     if (nextIdx === null || nextIdx === this.state.index) return;
-    if (dur < X * 2.5 + 2) return;
+    if (dur < X + 2) return;
 
     const cur = this.currentTrack;
     const nxt = this.state.queue[nextIdx];
@@ -449,7 +449,7 @@ export class AudioEngine {
         idle.pause();
         idle.replace({ uri: nxt.uri });
         idle.volume = 0;
-        idle.setPlaybackRate(1, 'high');
+        idle.setPlaybackRate(1);
       });
       this.preloadedId = nxt.id;
     }
@@ -463,12 +463,14 @@ export class AudioEngine {
       return;
     }
 
-    const { rateB } = ratesAt(plan, p0);
-    const { volB } = volumesAt(p0, this.dj.fadeVolumeEnabled);
+    const { rateA, rateB } = ratesAt(plan, p0);
+    const { volA, volB } = volumesAt(p0, this.dj.fadeVolumeEnabled);
+    const master = this.state.volume;
     safe(() => {
-      idle.setPlaybackRate(rateB, 'high');
-      idle.volume = volB * this.state.volume;
+      idle.setPlaybackRate(rateB);
+      idle.volume = volB * master;
       idle.play();
+      if (plan.tempo) a.setPlaybackRate(rateA);
     });
     this.trans = {
       from: a,
@@ -477,9 +479,11 @@ export class AudioEngine {
       plan,
       trigger: plan.triggerRemaining,
       uiSwitched: false,
-      lastRateAt: 0,
-      lastRateA: 1,
+      lastRateAt: Date.now(),
+      lastRateA: rateA,
       lastRateB: rateB,
+      lastVolA: volA * master,
+      lastVolB: volB * master,
     };
     this.set({ mixing: true });
   };

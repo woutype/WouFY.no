@@ -118,14 +118,37 @@ export async function scanLibrary(): Promise<TrackFile[]> {
     }
 
     const lrcUri = f.uri.replace(/\.[^/.]+$/, '.lrc');
+    const baseName = f.name.replace(/\.[^/.]+$/, '');
+    let title = meta.title?.trim();
+    let artist = meta.artist?.trim();
+    let album = meta.album?.trim();
+
+    if (!title && !artist) {
+      if (baseName.includes(' - ')) {
+        const parts = baseName.split(' - ');
+        artist = parts[0].trim();
+        title = parts.slice(1).join(' - ').trim();
+      } else {
+        title = baseName;
+        artist = 'Неизвестный исполнитель';
+      }
+    } else if (!title) {
+      title = baseName;
+    } else if (!artist) {
+      artist = 'Неизвестный исполнитель';
+    }
+
+    if (!album) {
+      album = 'Сингл';
+    }
 
     tracks.push({
       id,
       uri: f.uri,
       filename: f.name,
-      title: meta.title || f.name.replace(/\.[^/.]+$/, ''),
-      artist: meta.artist || 'Неизвестный исполнитель',
-      album: meta.album,
+      title: title || baseName,
+      artist: artist || 'Неизвестный исполнитель',
+      album,
       artworkUri: meta.artworkUri,
       lyrics: meta.lyrics,
       syncedLyrics: meta.syncedLyrics,

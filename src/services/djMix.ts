@@ -26,34 +26,36 @@ export function planMix(
   duration: number,
   tempoEnabled: boolean
 ): MixPlan {
+  const dur = Math.max(1, duration);
   const base: MixPlan = {
     tempo: false,
-    targetBpm: bpmA ?? 0,
-    bpmA: bpmA ?? 0,
+    targetBpm: bpmA ?? 120,
+    bpmA: bpmA ?? 120,
     factorB: 1,
-    triggerRemaining: duration,
+    triggerRemaining: dur,
   };
-  if (!tempoEnabled || !bpmA || !bpmB || bpmA < 30 || bpmB < 30) return base;
+  if (!tempoEnabled) return base;
+
+  const a = bpmA && bpmA >= 30 ? bpmA : 120;
+  const b = bpmB && bpmB >= 30 ? bpmB : (bpmA ? Math.round(bpmA * 1.08) : 128);
 
   let best = 1;
   let bestErr = Infinity;
   for (const k of [0.5, 1, 2]) {
-    const err = Math.abs(Math.log((bpmB * k) / bpmA));
+    const err = Math.abs(Math.log((b * k) / a));
     if (err < bestErr) {
       bestErr = err;
       best = k;
     }
   }
-  const target = bpmB * best;
-  // A проходит последние X «медиа-секунд» со средней скоростью (1 + T/A)/2:
-  // подбираем момент старта так, чтобы A закончился ровно в конце склейки.
-  const avgRateA = (1 + target / bpmA) / 2;
+  const target = b * best;
+  const avgRateA = (1 + target / a) / 2;
   return {
     tempo: true,
     targetBpm: target,
-    bpmA,
+    bpmA: a,
     factorB: best,
-    triggerRemaining: duration * avgRateA,
+    triggerRemaining: Math.max(1, dur * avgRateA),
   };
 }
 

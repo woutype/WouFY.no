@@ -15,7 +15,7 @@ import { TrackFile } from '../types';
 import { colors, type } from '../theme';
 import { CoverArt, Glass, PressableScale } from './ui';
 
-export const ROW_H = 64;
+export const ROW_H = 68;
 
 interface RowProps {
   track: TrackFile;

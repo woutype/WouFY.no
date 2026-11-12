@@ -29,6 +29,7 @@ interface Props {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
+// MiniProgress bar in mini-player
 const MiniProgress: React.FC<{ engine: AudioEngine; duration: number }> = ({ engine, duration }) => {
   const pos = usePosition(engine, 250);
   const ratio = duration > 0 ? clamp(pos / duration, 0, 1) : 0;
@@ -36,65 +37,6 @@ const MiniProgress: React.FC<{ engine: AudioEngine; duration: number }> = ({ eng
     <View style={styles.miniProgressTrack}>
       <View style={[styles.miniProgressFill, { width: `${ratio * 100}%` }]} />
     </View>
-  );
-};
-
-/** Вращающаяся обложка как виниловая пластинка */
-const SpinningArtwork: React.FC<{ uri?: string; size: number; isPlaying: boolean }> = ({ uri, size, isPlaying }) => {
-  const rot = useRef(new Animated.Value(0)).current;
-  const currentAngle = useRef(0);
-
-  useEffect(() => {
-    const id = rot.addListener(({ value }) => {
-      currentAngle.current = value;
-    });
-    return () => rot.removeListener(id);
-  }, [rot]);
-
-  useEffect(() => {
-    let anim: Animated.CompositeAnimation | null = null;
-    let active = true;
-
-    if (isPlaying) {
-      const step = () => {
-        if (!active) return;
-        const start = currentAngle.current % 1;
-        rot.setValue(start);
-        currentAngle.current = start;
-        const remaining = 1 - start;
-        anim = Animated.timing(rot, {
-          toValue: 1,
-          duration: Math.max(100, remaining * 8000),
-          easing: Easing.linear,
-          useNativeDriver: true,
-        });
-        anim.start(({ finished }) => {
-          if (finished && active) {
-            currentAngle.current = 0;
-            rot.setValue(0);
-            step();
-          }
-        });
-      };
-      step();
-    } else {
-      rot.stopAnimation((val) => {
-        currentAngle.current = val;
-      });
-    }
-
-    return () => {
-      active = false;
-      rot.stopAnimation();
-    };
-  }, [isPlaying, rot]);
-
-  const spin = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-
-  return (
-    <Animated.View style={{ width: size, height: size, borderRadius: size / 2, overflow: 'hidden', transform: [{ rotate: spin }] }}>
-      <CoverArt uri={uri} size={size} radius={size / 2} />
-    </Animated.View>
   );
 };
 
@@ -132,6 +74,55 @@ export const NowPlayingCard: React.FC<Props> = ({
     return () => e.removeListener(id);
   }, [e]);
 
+  // Непрерывное вращение обложки в мини-плеере (как винил)
+  const rotAnim = useRef(new Animated.Value(0)).current;
+  const currentAngle = useRef(0);
+
+  useEffect(() => {
+    const id = rotAnim.addListener(({ value }) => {
+      currentAngle.current = value;
+    });
+    return () => rotAnim.removeListener(id);
+  }, [rotAnim]);
+
+  useEffect(() => {
+    let anim: Animated.CompositeAnimation | null = null;
+    let active = true;
+
+    if (state.isPlaying) {
+      const step = () => {
+        if (!active) return;
+        const start = currentAngle.current % 1;
+        rotAnim.setValue(start);
+        currentAngle.current = start;
+        const remaining = 1 - start;
+        anim = Animated.timing(rotAnim, {
+          toValue: 1,
+          duration: Math.max(100, remaining * 8000),
+          easing: Easing.linear,
+          useNativeDriver: true,
+        });
+        anim.start(({ finished }) => {
+          if (finished && active) {
+            currentAngle.current = 0;
+            rotAnim.setValue(0);
+            step();
+          }
+        });
+      };
+      step();
+    } else {
+      rotAnim.stopAnimation((val) => {
+        currentAngle.current = val;
+      });
+    }
+
+    return () => {
+      active = false;
+      rotAnim.stopAnimation();
+    };
+  }, [state.isPlaying, rotAnim]);
+
   const makePan = (condition: (dx: number, dy: number) => boolean) =>
     PanResponder.create({
       onMoveShouldSetPanResponder: (_, g) => condition(g.dx, g.dy),
@@ -162,6 +153,19 @@ export const NowPlayingCard: React.FC<Props> = ({
   const fullOpacity = e.interpolate({ inputRange: [0.55, 1], outputRange: [0, 1], extrapolate: 'clamp' });
   const heroOpacity = e.interpolate({ inputRange: [0, 0.94, 1], outputRange: [1, 1, 0], extrapolate: 'clamp' });
   const carouselOpacity = e.interpolate({ inputRange: [0, 0.94, 1], outputRange: [0, 0, 1], extrapolate: 'clamp' });
+
+  // Вращается в мини-плеере, выпрямляется при раскрытии
+  const spinFactor = e.interpolate({ inputRange: [0, 0.35, 1], outputRange: [1, 0, 0], extrapolate: 'clamp' });
+  const spinAngle = Animated.multiply(rotAnim, spinFactor).interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  // Круглая форма в мини-плеере (m.cover / 2) плавно превращается в 28px скругление в большом
+  const heroRadius = e.interpolate({
+    inputRange: [0, 1],
+    outputRange: [m.cover / 2, 28],
+  });
 
   const miniCx = m.miniMargin + 8 + m.thumb / 2;
   const miniCy = 8 + m.miniH / 2;
@@ -254,11 +258,9 @@ export const NowPlayingCard: React.FC<Props> = ({
       >
         <Glass radius={m.miniH / 2} intensity={60} style={{ flex: 1 }}>
           <Pressable style={styles.miniContent} onPress={() => onSettle(1)}>
-            {/* Вращающаяся обложка как vinyl */}
-            <View style={{ marginLeft: 4, marginRight: 2 }}>
-              <SpinningArtwork uri={track?.artworkUri} size={m.thumb - 2} isPlaying={state.isPlaying} />
-            </View>
-            <View style={{ flex: 1, marginLeft: 6 }}>
+            {/* Слот под виниловую обложку (сама обложка перетекает через shared element) */}
+            <View style={{ width: m.thumb, height: m.thumb, marginLeft: 2, marginRight: 6 }} />
+            <View style={{ flex: 1 }}>
               <Text style={styles.miniTitle} numberOfLines={1}>
                 {track?.title ?? 'Нет треков'}
               </Text>
@@ -286,7 +288,7 @@ export const NowPlayingCard: React.FC<Props> = ({
         </Glass>
       </Animated.View>
 
-      {/* Миниатюра → большая обложка (shared element) */}
+      {/* Единственная обложка (shared element): в мини-плеере круглая и крутится, плавно растёт и превращается в квадратную */}
       <Animated.View
         pointerEvents="none"
         style={[
@@ -296,12 +298,19 @@ export const NowPlayingCard: React.FC<Props> = ({
             left: (m.W - m.cover) / 2,
             width: m.cover,
             height: m.cover,
+            borderRadius: heroRadius,
+            overflow: 'hidden',
             opacity: heroOpacity,
-            transform: [{ translateX: heroX }, { translateY: heroY }, { scale: heroScale }],
+            transform: [
+              { translateX: heroX },
+              { translateY: heroY },
+              { scale: heroScale },
+              { rotate: spinAngle },
+            ],
           },
         ]}
       >
-        <CoverArt uri={track?.artworkUri} size={m.cover} radius={28} />
+        <CoverArt uri={track?.artworkUri} size={m.cover} radius={0} />
       </Animated.View>
     </Animated.View>
   );
