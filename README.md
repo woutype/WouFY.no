@@ -1,25 +1,24 @@
-# woufy 🎵
+# Woufy 🎵
 
-An autonomous, 100% offline iOS audio player with a Liquid Glass dark aesthetic, built with React Native and Expo SDK 58.
+Офлайн-плеер для iOS (Expo SDK 58): монохромный минималистичный интерфейс с мягким «жидким стеклом».
 
-## ✨ Features
+## Музыка
+Приложение само создаёт папку **Music** (Файлы → На iPhone → Woufy → Music). Кладите туда файлы или целые папки
+(mp3, m4a, aac, wav, flac, aiff) — сканируется всё вложенное. При возврате в приложение библиотека обновляется сама,
+либо потяните список очереди вниз.
+> В Expo Go папка недоступна из «Файлов» (песочница Expo Go) — работает в собранном .ipa / dev-билде.
 
-- **100% Offline Playback:** Scans and plays audio files (`.mp3`, `.wav`) directly from the app's local Documents folder (accessible via the iOS "Files" app).
-- **Background Playback & Lock Screen:** Full lock screen controls with album artwork and iOS Now Playing info center integration.
-- **In-Memory ID3 Parser:** Extracts title, artist, album art, and synchronized lyrics directly from audio tags in memory.
-- **Dynamic Waveform Visualizer:** 60 FPS real-time PCM audio spectrum analyzer mask overlaid on album artwork.
-- **Liquid Glass Dark UI:** Glassmorphism design with ambient neon glow, blur views, and fully rounded capsules.
-- **Gesture-Driven Navigation:**
-  - Swipe down on artwork to open the Queue.
-  - Interactive rotary bottom slider to transition between Lyrics and Queue.
-  - 1:1 finger tracking dismiss and pull-up mini-player expansion.
-  - Smooth card-stack transitions.
-- **DJ Crossfade & Transitions:** Configurable 1–15s track crossfade, volume fade in/out, and tempo transitions.
-- **Synchronized Lyrics:** Karaoke-style scrolling lyrics with tap-to-seek functionality.
+## Тексты песен
+Приоритет источников: SYLT (в тегах) → `.lrc` рядом с треком (то же имя) → LRC-метки в USLT → обычный текст (приблизительно).
+Для обычного текста: Текст → «Разметить точно» → жмите «Метка» в начале каждой строки; результат сохранится в `.lrc`.
 
-## 🚀 Getting Started
+## DJ-склейка
+За X секунд до конца стартует следующий трек (громкость 0), одновременно A затухает, B нарастает (equal-power).
+Подгон темпа: общий BPM плавно идёт от BPM трека A к BPM трека B (×½ / ×2 при кратном темпе); B стартует с темпа A и сходится к своему.
+BPM берётся: вручную → тег TBPM → автоопределение (беззвучный «разведчик» анализирует фрагмент следующих треков).
 
+## Запуск
 ```bash
-# Start development server
+npm install
 npx expo start -c
 ```

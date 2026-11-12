@@ -1,175 +1,141 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { parseID3Tags } from './id3Parser';
-
-export interface TrackFile {
-  id: string;
-  uri: string;
-  filename: string;
-  title: string;
-  artist?: string;
-  album?: string;
-  artworkUri?: string;
-  artworkFileUri?: string;
-  lyrics?: string;
-  size?: number;
-  extension: 'mp3' | 'wav';
-}
-
-const SUPPORTED_EXTENSIONS = /\.(mp3|wav)$/i;
-
-/**
- * Recursively scans a directory and returns a flat list of audio tracks (.mp3 and .wav).
- * Perfect for dropped folders like "MusicHub" with tracks inside.
- */
-export async function scanAudioFiles(
-  directoryUri?: string,
-  autoCreateDemoIfEmpty = true
-): Promise<TrackFile[]> {
-  const rootDir = directoryUri || FileSystem.documentDirectory;
-  if (!rootDir) {
-    return [];
-  }
-
-  if (autoCreateDemoIfEmpty && !directoryUri) {
-    try {
-      await copySampleTrackToDocuments();
-    } catch (_) {}
-  }
-
-  const results: TrackFile[] = [];
-
-  async function traverse(currentDir: string) {
-    try {
-      const items = await FileSystem.readDirectoryAsync(currentDir);
-
-      for (const item of items) {
-        // Skip hidden files/directories (like .DS_Store or .trash)
-        if (item.startsWith('.')) continue;
-
-        const itemUri = currentDir.endsWith('/') ? `${currentDir}${item}` : `${currentDir}/${item}`;
-        const info = await FileSystem.getInfoAsync(itemUri);
-
-        if (!info.exists) continue;
-
-        if (info.isDirectory) {
-          // Recursively dive into folders (like MusicHub)
-          await traverse(itemUri);
-        } else if (SUPPORTED_EXTENSIONS.test(item)) {
-          const extMatch = item.match(/\.(mp3|wav)$/i);
-          const extension = (extMatch ? extMatch[1].toLowerCase() : 'mp3') as 'mp3' | 'wav';
-          let title = item.replace(/\.[^/.]+$/, '');
-          let artist: string | undefined;
-          let album: string | undefined;
-          let artworkUri: string | undefined;
-          let artworkFileUri: string | undefined;
-          let lyrics: string | undefined;
-
-          // Parse ID3 tags for MP3 files
-          if (extension === 'mp3') {
-            const meta = await parseID3Tags(itemUri);
-            if (meta.title) title = meta.title;
-            if (meta.artist) artist = meta.artist;
-            if (meta.album) album = meta.album;
-            if (meta.artworkUri) artworkUri = meta.artworkUri;
-            if (meta.artworkFileUri) artworkFileUri = meta.artworkFileUri;
-            if (meta.lyrics) lyrics = meta.lyrics;
-          }
-
-          results.push({
-            id: itemUri,
-            uri: itemUri,
-            filename: item,
-            title,
-            artist: artist || 'Неизвестный исполнитель',
-            album,
-            artworkUri,
-            artworkFileUri,
-            lyrics,
-            size: info.size,
-            extension,
-          });
-        }
-      }
-    } catch (err) {
-      console.warn(`[fileScanner] Failed to read directory ${currentDir}:`, err);
-    }
-  }
-
-  await traverse(rootDir);
-
-  // If no audio files exist at all and autoCreate is enabled, copy demo track and scan again
-  if (results.length === 0 && autoCreateDemoIfEmpty && !directoryUri) {
-    try {
-      await copySampleTrackToDocuments();
-      await traverse(rootDir);
-    } catch (e) {
-      console.warn('[fileScanner] Could not auto-generate demo track:', e);
-    }
-  }
-
-  return results;
-}
-
 import { Asset } from 'expo-asset';
+import { parseID3Tags } from './id3Parser';
+import { getState, patchState } from './library';
+import { AudioExtension, TrackFile } from '../types';
+
+/** Папка, в которую пользователь кладёт музыку (видна в Файлах → На iPhone → Woufy → Music) */
+export const MUSIC_DIR_NAME = 'Music';
+const AUDIO_RE = /\.(mp3|m4a|aac|wav|flac|aiff?)$/i;
+
+const docDir = () => FileSystem.documentDirectory ?? '';
+export const musicDir = () => `${docDir()}${MUSIC_DIR_NAME}/`;
 
 /**
- * Copies the bundled sample tracks (NEXTIME - ТАЗОМ.mp3 and NEXTIME - КИС Ю.mp3) into documents directory for immediate live testing with artwork, lyrics, and DJ transitions.
+ * Создаёт собственные папки приложения. Файл-подсказка в корне Documents гарантирует,
+ * что iOS покажет папку Woufy в приложении «Файлы» даже если музыки ещё нет.
  */
-export async function copySampleTrackToDocuments(): Promise<string> {
-  const targetDir = FileSystem.documentDirectory;
-  if (!targetDir) throw new Error('Document directory unavailable');
-
+export async function ensureAppFolders(): Promise<void> {
   try {
-    // Track 1: NEXTIME - ТАЗОМ.mp3
-    const destUri1 = `${targetDir}NEXTIME - ТАЗОМ.mp3`;
-    const info1 = await FileSystem.getInfoAsync(destUri1);
-    if (!info1.exists) {
-      const asset1 = Asset.fromModule(require('../../assets/sample.mp3'));
-      await asset1.downloadAsync();
-      if (asset1.localUri) {
-        await FileSystem.copyAsync({
-          from: asset1.localUri,
-          to: destUri1,
-        });
-      }
-    }
+    const dir = musicDir();
+    const info = await FileSystem.getInfoAsync(dir);
+    if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
 
-    // Track 2: NEXTIME - КИС Ю.mp3 (for DJ crossfade testing)
-    const destUri2 = `${targetDir}NEXTIME - КИС Ю.mp3`;
-    const info2 = await FileSystem.getInfoAsync(destUri2);
-    if (!info2.exists) {
-      const asset2 = Asset.fromModule(require('../../assets/sample2.mp3'));
-      await asset2.downloadAsync();
-      if (asset2.localUri) {
-        await FileSystem.copyAsync({
-          from: asset2.localUri,
-          to: destUri2,
-        });
-      }
+    const hint = `${docDir()}Положи музыку в папку Music.txt`;
+    const hintInfo = await FileSystem.getInfoAsync(hint);
+    if (!hintInfo.exists) {
+      await FileSystem.writeAsStringAsync(
+        hint,
+        'Woufy\n\nПоложи свою музыку (mp3, m4a, wav, flac) или целую папку с музыкой в папку Music рядом с этим файлом.\n' +
+          'Чтобы текст песни был синхронизирован, положи рядом с треком файл .lrc с тем же именем.\n'
+      );
     }
-
-    return destUri1;
   } catch (e) {
-    console.warn('[fileScanner] Could not copy sample tracks:', e);
+    console.warn('[fileScanner] ensureAppFolders failed:', e);
   }
-  return createDemoAudioFile();
 }
 
-/**
- * Creates a tiny demo .wav audio file in the documents directory for instant local testing.
- */
-export async function createDemoAudioFile(): Promise<string> {
-  const targetDir = FileSystem.documentDirectory;
-  if (!targetDir) throw new Error('Document directory unavailable');
-
-  // A tiny 1-second 8000Hz mono 8-bit PCM WAV (silence/click) in Base64
-  const wavBase64 =
-    'UklGRj4AAABXQVZFZm10IBAAAAABAAEAQB8AAEB8AAABAAgAZGF0YRoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-
-  const demoPath = `${targetDir}woufy-demo-test.wav`;
-  await FileSystem.writeAsStringAsync(demoPath, wavBase64, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-  return demoPath;
+/** Копирует демо-треки при первом запуске, только если библиотека пуста */
+async function seedSamples(): Promise<void> {
+  const dest = musicDir();
+  const files: [any, string][] = [
+    [require('../../assets/sample.mp3'), 'NEXTIME - ТАЗОМ.mp3'],
+    [require('../../assets/sample2.mp3'), 'NEXTIME - КИС Ю.mp3'],
+  ];
+  for (const [mod, name] of files) {
+    try {
+      const target = `${dest}${name}`;
+      const info = await FileSystem.getInfoAsync(target);
+      if (info.exists) continue;
+      const asset = Asset.fromModule(mod);
+      await asset.downloadAsync();
+      if (asset.localUri) await FileSystem.copyAsync({ from: asset.localUri, to: target });
+    } catch (e) {
+      console.warn('[fileScanner] seed failed:', e);
+    }
+  }
 }
 
+const metaCache = new Map<string, Awaited<ReturnType<typeof parseID3Tags>>>();
+
+async function collect(dir: string, out: { uri: string; name: string; size?: number }[], lrc: Set<string>) {
+  let items: string[] = [];
+  try {
+    items = await FileSystem.readDirectoryAsync(dir);
+  } catch (e) {
+    console.warn(`[fileScanner] cannot read ${dir}:`, e);
+    return;
+  }
+  for (const item of items) {
+    if (item.startsWith('.')) continue;
+    const uri = `${dir}${item}`;
+    try {
+      const info = await FileSystem.getInfoAsync(uri);
+      if (!info.exists) continue;
+      if (info.isDirectory) {
+        await collect(`${uri}/`, out, lrc);
+      } else if (AUDIO_RE.test(item)) {
+        out.push({ uri, name: item, size: info.size });
+      } else if (/\.lrc$/i.test(item)) {
+        lrc.add(uri);
+      }
+    } catch {
+      /* пропускаем проблемный файл */
+    }
+  }
+}
+
+/** Рекурсивно сканирует Documents (в том числе вложенные папки, например «MusicHub») */
+export async function scanLibrary(): Promise<TrackFile[]> {
+  await ensureAppFolders();
+
+  let found: { uri: string; name: string; size?: number }[] = [];
+  let lrcSet = new Set<string>();
+  await collect(docDir(), found, lrcSet);
+
+  if (found.length === 0 && !getState().samplesSeeded) {
+    await seedSamples();
+    patchState({ samplesSeeded: true });
+    found = [];
+    lrcSet = new Set<string>();
+    await collect(docDir(), found, lrcSet);
+  }
+
+  const root = docDir();
+  const tracks: TrackFile[] = [];
+
+  for (const f of found) {
+    const id = f.uri.startsWith(root) ? f.uri.slice(root.length) : f.uri;
+    const extMatch = f.name.match(/\.([a-z0-9]+)$/i);
+    let ext = (extMatch ? extMatch[1].toLowerCase() : 'mp3') as AudioExtension | 'aif';
+    if (ext === ('aif' as string)) ext = 'aiff';
+
+    const cacheKey = `${id}|${f.size ?? 0}`;
+    let meta = metaCache.get(cacheKey);
+    if (!meta) {
+      meta = ext === 'mp3' ? await parseID3Tags(f.uri, cacheKey) : {};
+      metaCache.set(cacheKey, meta);
+    }
+
+    const lrcUri = f.uri.replace(/\.[^/.]+$/, '.lrc');
+
+    tracks.push({
+      id,
+      uri: f.uri,
+      filename: f.name,
+      title: meta.title || f.name.replace(/\.[^/.]+$/, ''),
+      artist: meta.artist || 'Неизвестный исполнитель',
+      album: meta.album,
+      artworkUri: meta.artworkUri,
+      lyrics: meta.lyrics,
+      syncedLyrics: meta.syncedLyrics,
+      lrcUri: lrcSet.has(lrcUri) ? lrcUri : undefined,
+      bpmTag: meta.bpm,
+      size: f.size,
+      extension: ext as AudioExtension,
+    });
+  }
+
+  tracks.sort((a, b) => a.id.localeCompare(b.id, 'ru'));
+  return tracks;
+}

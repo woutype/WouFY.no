@@ -1,12 +1,12 @@
 {
   "expo": {
-    "name": "woufy",
+    "name": "Woufy",
     "slug": "woufy",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#0d0914",
+    "backgroundColor": "#0A0A0B",
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.woufy.player",
@@ -15,13 +15,14 @@
         "LSSupportsOpeningDocumentsInPlace": true,
         "UIBackgroundModes": [
           "audio"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.woufy.player",
       "adaptiveIcon": {
-        "backgroundColor": "#0d0914",
+        "backgroundColor": "#0A0A0B",
         "foregroundImage": "./assets/icon.png"
       }
     },

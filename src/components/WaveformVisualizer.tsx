@@ -1,167 +1,164 @@
 import React, { useEffect, useRef } from 'react';
-import { View, StyleSheet, Animated } from 'react-native';
-import { useAudioSampleListener } from 'expo-audio';
+import { Animated, StyleSheet, View } from 'react-native';
 import type { AudioPlayer } from 'expo-audio';
 
-interface WaveformVisualizerProps {
-  player: AudioPlayer | null;
-  isPlaying: boolean;
-  barCount?: number;
-}
+const BARS = 28;
+const N = 1024; // размер окна FFT
+const MIN_HZ = 50;
+const MAX_HZ = 12000;
 
-export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
-  player,
-  isPlaying,
-  barCount = 28,
-}) => {
-  // Create an animated value for each bar
-  const animatedValues = useRef(
-    Array.from({ length: barCount }, () => new Animated.Value(0.15))
-  ).current;
-
-  // Smoothing buffers
-  const currentLevels = useRef<number[]>(new Array(barCount).fill(0.15)).current;
-  const lastSampleTime = useRef(Date.now());
-
-  // Real-time audio PCM sample listener from expo-audio
-  if (player) {
-    try {
-      useAudioSampleListener(player, (sample) => {
-        if (!isPlaying || !sample?.channels?.[0]?.frames) return;
-
-        const frames = sample.channels[0].frames;
-        if (frames.length === 0) return;
-
-        lastSampleTime.current = Date.now();
-
-        // 1. Compute Bass Energy (Left side)
-        // Bass is low-frequency high-amplitude pressure
-        let bassSum = 0;
-        const bassCount = Math.min(frames.length, 128);
-        for (let i = 0; i < bassCount; i++) {
-          bassSum += Math.abs(frames[i]);
-        }
-        const bassLevel = Math.min(1.0, (bassSum / bassCount) * 2.8);
-
-        // 2. Compute Treble Energy (Right side)
-        // High frequencies oscillate rapidly -> large sample-to-sample delta
-        let trebleDelta = 0;
-        for (let i = 1; i < frames.length; i += 2) {
-          trebleDelta += Math.abs(frames[i] - frames[i - 1]);
-        }
-        const trebleLevel = Math.min(1.0, (trebleDelta / (frames.length * 0.5)) * 3.5);
-
-        // 3. Compute Midrange Energy (Center)
-        let midSum = 0;
-        for (let i = Math.floor(frames.length * 0.25); i < Math.floor(frames.length * 0.75); i += 2) {
-          midSum += Math.abs(frames[i]);
-        }
-        const midLevel = Math.min(1.0, (midSum / (frames.length * 0.25)) * 2.4);
-
-        // Map energy across bars: Left = Bass, Center = Mid, Right = Treble
-        for (let i = 0; i < barCount; i++) {
-          const ratio = i / barCount;
-          let target = 0.15;
-
-          if (ratio < 0.35) {
-            // Bass domain (kick, 808, sub)
-            const subRatio = ratio / 0.35;
-            target = bassLevel * (1.1 - subRatio * 0.3);
-          } else if (ratio < 0.7) {
-            // Midrange domain (vocals, snares)
-            target = midLevel * 0.95;
-          } else {
-            // Treble domain (hi-hats, cymbals, air)
-            const subRatio = (ratio - 0.7) / 0.3;
-            target = trebleLevel * (0.8 + subRatio * 0.4);
-          }
-
-          // Add slight jitter variance per bar so it feels organic like Dynamic Island
-          const variance = 0.85 + 0.3 * Math.sin(i * 1.5 + Date.now() * 0.01);
-          target = Math.max(0.12, Math.min(0.98, target * variance));
-
-          // Smooth interpolation
-          currentLevels[i] = currentLevels[i] * 0.4 + target * 0.6;
-          animatedValues[i].setValue(currentLevels[i]);
-        }
-      });
-    } catch (e) {
-      // Audio sampling listener fallback
+/** Радикс-2 FFT на месте */
+function fft(re: Float64Array, im: Float64Array) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
     }
   }
-
-  // Fallback gentle wave animation when paused or when samples are idle
-  useEffect(() => {
-    if (!isPlaying) {
-      animatedValues.forEach((val, idx) => {
-        const restingHeight = 0.15 + 0.18 * Math.sin((idx / barCount) * Math.PI);
-        Animated.timing(val, {
-          toValue: restingHeight,
-          duration: 350,
-          useNativeDriver: false,
-        }).start();
-      });
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k;
+        const b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci;
+        const ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr;
+        im[b] = im[a] - ti;
+        re[a] += tr;
+        im[a] += ti;
+        const ncr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = ncr;
+      }
     }
-  }, [isPlaying, barCount, animatedValues]);
+  }
+}
 
+interface Props {
+  player: AudioPlayer | null;
+  isPlaying: boolean;
+  size: number;
+  radius: number;
+}
+
+/** Настоящий спектр (FFT) поверх обложки. Семплирование включается только пока визуализатор на экране. */
+export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, radius }) => {
+  const bars = useRef(Array.from({ length: BARS }, () => new Animated.Value(0.08))).current;
+  const levels = useRef(new Float32Array(BARS).fill(0.08)).current;
+  const playing = useRef(isPlaying);
+  playing.current = isPlaying;
+
+  useEffect(() => {
+    if (!player) return;
+    let sub: { remove: () => void } | null = null;
+    const ring = new Float64Array(N);
+    const win = new Float64Array(N);
+    for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); // окно Хэннинга
+    const re = new Float64Array(N);
+    const im = new Float64Array(N);
+    let filled = 0;
+    let last = 0;
+    const sr = 44100;
+    const edges: number[] = [];
+    for (let i = 0; i <= BARS; i++) edges.push(MIN_HZ * Math.pow(MAX_HZ / MIN_HZ, i / BARS));
+
+    try {
+      if (!player.isAudioSamplingSupported) return;
+      player.setAudioSamplingEnabled(true);
+      sub = player.addListener('audioSampleUpdate', (s) => {
+        const frames = s.channels?.[0]?.frames;
+        if (!frames || frames.length === 0 || !playing.current) return;
+        // сдвигаем кольцо и дописываем новые фреймы
+        const take = Math.min(frames.length, N);
+        ring.copyWithin(0, take);
+        for (let i = 0; i < take; i++) ring[N - take + i] = frames[frames.length - take + i];
+        filled = Math.min(N, filled + take);
+        const now = Date.now();
+        if (filled < N || now - last < 33) return;
+        last = now;
+
+        for (let i = 0; i < N; i++) {
+          re[i] = ring[i] * win[i];
+          im[i] = 0;
+        }
+        fft(re, im);
+
+        for (let b = 0; b < BARS; b++) {
+          const k0 = Math.max(1, Math.floor((edges[b] * N) / sr));
+          const k1 = Math.max(k0 + 1, Math.ceil((edges[b + 1] * N) / sr));
+          let peak = 0;
+          for (let k = k0; k < k1 && k < N / 2; k++) {
+            const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]) / (N / 4);
+            if (mag > peak) peak = mag;
+          }
+          const db = 20 * Math.log10(peak + 1e-6);
+          const target = Math.min(1, Math.max(0.06, (db + 62) / 52));
+          // быстрая атака, медленное затухание
+          levels[b] = target > levels[b] ? levels[b] * 0.35 + target * 0.65 : levels[b] * 0.82 + target * 0.18;
+          bars[b].setValue(levels[b]);
+        }
+      });
+    } catch {
+      /* семплирование недоступно на этой платформе */
+    }
+    return () => {
+      sub?.remove();
+      try {
+        player.setAudioSamplingEnabled(false);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [player, bars, levels]);
+
+  // при паузе мягко опускаем столбики
+  useEffect(() => {
+    if (isPlaying) return;
+    bars.forEach((v, i) => {
+      levels[i] = 0.08;
+      Animated.timing(v, { toValue: 0.08, duration: 300, useNativeDriver: true }).start();
+    });
+  }, [isPlaying, bars, levels]);
+
+  const barH = size * 0.5;
   return (
-    <View style={styles.container} pointerEvents="none">
-      <View style={styles.barsContainer}>
-        {animatedValues.map((animVal, i) => {
-          const isBass = i < barCount * 0.35;
-          const isMid = i >= barCount * 0.35 && i < barCount * 0.7;
-
-          const barColor = isBass ? '#c084fc' : isMid ? '#d8b4fe' : '#e9d5ff';
-
-          return (
-            <Animated.View
-              key={i}
-              style={[
-                styles.bar,
-                {
-                  backgroundColor: barColor,
-                  height: animVal.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: ['0%', '100%'],
-                  }),
-                  opacity: animVal.interpolate({
-                    inputRange: [0.1, 0.9],
-                    outputRange: [0.6, 1],
-                  }),
-                },
-              ]}
-            />
-          );
-        })}
+    <View style={[styles.wrap, { borderRadius: radius }]} pointerEvents="none">
+      <View style={[styles.row, { height: barH }]}>
+        {bars.map((v, i) => (
+          <Animated.View
+            key={i}
+            style={[styles.bar, { height: barH, transform: [{ scaleY: v }] }]}
+          />
+        ))}
       </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
+  wrap: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(13, 8, 20, 0.65)',
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    zIndex: 10,
+    backgroundColor: 'rgba(10,10,11,0.62)',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 22,
+    paddingBottom: 26,
+    overflow: 'hidden',
   },
-  barsContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    height: 120,
-  },
+  row: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
   bar: {
     flex: 1,
     marginHorizontal: 1.5,
-    borderRadius: 4,
-    shadowColor: '#a855f7',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    transformOrigin: 'bottom',
   },
 });

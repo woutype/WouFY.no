@@ -2,16 +2,13 @@ import { setAudioModeAsync } from 'expo-audio';
 
 let isAudioConfigured = false;
 
-/**
- * Configures the iOS audio session for background playback and silent mode overriding.
- */
+/** Фоновое воспроизведение и работа при выключенном беззвучном режиме */
 export async function configureAudioSession(): Promise<void> {
   if (isAudioConfigured) return;
-
   try {
     await setAudioModeAsync({
       playsInSilentMode: true,
-      interruptionMode: 'doNotMixPersistent',
+      interruptionMode: 'doNotMix',
       shouldPlayInBackground: true,
       allowsRecording: false,
     });

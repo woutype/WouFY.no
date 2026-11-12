@@ -1,281 +1,234 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import {
-  StyleSheet,
-  View,
-  SafeAreaView,
-  ActivityIndicator,
-  Text,
-  Animated,
-  Dimensions,
-} from 'react-native';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { ActivityIndicator, Alert, Animated, AppState, Platform, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import * as Haptics from 'expo-haptics';
-import { scanAudioFiles, TrackFile } from './src/services/fileScanner';
-import { useAudioController } from './src/hooks/useAudioController';
-import { PlayerView } from './src/components/PlayerView';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { scanLibrary } from './src/services/fileScanner';
+import { bpmService } from './src/services/bpm';
+import { flushState, getState, loadState, patchState } from './src/services/library';
+import { useAudioEngine, useEngineState } from './src/hooks/useAudioController';
+import { useMetrics } from './src/layout';
+import { DEFAULT_DJ, DJSettings, TrackFile } from './src/types';
+import { colors } from './src/theme';
+import { AmbientBackground } from './src/components/ui';
+import { NowPlayingCard } from './src/components/NowPlayingCard';
 import { QueueView } from './src/components/QueueView';
 import { LyricsView } from './src/components/LyricsView';
-import { SettingsModal, DJSettings } from './src/components/SettingsModal';
+import { SheetPanel } from './src/components/SheetPanel';
+import { SettingsModal } from './src/components/SettingsModal';
 
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+function Root() {
+  const m = useMetrics();
+  const engine = useAudioEngine();
+  const state = useEngineState(engine);
 
-export default function App() {
-  const [tracks, setTracks] = useState<TrackFile[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  // Active view: 'player' | 'queue' | 'lyrics'
-  const [activeSheet, setActiveSheet] = useState<'none' | 'queue' | 'lyrics'>('none');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [ready, setReady] = useState(false);
+  const [libCount, setLibCount] = useState(0);
+  const [sheet, setSheet] = useState<'queue' | 'lyrics'>('queue');
+  const [expanded, setExpanded] = useState(true);
+  const [search, setSearch] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [dj, setDj] = useState<DJSettings>(DEFAULT_DJ);
+  const progress = useRef(new Animated.Value(1)).current;
 
-  // DJ Mix / Crossfade settings
-  const [djSettings, setDjSettings] = useState<DJSettings>({
-    crossfadeEnabled: false,
-    crossfadeDuration: 5,
-    bpmTransitionEnabled: false,
-    fadeVolumeEnabled: true,
-  });
+  // перерисовка при появлении нового BPM
+  useSyncExternalStore(bpmService.subscribe.bind(bpmService), () => JSON.stringify(getState().bpm ?? {}));
 
-  const {
-    player,
-    currentTrack,
-    currentIndex,
-    isPlaying,
-    currentTime,
-    duration,
-    volume,
-    setVolume,
-    playTrack,
-    togglePlayPause,
-    playNext,
-    playPrevious,
-    seek,
-  } = useAudioController(tracks);
-
-  // Smooth in-tree Sheet Slide Animation (0 = closed, 1 = open)
-  const sheetAnim = useRef(new Animated.Value(0)).current;
-
-  const openSheet = useCallback(
-    (sheet: 'queue' | 'lyrics') => {
-      setActiveSheet(sheet);
-      Animated.spring(sheetAnim, {
-        toValue: 1,
-        friction: 8,
-        tension: 65,
-        useNativeDriver: true,
-      }).start();
-    },
-    [sheetAnim]
-  );
-
-  const closeSheet = useCallback(() => {
-    Animated.timing(sheetAnim, {
-      toValue: 0,
-      duration: 220,
-      useNativeDriver: true,
-    }).start(() => {
-      setActiveSheet('none');
-    });
-  }, [sheetAnim]);
-
-  // Load local tracks
-  const loadTracks = useCallback(async () => {
-    setLoading(true);
+  /* ───────── загрузка библиотеки ───────── */
+  const rescan = useCallback(async () => {
     try {
-      const found = await scanAudioFiles();
-      setTracks(found);
+      const found: TrackFile[] = await scanLibrary();
+      bpmService.registerTags(found);
+      setLibCount(found.length);
+      const st = getState();
+      engine.setLibrary(found, st.order, st.lastTrackId);
     } catch (e) {
       console.error('Scan error:', e);
-    } finally {
-      setLoading(false);
     }
-  }, []);
+  }, [engine]);
 
   useEffect(() => {
-    loadTracks();
-  }, [loadTracks]);
+    engine.configure({
+      bpmLookup: (t) => bpmService.get(t.id),
+      onTrackChange: (cur, upcoming) => {
+        bpmService.request(cur, true);
+        upcoming.forEach((t) => bpmService.request(t));
+      },
+      onPersist: (s) => patchState(s),
+    });
+    (async () => {
+      const st = await loadState();
+      const settings = { ...DEFAULT_DJ, ...(st.dj ?? {}) };
+      setDj(settings);
+      engine.setDJ(settings);
+      if (st.volume !== undefined) engine.setVolume(st.volume);
+      if (st.repeat) engine.setRepeat(st.repeat);
+      await rescan();
+      if (st.shuffle) engine.setShuffle(true);
+      setReady(true);
+    })();
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') rescan(); // подхватываем файлы, добавленные через «Файлы»
+      else flushState();
+    });
+    return () => sub.remove();
+  }, [engine, rescan]);
 
-  // DJ Crossfade Engine: Volume fading & tempo adaptation
-  useEffect(() => {
-    if (!djSettings.crossfadeEnabled || !isPlaying || duration <= 0) return;
+  const updateDj = (s: DJSettings) => {
+    setDj(s);
+    engine.setDJ(s);
+    patchState({ dj: s });
+  };
 
-    const remaining = duration - currentTime;
-    if (remaining <= djSettings.crossfadeDuration && remaining > 0) {
-      if (djSettings.fadeVolumeEnabled) {
-        // Linear fade out towards track end
-        const fadeRatio = Math.max(0.1, remaining / djSettings.crossfadeDuration);
-        setVolume(fadeRatio);
-      }
-      if (djSettings.bpmTransitionEnabled && player) {
-        // Smooth tempo blend
-        try {
-          player.playbackRate = 1.04;
-        } catch (e) {}
-      }
-    } else if (remaining > djSettings.crossfadeDuration) {
-      // Restore normal volume & rate
-      if (volume < 1.0) setVolume(1.0);
-      if (player && player.playbackRate !== 1.0) {
-        try {
-          player.playbackRate = 1.0;
-        } catch (e) {}
-      }
-    }
-  }, [currentTime, duration, djSettings, isPlaying, player, setVolume, volume]);
+  /* ───────── карточка плеера ↔ вторичный экран ───────── */
+  const settle = useCallback(
+    (target: 0 | 1) => {
+      setExpanded(target === 1);
+      Animated.spring(progress, {
+        toValue: target,
+        useNativeDriver: true,
+        damping: 26,
+        stiffness: 230,
+        mass: 1,
+        overshootClamping: true,
+      }).start();
+    },
+    [progress]
+  );
 
-  // Point 7: Filter queue by artist
-  const handleArtistPress = useCallback(
+  const openSheet = useCallback(
+    (mode: 'queue' | 'lyrics') => {
+      setSheet(mode);
+      settle(0);
+    },
+    [settle]
+  );
+
+  const onArtistPress = useCallback(
     (artist: string) => {
-      setSearchQuery(artist);
+      setSearch(artist);
       openSheet('queue');
     },
     [openSheet]
   );
 
-  if (loading) {
+  /* ───────── BPM ───────── */
+  const track = state.queue[state.index];
+  const bpm = track ? bpmService.get(track.id) : undefined;
+  const bpmSource = track ? bpmService.sourceOf(track.id) : undefined;
+
+  const editBpm = useCallback(() => {
+    if (!track) return;
+    const apply = (txt?: string) => {
+      const v = parseFloat((txt ?? '').replace(',', '.'));
+      if (isFinite(v) && v >= 40 && v <= 240) bpmService.setManual(track.id, Math.round(v * 10) / 10);
+    };
+    if (Platform.OS === 'ios') {
+      Alert.prompt(
+        'BPM трека',
+        `${track.title}\nУкажите темп вручную. Он используется для подгона темпа при склейке.`,
+        [
+          { text: 'Сбросить', style: 'destructive', onPress: () => bpmService.setManual(track.id, null) },
+          { text: 'Отмена', style: 'cancel' },
+          { text: 'Сохранить', onPress: apply },
+        ],
+        'plain-text',
+        bpm ? String(Math.round(bpm)) : '',
+        'numeric'
+      );
+    } else {
+      Alert.alert('BPM трека', bpm ? `${Math.round(bpm)} BPM` : 'Определяется автоматически');
+    }
+  }, [track, bpm]);
+
+  if (!ready) {
     return (
-      <SafeAreaView style={styles.loadingContainer}>
+      <View style={styles.loading}>
         <StatusBar style="light" />
-        <ActivityIndicator size="large" color="#c084fc" />
-        <Text style={styles.loadingText}>Загрузка woufy...</Text>
-      </SafeAreaView>
+        <ActivityIndicator color={colors.text2} />
+        <Text style={styles.loadingText}>Загрузка библиотеки…</Text>
+      </View>
     );
   }
 
-  // Calculate slide translation for the sheet
-  const sheetTranslateY = sheetAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [SCREEN_HEIGHT, 0],
-  });
-
-  // Smooth card stack transformation: player scales down & dims when sheet is open
-  const playerScale = sheetAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 0.94],
-  });
-  const playerOpacity = sheetAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 0.55],
-  });
+  const sheetScale = progress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.95] });
+  const sheetOpacity = progress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.25] });
+  const bottomPad = m.miniArea + 12;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <View style={styles.root}>
       <StatusBar style="light" />
-      <View style={styles.container}>
-        {/* Main Persistent Player with Card Stack Animation */}
-        <Animated.View
-          style={[
-            styles.playerWrapper,
-            {
-              transform: [{ scale: playerScale }],
-              opacity: playerOpacity,
-            },
-          ]}
-        >
-          <PlayerView
-            player={player}
-            currentTrack={currentTrack}
-            isPlaying={isPlaying}
-            currentTime={currentTime}
-            duration={duration}
-            volume={volume}
-            onVolumeChange={setVolume}
-            onTogglePlayPause={togglePlayPause}
-            onNext={playNext}
-            onPrevious={playPrevious}
-            onSeek={seek}
-            onOpenQueue={() => openSheet('queue')}
-            onOpenLyrics={() => openSheet('lyrics')}
-            onOpenSettings={() => setShowSettings(true)}
-            onArtistPress={handleArtistPress}
-          />
-        </Animated.View>
 
-        {/* Smooth 1:1 In-Tree Sliding Sheet for Queue or Lyrics (No modal fighting) */}
-        {activeSheet !== 'none' && (
-          <Animated.View
-            style={[
-              styles.sheetOverlay,
-              {
-                transform: [{ translateY: sheetTranslateY }],
-              },
-            ]}
-          >
-            {activeSheet === 'queue' && (
-              <QueueView
-                tracks={tracks}
-                currentTrack={currentTrack}
-                currentIndex={currentIndex}
-                searchQuery={searchQuery}
-                onSearchChange={setSearchQuery}
-                isPlaying={isPlaying}
-                currentTime={currentTime}
-                duration={duration}
-                onSelectTrack={(idx) => {
-                  playTrack(idx);
-                }}
-                onTogglePlayPause={togglePlayPause}
-                onNext={playNext}
-                onPrevious={playPrevious}
-                onClose={closeSheet}
-              />
-            )}
+      {/* Вторичный экран (под карточкой плеера) */}
+      <Animated.View
+        style={[StyleSheet.absoluteFill, { opacity: sheetOpacity, transform: [{ scale: sheetScale }] }]}
+        pointerEvents={expanded ? 'none' : 'auto'}
+      >
+        <AmbientBackground uri={track?.artworkUri} />
+        <SheetPanel mode={sheet} onModeChange={setSheet} onClose={() => settle(1)} topInset={m.top}>
+          {sheet === 'queue' ? (
+            <QueueView
+              tracks={state.queue}
+              currentIndex={state.index}
+              isPlaying={state.isPlaying}
+              searchQuery={search}
+              onSearchChange={setSearch}
+              onPlay={(i) => engine.playIndex(i)}
+              onMove={(a, b) => engine.moveQueueItem(a, b)}
+              onRefresh={rescan}
+              bottomPad={bottomPad}
+            />
+          ) : (
+            <LyricsView
+              engine={engine}
+              track={track}
+              duration={state.duration}
+              isPlaying={state.isPlaying}
+              bottomPad={bottomPad}
+              onSaved={rescan}
+            />
+          )}
+        </SheetPanel>
+      </Animated.View>
 
-            {activeSheet === 'lyrics' && (
-              <LyricsView
-                currentTrack={currentTrack}
-                isPlaying={isPlaying}
-                currentTime={currentTime}
-                duration={duration}
-                onTogglePlayPause={togglePlayPause}
-                onNext={playNext}
-                onPrevious={playPrevious}
-                onSeek={seek}
-                onClose={closeSheet}
-              />
-            )}
-          </Animated.View>
-        )}
+      <NowPlayingCard
+        engine={engine}
+        state={state}
+        m={m}
+        progress={progress}
+        expanded={expanded}
+        onSettle={settle}
+        onOpenSheet={openSheet}
+        onOpenSettings={() => setShowSettings(true)}
+        onArtistPress={onArtistPress}
+        onEditBpm={editBpm}
+        bpm={bpm}
+        bpmSource={bpmSource}
+      />
 
-        {/* DJ Mix / Crossfade Settings Modal */}
-        <SettingsModal
-          visible={showSettings}
-          settings={djSettings}
-          onUpdateSettings={setDjSettings}
-          onClose={() => setShowSettings(false)}
-        />
-      </View>
-    </SafeAreaView>
+      <SettingsModal
+        visible={showSettings}
+        settings={dj}
+        onUpdateSettings={updateDj}
+        onClose={() => setShowSettings(false)}
+        trackCount={libCount}
+        onRescan={rescan}
+        bpmInfo={track ? { title: track.title, bpm, source: bpmSource } : undefined}
+        onEditBpm={editBpm}
+      />
+    </View>
+  );
+}
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <Root />
+    </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#0a0612',
-  },
-  container: {
-    flex: 1,
-    backgroundColor: '#0a0612',
-  },
-  playerWrapper: {
-    flex: 1,
-  },
-  loadingContainer: {
-    flex: 1,
-    backgroundColor: '#0a0612',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loadingText: {
-    color: '#c084fc',
-    marginTop: 14,
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  sheetOverlay: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#0e0717',
-    zIndex: 50,
-  },
+  root: { flex: 1, backgroundColor: colors.bg },
+  loading: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 12 },
+  loadingText: { color: colors.text2, fontSize: 14, fontWeight: '500' },
 });

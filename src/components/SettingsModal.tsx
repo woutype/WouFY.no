@@ -1,296 +1,181 @@
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Switch,
-  Modal,
-  PanResponder,
-  Animated,
-} from 'react-native';
+import { Animated, Modal, PanResponder, ScrollView, StyleSheet, Switch, Text, View, Pressable } from 'react-native';
 import { BlurView } from 'expo-blur';
 import Slider from '@react-native-community/slider';
-import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { DJSettings } from '../types';
+import { colors, type } from '../theme';
+import { Glass, PressableScale } from './ui';
 
-export interface DJSettings {
-  crossfadeEnabled: boolean;
-  crossfadeDuration: number; // 1 - 15 seconds
-  bpmTransitionEnabled: boolean;
-  fadeVolumeEnabled: boolean;
-}
-
-interface SettingsModalProps {
+interface Props {
   visible: boolean;
   settings: DJSettings;
-  onUpdateSettings: (newSettings: DJSettings) => void;
+  onUpdateSettings: (s: DJSettings) => void;
   onClose: () => void;
+  trackCount: number;
+  onRescan: () => void;
+  bpmInfo?: { title: string; bpm?: number; source?: 'manual' | 'tag' | 'auto' };
+  onEditBpm: () => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({
+const SOURCE_LABEL = { manual: 'вручную', tag: 'из тега', auto: 'определён автоматически' } as const;
+
+export const SettingsModal: React.FC<Props> = ({
   visible,
   settings,
   onUpdateSettings,
   onClose,
+  trackCount,
+  onRescan,
+  bpmInfo,
+  onEditBpm,
 }) => {
-  const [shouldRender, setShouldRender] = useState(visible);
-  const translateY = useRef(new Animated.Value(500)).current;
-  const backdropOpacity = useRef(new Animated.Value(0)).current;
+  const [render, setRender] = useState(visible);
+  const y = useRef(new Animated.Value(700)).current;
+  const fade = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (visible) {
-      setShouldRender(true);
-      translateY.setValue(500);
-      backdropOpacity.setValue(0);
-
+      setRender(true);
+      y.setValue(700);
       Animated.parallel([
-        Animated.spring(translateY, {
-          toValue: 0,
-          tension: 65,
-          friction: 9,
-          useNativeDriver: true,
-        }),
-        Animated.timing(backdropOpacity, {
-          toValue: 1,
-          duration: 240,
-          useNativeDriver: true,
-        }),
+        Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 24, stiffness: 220, mass: 1, overshootClamping: true }),
+        Animated.timing(fade, { toValue: 1, duration: 220, useNativeDriver: true }),
       ]).start();
-    } else if (shouldRender) {
-      handleClose();
+    } else if (render) {
+      Animated.parallel([
+        Animated.timing(y, { toValue: 700, duration: 220, useNativeDriver: true }),
+        Animated.timing(fade, { toValue: 0, duration: 200, useNativeDriver: true }),
+      ]).start(() => setRender(false));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  const handleClose = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    Animated.parallel([
-      Animated.timing(translateY, {
-        toValue: 500,
-        duration: 220,
-        useNativeDriver: true,
-      }),
-      Animated.timing(backdropOpacity, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }),
-    ]).start(() => {
-      setShouldRender(false);
-      onClose();
-    });
-  };
-
-  // Pull-down gesture on grabber for 1:1 dismissal
-  const panResponder = useRef(
+  const pan = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (_, gestureState) => {
-        return gestureState.dy > 6 && Math.abs(gestureState.dx) < 20;
-      },
-      onPanResponderMove: (_, gestureState) => {
-        if (gestureState.dy > 0) {
-          translateY.setValue(gestureState.dy);
-        }
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dy > 70 || gestureState.vy > 0.5) {
-          handleClose();
-        } else {
-          Animated.spring(translateY, {
-            toValue: 0,
-            tension: 70,
-            friction: 8,
-            useNativeDriver: true,
-          }).start();
-        }
+      onMoveShouldSetPanResponder: (_, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
+      onPanResponderMove: (_, g) => g.dy > 0 && y.setValue(g.dy),
+      onPanResponderRelease: (_, g) => {
+        if (g.dy > 90 || g.vy > 0.6) onClose();
+        else Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 20, stiffness: 240, mass: 1 }).start();
       },
     })
   ).current;
 
-  const handleToggleCrossfade = (val: boolean) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onUpdateSettings({ ...settings, crossfadeEnabled: val });
+  if (!render) return null;
+  const set = (p: Partial<DJSettings>) => {
+    Haptics.selectionAsync();
+    onUpdateSettings({ ...settings, ...p });
   };
-
-  const handleToggleBpm = (val: boolean) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onUpdateSettings({ ...settings, bpmTransitionEnabled: val });
-  };
-
-  const handleToggleFade = (val: boolean) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onUpdateSettings({ ...settings, fadeVolumeEnabled: val });
-  };
-
-  const handleChangeDuration = (val: number) => {
-    const rounded = Math.round(val);
-    if (rounded !== settings.crossfadeDuration) {
-      Haptics.selectionAsync();
-      onUpdateSettings({ ...settings, crossfadeDuration: rounded });
-    }
-  };
-
-  if (!shouldRender) return null;
+  const track = { false: 'rgba(255,255,255,0.14)', true: 'rgba(255,255,255,0.55)' };
 
   return (
-    <Modal
-      visible={shouldRender}
-      transparent
-      animationType="none"
-      onRequestClose={handleClose}
-    >
+    <Modal visible transparent animationType="none" onRequestClose={onClose}>
       <View style={styles.overlay}>
-        <Animated.View
-          style={[
-            StyleSheet.absoluteFill,
-            { opacity: backdropOpacity, backgroundColor: 'rgba(0, 0, 0, 0.65)' },
-          ]}
-        >
-          <TouchableOpacity
-            activeOpacity={1}
-            onPress={handleClose}
-            style={StyleSheet.absoluteFill}
-          />
+        <Animated.View style={[StyleSheet.absoluteFill, { opacity: fade, backgroundColor: 'rgba(0,0,0,0.55)' }]}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         </Animated.View>
 
-        <Animated.View
-          style={[
-            styles.sheetContainer,
-            {
-              transform: [{ translateY }],
-            },
-          ]}
-        >
-          <BlurView intensity={95} tint="dark" style={styles.blurSheet}>
-            {/* Grabber with 1:1 pull down tracking */}
-            <View {...panResponder.panHandlers} style={styles.grabberSection}>
-              <View style={styles.grabber} />
-            </View>
+        <Animated.View style={[styles.sheet, { transform: [{ translateY: y }] }]}>
+          <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(18,18,20,0.72)' }]} />
+          <View {...pan.panHandlers} style={styles.grabArea}>
+            <View style={styles.grabber} />
+          </View>
 
-            {/* Header */}
-            <View style={styles.header}>
-              <View style={styles.headerTitleRow}>
-                <Ionicons name="disc-outline" size={22} color="#c084fc" style={{ marginRight: 8 }} />
-                <Text style={styles.title}>DJ Склейка треков</Text>
-              </View>
-              <TouchableOpacity onPress={handleClose} style={styles.closeBtn}>
-                <Ionicons name="close" size={20} color="#94a3b8" />
-              </TouchableOpacity>
-            </View>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
+            <Text style={styles.h1}>DJ-склейка</Text>
 
-            {/* Main Crossfade Toggle */}
             <View style={styles.row}>
-              <View style={styles.rowInfo}>
-                <Text style={styles.rowTitle}>Склейка треков (Crossfade)</Text>
-                <Text style={styles.rowDesc}>Бесшовный переход между песнями</Text>
+              <View style={styles.info}>
+                <Text style={styles.rowTitle}>Склейка треков</Text>
+                <Text style={styles.rowDesc}>Следующий трек входит, пока текущий затухает</Text>
               </View>
-              <Switch
-                value={settings.crossfadeEnabled}
-                onValueChange={handleToggleCrossfade}
-                trackColor={{ false: 'rgba(255, 255, 255, 0.1)', true: '#9333ea' }}
-                thumbColor="#ffffff"
-              />
+              <Switch value={settings.crossfadeEnabled} onValueChange={(v) => set({ crossfadeEnabled: v })} trackColor={track} ios_backgroundColor="rgba(255,255,255,0.14)" />
             </View>
 
-            {/* Dependent DJ parameters */}
             {settings.crossfadeEnabled && (
-              <View style={styles.subSettingsSection}>
-                {/* 1. Duration Slider (1 - 15s) */}
-                <View style={styles.sliderBlock}>
-                  <View style={styles.sliderHeader}>
-                    <Text style={styles.subTitle}>Длительность перехода</Text>
-                    <View style={styles.badge}>
-                      <Text style={styles.badgeText}>{settings.crossfadeDuration} сек</Text>
-                    </View>
+              <Glass radius={20} style={{ marginTop: 6 }}>
+                <View style={{ padding: 16 }}>
+                  <View style={styles.sliderHead}>
+                    <Text style={styles.rowTitle}>Длительность перехода</Text>
+                    <Text style={styles.badge}>{settings.crossfadeDuration} сек</Text>
                   </View>
                   <Slider
-                    style={styles.slider}
+                    style={{ height: 36 }}
                     minimumValue={1}
                     maximumValue={15}
                     step={1}
                     value={settings.crossfadeDuration}
-                    onValueChange={handleChangeDuration}
-                    minimumTrackTintColor="#c084fc"
-                    maximumTrackTintColor="rgba(255, 255, 255, 0.15)"
-                    thumbTintColor="#ffffff"
+                    onValueChange={(v) => v !== settings.crossfadeDuration && set({ crossfadeDuration: Math.round(v) })}
+                    minimumTrackTintColor="#FFFFFF"
+                    maximumTrackTintColor="rgba(255,255,255,0.18)"
+                    thumbTintColor="#FFFFFF"
                   />
-                  <View style={styles.sliderScale}>
-                    <Text style={styles.scaleText}>1 сек</Text>
-                    <Text style={styles.scaleText}>15 сек</Text>
+                  <View style={styles.sliderHead}>
+                    <Text style={styles.scale}>1 сек</Text>
+                    <Text style={styles.scale}>15 сек</Text>
                   </View>
-                </View>
 
-                {/* 2. BPM Match Toggle */}
-                <View style={styles.subRow}>
-                  <View style={styles.rowInfo}>
-                    <Text style={styles.subTitle}>Подгон темпа (BPM Match)</Text>
-                    <Text style={styles.rowDesc}>Синхронизация темпа бита перед склейкой</Text>
+                  <View style={[styles.row, styles.sub]}>
+                    <View style={styles.info}>
+                      <Text style={styles.rowTitle}>Подгон темпа (BPM)</Text>
+                      <Text style={styles.rowDesc}>Оба трека одновременно подстраиваются под общий темп</Text>
+                    </View>
+                    <Switch value={settings.bpmTransitionEnabled} onValueChange={(v) => set({ bpmTransitionEnabled: v })} trackColor={track} ios_backgroundColor="rgba(255,255,255,0.14)" />
                   </View>
-                  <Switch
-                    value={settings.bpmTransitionEnabled}
-                    onValueChange={handleToggleBpm}
-                    trackColor={{ false: 'rgba(255, 255, 255, 0.1)', true: '#9333ea' }}
-                    thumbColor="#ffffff"
-                  />
-                </View>
-
-                {/* 3. Volume Fade In / Out */}
-                <View style={styles.subRow}>
-                  <View style={styles.rowInfo}>
-                    <Text style={styles.subTitle}>Нарастание / затухание громкости</Text>
-                    <Text style={styles.rowDesc}>Мягкий вход следующего трека</Text>
+                  <View style={[styles.row, styles.sub]}>
+                    <View style={styles.info}>
+                      <Text style={styles.rowTitle}>Плавная громкость</Text>
+                      <Text style={styles.rowDesc}>Выключено — мгновенная смена в середине перехода</Text>
+                    </View>
+                    <Switch value={settings.fadeVolumeEnabled} onValueChange={(v) => set({ fadeVolumeEnabled: v })} trackColor={track} ios_backgroundColor="rgba(255,255,255,0.14)" />
                   </View>
-                  <Switch
-                    value={settings.fadeVolumeEnabled}
-                    onValueChange={handleToggleFade}
-                    trackColor={{ false: 'rgba(255, 255, 255, 0.1)', true: '#9333ea' }}
-                    thumbColor="#ffffff"
-                  />
                 </View>
-              </View>
+              </Glass>
             )}
 
-            {/* Quick Presets */}
-            <View style={styles.presetsSection}>
-              <Text style={styles.presetsLabel}>БЫСТРЫЕ ПРЕСЕТЫ</Text>
-              <View style={styles.presetButtonsRow}>
-                {[
-                  { label: 'Клубный (3с)', duration: 3 },
-                  { label: 'Стандарт (5с)', duration: 5 },
-                  { label: 'Радио (8с)', duration: 8 },
-                ].map((preset) => (
-                  <TouchableOpacity
-                    key={preset.label}
-                    onPress={() => {
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                      onUpdateSettings({
-                        ...settings,
-                        crossfadeEnabled: true,
-                        crossfadeDuration: preset.duration,
-                      });
-                    }}
-                    style={[
-                      styles.presetPill,
-                      settings.crossfadeDuration === preset.duration &&
-                        settings.crossfadeEnabled &&
-                        styles.presetPillActive,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.presetText,
-                        settings.crossfadeDuration === preset.duration &&
-                          settings.crossfadeEnabled &&
-                          styles.presetTextActive,
-                      ]}
-                    >
-                      {preset.label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+            <View style={styles.presets}>
+              {[3, 5, 8].map((d) => {
+                const on = settings.crossfadeEnabled && settings.crossfadeDuration === d;
+                return (
+                  <PressableScale key={d} style={{ flex: 1 }} onPress={() => set({ crossfadeEnabled: true, crossfadeDuration: d })}>
+                    <View style={[styles.pill, on && styles.pillOn]}>
+                      <Text style={[styles.pillText, on && { color: colors.onAccent }]}>{d} сек</Text>
+                    </View>
+                  </PressableScale>
+                );
+              })}
             </View>
-          </BlurView>
+
+            <Text style={[styles.h1, { marginTop: 28 }]}>Текущий трек</Text>
+            <Glass radius={20}>
+              <View style={[styles.row, { padding: 16 }]}>
+                <View style={styles.info}>
+                  <Text style={styles.rowTitle} numberOfLines={1}>{bpmInfo?.title ?? '—'}</Text>
+                  <Text style={styles.rowDesc}>
+                    {bpmInfo?.bpm ? `${Math.round(bpmInfo.bpm)} BPM · ${SOURCE_LABEL[bpmInfo.source ?? 'auto']}` : 'BPM определяется автоматически…'}
+                  </Text>
+                </View>
+                <PressableScale onPress={onEditBpm}>
+                  <Text style={styles.link}>Изменить</Text>
+                </PressableScale>
+              </View>
+            </Glass>
+
+            <Text style={[styles.h1, { marginTop: 28 }]}>Библиотека</Text>
+            <Glass radius={20}>
+              <View style={[styles.row, { padding: 16 }]}>
+                <View style={styles.info}>
+                  <Text style={styles.rowTitle}>{trackCount} треков</Text>
+                  <Text style={styles.rowDesc}>Файлы → На iPhone → Woufy → Music</Text>
+                </View>
+                <PressableScale onPress={onRescan}>
+                  <Text style={styles.link}>Обновить</Text>
+                </PressableScale>
+              </View>
+            </Glass>
+          </ScrollView>
         </Animated.View>
       </View>
     </Modal>
@@ -298,170 +183,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 };
 
 const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  sheetContainer: {
-    width: '100%',
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    overflow: 'hidden',
-  },
-  blurSheet: {
-    paddingHorizontal: 24,
-    paddingTop: 8,
-    paddingBottom: 38,
-    backgroundColor: 'rgba(18, 9, 32, 0.88)',
-    borderTopWidth: 1.5,
-    borderTopColor: 'rgba(255, 255, 255, 0.15)',
-  },
-  grabberSection: {
-    alignItems: 'center',
-    paddingVertical: 10,
-    width: '100%',
-  },
-  grabber: {
-    width: 40,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255, 255, 255, 0.25)',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingBottom: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  headerTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#ffffff',
-  },
-  closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 16,
-  },
-  subRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(255, 255, 255, 0.06)',
-  },
-  rowInfo: {
-    flex: 1,
-    marginRight: 16,
-  },
-  rowTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#ffffff',
-  },
-  rowDesc: {
-    fontSize: 13,
-    color: '#94a3b8',
-    marginTop: 2,
-  },
-  subSettingsSection: {
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
-    borderRadius: 16,
-    padding: 16,
-    marginVertical: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
-  },
-  sliderBlock: {
-    marginBottom: 12,
-  },
-  sliderHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  subTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#f1f5f9',
-  },
-  badge: {
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: 'rgba(192, 132, 252, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(192, 132, 252, 0.3)',
-  },
-  badgeText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#c084fc',
-  },
-  slider: {
-    width: '100%',
-    height: 36,
-  },
-  sliderScale: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 4,
-  },
-  scaleText: {
-    fontSize: 12,
-    color: '#64748b',
-  },
-  presetsSection: {
-    marginTop: 16,
-  },
-  presetsLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#94a3b8',
-    marginBottom: 10,
-    letterSpacing: 0.8,
-  },
-  presetButtonsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  presetPill: {
-    flex: 1,
-    paddingVertical: 9,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255, 255, 255, 0.06)',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  presetPillActive: {
-    backgroundColor: 'rgba(192, 132, 252, 0.25)',
-    borderColor: '#c084fc',
-  },
-  presetText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#cbd5e1',
-  },
-  presetTextActive: {
-    color: '#ffffff',
-  },
+  overlay: { flex: 1, justifyContent: 'flex-end' },
+  sheet: { height: '82%', borderTopLeftRadius: 32, borderTopRightRadius: 32, overflow: 'hidden', borderTopWidth: StyleSheet.hairlineWidth * 2, borderColor: colors.stroke },
+  grabArea: { alignItems: 'center', paddingVertical: 12 },
+  grabber: { width: 38, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.3)' },
+  content: { paddingHorizontal: 20, paddingBottom: 48 },
+  h1: { ...type.largeTitle, fontSize: 26, color: colors.text, marginBottom: 12 },
+  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8 },
+  sub: { marginTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.stroke, paddingTop: 14 },
+  info: { flex: 1, marginRight: 14 },
+  rowTitle: { ...type.headline, color: colors.text },
+  rowDesc: { ...type.caption, fontSize: 13, color: colors.text2, marginTop: 2 },
+  sliderHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  badge: { ...type.mono, fontSize: 13, color: colors.text, fontWeight: '700' },
+  scale: { ...type.caption, color: colors.text3 },
+  presets: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  pill: { height: 38, borderRadius: 19, backgroundColor: colors.glass, borderWidth: StyleSheet.hairlineWidth * 2, borderColor: colors.stroke, alignItems: 'center', justifyContent: 'center' },
+  pillOn: { backgroundColor: colors.accent },
+  pillText: { ...type.body, fontWeight: '600', color: colors.text },
+  link: { ...type.body, fontWeight: '700', color: colors.text },
 });
