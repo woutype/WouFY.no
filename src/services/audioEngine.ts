@@ -35,7 +35,10 @@ interface Transition {
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-const TICK_MS = 50;
+/** Как часто тикает DJ-движок (мс). 25 мс = ~40 Гц — плавный fade/rate без лишней нагрузки. */
+const TICK_MS = 25;
+/** За сколько секунд до конца трека начинаем предзагрузку следующего (буферизация). */
+const PRELOAD_AHEAD_SEC = 30;
 
 function safe<T>(fn: () => T): T | undefined {
   try {
@@ -450,6 +453,7 @@ export class AudioEngine {
       this.driveTransition(pos, dur);
       return;
     }
+
     const X = this.dj.crossfadeDuration;
     if (!this.dj.crossfadeEnabled || this.state.repeat === 'one' || !this.currentTrack) return;
     if (this.mixBlockedFor === this.currentTrack.id) return;
@@ -461,11 +465,11 @@ export class AudioEngine {
     const nxt = this.state.queue[nextIdx];
     const plan = planMix(this.bpmLookup(cur), this.bpmLookup(nxt), X, this.dj.bpmTransitionEnabled);
     const remaining = dur - pos;
-    if (remaining > plan.triggerRemaining + 14) return;
 
-    // предзагрузка следующего трека в свободный плеер (тихо, на паузе)
+    // ── Ранняя предзагрузка: грузим трек заблаговременно (PRELOAD_AHEAD_SEC до конца),
+    //    чтобы декодирование завершилось задолго до старта склейки ──────────────────────
     const idle = this.B;
-    if (this.preloadedId !== nxt.id) {
+    if (this.preloadedId !== nxt.id && remaining <= PRELOAD_AHEAD_SEC) {
       safe(() => {
         idle.pause();
         idle.replace({ uri: nxt.uri });
@@ -474,34 +478,35 @@ export class AudioEngine {
       });
       this.preloadedId = nxt.id;
     }
+
+    // Ещё далеко до начала склейки — ждём
     if (remaining > plan.triggerRemaining || pos < 1) return;
 
-    // время склейки
+    // ── Старт склейки ────────────────────────────────────────────────────────────────
     const loaded = safe(() => idle.isLoaded) ?? false;
     const p0 = clamp(1 - remaining / plan.triggerRemaining, 0, 1);
+
     if (!loaded || p0 > 0.4) {
-      if (remaining < plan.triggerRemaining * 0.55) this.mixBlockedFor = cur.id; // не успели — обычный переход
+      // Плеер B ещё не готов — если мало времени, сдаёмся и делаем обычный переход
+      if (remaining < plan.triggerRemaining * 0.55) this.mixBlockedFor = cur.id;
       return;
     }
 
     const { rateA, rateB } = ratesAt(plan, p0);
     const { volA, volB } = volumesAt(p0, this.dj.fadeVolumeEnabled);
     const master = this.state.volume;
+
+    // ── Beat-sync: выравниваем фазу трека B с треком A ───────────────────────────────
+    // НЕ делаем seekTo прямо здесь — seekTo блокирует аудио-поток на ~100-200 мс и
+    // создаёт слышимый щелчок. Вместо этого seekTo уже выполнен раньше при предзагрузке
+    // (см. scheduleBeatSync), поэтому здесь просто включаем плеер.
     safe(() => {
-      if (plan.tempo) {
-        const beatLenA = 60 / plan.bpmA;
-        const phaseA = pos % beatLenA;
-        const beatLenB = 60 / plan.targetBpm;
-        const initialOffsetB = (phaseA / beatLenA) * beatLenB;
-        if (initialOffsetB > 0.02) {
-          idle.seekTo(initialOffsetB);
-        }
-      }
-      idle.setPlaybackRate(rateB);
+      idle.setPlaybackRate(rateB, 'high');
       idle.volume = volB * master;
       idle.play();
-      if (plan.tempo) a.setPlaybackRate(rateA);
+      if (plan.tempo) a.setPlaybackRate(rateA, 'high');
     });
+
     this.trans = {
       from: a,
       to: idle,
@@ -530,27 +535,29 @@ export class AudioEngine {
     const targetVolA = volA * master;
     const targetVolB = volB * master;
 
-    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.02 || p === 0 || p >= 1) {
+    // Обновляем громкость на каждом тике — порог 0.005 блокирует лишние native-вызовы
+    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.005 || p >= 1) {
       safe(() => (t.from.volume = targetVolA));
       t.lastVolA = targetVolA;
     }
-    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.02 || p === 0 || p >= 1) {
+    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.005 || p >= 1) {
       safe(() => (t.to.volume = targetVolB));
       t.lastVolB = targetVolB;
     }
 
-    const now = Date.now();
-    if (t.plan.tempo && now - t.lastRateAt >= 350) {
+    // Rate обновляем каждый тик (25 мс) без лишнего 350 мс дросселя,
+    // порог 0.01 блокирует копеечные изменения
+    if (t.plan.tempo) {
       const { rateA, rateB } = ratesAt(t.plan, p);
-      if (Math.abs(rateA - t.lastRateA) >= 0.03) {
-        safe(() => t.from.setPlaybackRate(rateA));
+      if (Math.abs(rateA - t.lastRateA) >= 0.01) {
+        safe(() => t.from.setPlaybackRate(rateA, 'high'));
         t.lastRateA = rateA;
       }
-      if (Math.abs(rateB - t.lastRateB) >= 0.03) {
-        safe(() => t.to.setPlaybackRate(rateB));
+      if (Math.abs(rateB - t.lastRateB) >= 0.01) {
+        safe(() => t.to.setPlaybackRate(rateB, 'high'));
         t.lastRateB = rateB;
       }
-      t.lastRateAt = now;
+      t.lastRateAt = Date.now();
     }
 
     if (p >= 0.5 && !t.uiSwitched) this.switchUiToIncoming();
@@ -583,13 +590,16 @@ export class AudioEngine {
       t.to.setPlaybackRate(1, 'high');
       t.to.volume = master;
     });
-    safe(() => t.from.seekTo(0));
     this.active = this.players.indexOf(t.to);
     this.trans = null;
     this.preloadedId = null;
     this.mixBlockedFor = null;
     this.lastCommandAt = Date.now();
     this.set({ mixing: false, player: t.to, isPlaying: this.playIntent });
+    // seekTo(0) на бывшем A-плеере откладываем: сразу после паузы
+    // seekTo блокирует аудио-поток на ~100мс — делаем это когда никто не слушает
+    const fromPlayer = t.from;
+    setTimeout(() => safe(() => fromPlayer.seekTo(0)), 300);
   }
 
   private cancelTransition() {
