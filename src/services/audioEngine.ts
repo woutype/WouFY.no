@@ -29,6 +29,8 @@ interface Transition {
   lastRateAt: number;
   lastRateA: number;
   lastRateB: number;
+  lastVolA?: number;
+  lastVolB?: number;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -491,20 +493,27 @@ export class AudioEngine {
 
     const { volA, volB } = volumesAt(p, this.dj.fadeVolumeEnabled);
     const master = this.state.volume;
-    safe(() => {
-      t.from.volume = volA * master;
-      t.to.volume = volB * master;
-    });
+    const targetVolA = volA * master;
+    const targetVolB = volB * master;
+
+    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.02 || p === 0 || p >= 1) {
+      safe(() => (t.from.volume = targetVolA));
+      t.lastVolA = targetVolA;
+    }
+    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.02 || p === 0 || p >= 1) {
+      safe(() => (t.to.volume = targetVolB));
+      t.lastVolB = targetVolB;
+    }
 
     const now = Date.now();
-    if (t.plan.tempo && now - t.lastRateAt >= 100) {
+    if (t.plan.tempo && now - t.lastRateAt >= 350) {
       const { rateA, rateB } = ratesAt(t.plan, p);
-      if (Math.abs(rateA - t.lastRateA) > 0.002) {
-        safe(() => t.from.setPlaybackRate(rateA, 'high'));
+      if (Math.abs(rateA - t.lastRateA) >= 0.03) {
+        safe(() => t.from.setPlaybackRate(rateA));
         t.lastRateA = rateA;
       }
-      if (Math.abs(rateB - t.lastRateB) > 0.002) {
-        safe(() => t.to.setPlaybackRate(rateB, 'high'));
+      if (Math.abs(rateB - t.lastRateB) >= 0.03) {
+        safe(() => t.to.setPlaybackRate(rateB));
         t.lastRateB = rateB;
       }
       t.lastRateAt = now;

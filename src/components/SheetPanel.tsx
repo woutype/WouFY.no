@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Animated, PanResponder, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -22,12 +22,12 @@ export const SheetPanel: React.FC<Props> = ({ mode, onModeChange, progress, onSe
   const base = useRef(0);
   const lastVal = useRef(0);
 
-  // Track current progress value
-  const progressSub = useRef<{ remove: () => void } | null>(null);
-  if (!progressSub.current) {
-    const id = progress.addListener(({ value }) => { lastVal.current = value; });
-    progressSub.current = { remove: () => progress.removeListener(id) };
-  }
+  useEffect(() => {
+    const id = progress.addListener(({ value }) => {
+      lastVal.current = value;
+    });
+    return () => progress.removeListener(id);
+  }, [progress]);
 
   // Swipe DOWN on header → smoothly closes sheet (goes to player, progress → 1)
   const panGesture = useRef(

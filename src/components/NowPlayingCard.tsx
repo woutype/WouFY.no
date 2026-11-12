@@ -41,48 +41,55 @@ const MiniProgress: React.FC<{ engine: AudioEngine; duration: number }> = ({ eng
 
 /** Вращающаяся обложка как виниловая пластинка */
 const SpinningArtwork: React.FC<{ uri?: string; size: number; isPlaying: boolean }> = ({ uri, size, isPlaying }) => {
-  // Use a rotation value that just counts full rotations — we keep it small with modulo resets
   const rot = useRef(new Animated.Value(0)).current;
-  const animRef = useRef<Animated.CompositeAnimation | null>(null);
-  const pausedAt = useRef(0);
+  const currentAngle = useRef(0);
 
   useEffect(() => {
-    if (isPlaying) {
-      animRef.current?.stop();
-      // Start from where we paused; go around many times
-      const start = pausedAt.current;
-      const target = start + 360 * 500; // 500 full rotations (essentially infinite)
-      const duration = (target - start) * (8000 / 360); // 8 seconds per full rotation
-      const loop = Animated.loop(
-        Animated.timing(rot, {
-          toValue: start + 360,
-          duration: 8000,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        })
-      );
-      // Reset to small number to avoid interpolate overflow, then loop
-      rot.setValue(start % 360);
-      animRef.current = Animated.loop(
-        Animated.timing(rot, {
-          toValue: (start % 360) + 360,
-          duration: 8000,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        })
-      );
-      void loop; void duration;
-      animRef.current.start(({ finished }) => {
-        if (finished) rot.setValue((start % 360));
-      });
-    } else {
-      animRef.current?.stop();
-      animRef.current = null;
-      rot.stopAnimation((v) => { pausedAt.current = v; });
-    }
-  }, [isPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
+    const id = rot.addListener(({ value }) => {
+      currentAngle.current = value;
+    });
+    return () => rot.removeListener(id);
+  }, [rot]);
 
-  const spin = rot.interpolate({ inputRange: [0, 360], outputRange: ['0deg', '360deg'] });
+  useEffect(() => {
+    let anim: Animated.CompositeAnimation | null = null;
+    let active = true;
+
+    if (isPlaying) {
+      const step = () => {
+        if (!active) return;
+        const start = currentAngle.current % 1;
+        rot.setValue(start);
+        currentAngle.current = start;
+        const remaining = 1 - start;
+        anim = Animated.timing(rot, {
+          toValue: 1,
+          duration: Math.max(100, remaining * 8000),
+          easing: Easing.linear,
+          useNativeDriver: true,
+        });
+        anim.start(({ finished }) => {
+          if (finished && active) {
+            currentAngle.current = 0;
+            rot.setValue(0);
+            step();
+          }
+        });
+      };
+      step();
+    } else {
+      rot.stopAnimation((val) => {
+        currentAngle.current = val;
+      });
+    }
+
+    return () => {
+      active = false;
+      rot.stopAnimation();
+    };
+  }, [isPlaying, rot]);
+
+  const spin = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
   return (
     <Animated.View style={{ width: size, height: size, borderRadius: size / 2, overflow: 'hidden', transform: [{ rotate: spin }] }}>
@@ -148,20 +155,6 @@ export const NowPlayingCard: React.FC<Props> = ({
   const miniPan = useRef(makePan((dx, dy) => dy < -6 && Math.abs(dy) > Math.abs(dx))).current;
   const topPan = useRef(makePan((dx, dy) => dy > 6 && Math.abs(dy) > Math.abs(dx))).current;
 
-  // свайп вниз по обложке → открывает очередь
-  const artworkPan = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) => g.dy > 10 && Math.abs(g.dy) > Math.abs(g.dx) * 1.5,
-      onPanResponderTerminationRequest: () => false,
-      onPanResponderRelease: (_, g) => {
-        if (g.dy > 60 || g.vy > 0.5) {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          onOpenSheet('queue');
-        }
-      },
-    })
-  ).current;
-
   /* ───────── интерполяции ───────── */
   const cardY = e.interpolate({ inputRange: [0, 1], outputRange: [m.collapsedTop, 0] });
   const bgOpacity = e.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1], extrapolate: 'clamp' });
@@ -204,8 +197,8 @@ export const NowPlayingCard: React.FC<Props> = ({
           <View style={styles.grabber} />
           <IconButton name="options" size={20} glass box={40} onPress={onOpenSettings} />
         </View>
-        {/* Невидимая зона под обложкой для свайпа вниз → очередь */}
-        <View style={{ height: m.cover + 8 }} pointerEvents="box-none" {...artworkPan.panHandlers} />
+        {/* Отступ под обложкой */}
+        <View style={{ height: m.cover + 8 }} pointerEvents="none" />
         <PlayerControls
           engine={engine}
           state={state}
@@ -233,6 +226,20 @@ export const NowPlayingCard: React.FC<Props> = ({
           player={state.player}
           onNext={() => engine.next()}
           onPrevious={() => engine.previous()}
+          onDragDownGrant={() => {
+            e.stopAnimation();
+            base.current = lastE.current;
+          }}
+          onDragDownMove={(dy) => {
+            e.setValue(clamp(base.current - dy / range, 0, 1));
+          }}
+          onDragDownRelease={(dy, vy) => {
+            const now = clamp(base.current - dy / range, 0, 1);
+            const projected = now + -vy * 0.3;
+            const target: 0 | 1 = projected > 0.5 ? 1 : 0;
+            if (target !== (expanded ? 1 : 0)) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            onSettle(target);
+          }}
         />
       </Animated.View>
 

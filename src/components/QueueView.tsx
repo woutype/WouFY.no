@@ -36,7 +36,11 @@ interface RowProps {
 const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const shiftAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    Animated.timing(shiftAnim, { toValue: p.shift * ROW_H, duration: 160, useNativeDriver: true }).start();
+    if (p.shift === 0) {
+      shiftAnim.setValue(0);
+    } else {
+      Animated.timing(shiftAnim, { toValue: p.shift * ROW_H, duration: 140, useNativeDriver: true }).start();
+    }
   }, [p.shift, shiftAnim]);
 
   const cb = useRef(p);
@@ -44,7 +48,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const handlePan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 2,
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => cb.current.onDragStart(cb.current.queueIndex),
       onPanResponderMove: (_, g) => cb.current.onDragMove(g.dy),
@@ -58,7 +62,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
       style={[
         styles.row,
         p.dragging && styles.rowDragging,
-        { transform: [{ translateY: p.dragging ? p.dragY : shiftAnim }], zIndex: p.dragging ? 10 : 0 },
+        { transform: [{ translateY: p.dragging ? p.dragY : shiftAnim }], zIndex: p.dragging ? 99 : 0 },
       ]}
     >
       <PressableScale onPress={p.onPress} scaleTo={0.98} style={styles.rowMain} haptic="light">
@@ -75,7 +79,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
             {p.track.title}
           </Text>
           <Text style={styles.rowArtist} numberOfLines={1}>
-            {p.track.artist}
+            {p.track.artist}{p.track.album ? ` · ${p.track.album}` : ''}
           </Text>
         </View>
       </PressableScale>
@@ -191,12 +195,18 @@ export const QueueView: React.FC<Props> = ({
     const d = dragInfo.current;
     const { from, hover } = d;
     if (from < 0) return;
-    Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 120, useNativeDriver: true }).start(() => {
-      if (hover !== from) onMove(from, hover);
-      dragY.setValue(0);
-      setDrag(null);
-      dragInfo.current.from = -1;
-    });
+    dragInfo.current.from = -1;
+    if (hover === from) {
+      Animated.timing(dragY, { toValue: 0, duration: 100, useNativeDriver: true }).start(() => {
+        setDrag(null);
+      });
+    } else {
+      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 90, useNativeDriver: true }).start(() => {
+        dragY.setValue(0);
+        setDrag(null);
+        onMove(from, hover);
+      });
+    }
   }, [dragY, onMove]);
 
   useEffect(() => stopAuto, []);

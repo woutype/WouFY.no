@@ -16,6 +16,9 @@ interface Props {
   player: AudioPlayer | null;
   onNext: () => void;
   onPrevious: () => void;
+  onDragDownGrant?: () => void;
+  onDragDownMove?: (dy: number) => void;
+  onDragDownRelease?: (dy: number, vy: number) => void;
 }
 
 const GAP = 20;
@@ -24,8 +27,7 @@ const mod = (a: number, n: number) => ((a % n) + n) % n;
 
 /**
  * Обложка-карусель. Палец ведёт обложку 1:1: свайп влево → следующий трек,
- * вправо → предыдущий. Работает и с кнопками next/prev, и с автопереходом (DJ-склейка) —
- * все они анимируются одним и тем же сдвигом.
+ * вправо → предыдущий. Свайп вниз → плавно открывает очередь.
  */
 export const ArtworkCarousel: React.FC<Props> = ({
   queue,
@@ -36,6 +38,9 @@ export const ArtworkCarousel: React.FC<Props> = ({
   player,
   onNext,
   onPrevious,
+  onDragDownGrant,
+  onDragDownMove,
+  onDragDownRelease,
 }) => {
   const n = queue.length;
   const STEP = size + GAP;
@@ -59,8 +64,9 @@ export const ArtworkCarousel: React.FC<Props> = ({
   const nRef = useRef(n);
   nRef.current = n;
   const base = useRef(0);
-  const cbs = useRef({ onNext, onPrevious });
-  cbs.current = { onNext, onPrevious };
+  const cbs = useRef({ onNext, onPrevious, onDragDownGrant, onDragDownMove, onDragDownRelease });
+  cbs.current = { onNext, onPrevious, onDragDownGrant, onDragDownMove, onDragDownRelease };
+  const dragMode = useRef<'none' | 'horizontal' | 'vertical'>('none');
 
   useEffect(() => {
     Animated.spring(pos, {
@@ -80,28 +86,56 @@ export const ArtworkCarousel: React.FC<Props> = ({
 
   const responder = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.3,
+      onMoveShouldSetPanResponder: (_, g) => {
+        const isH = Math.abs(g.dx) > 8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2;
+        const isV = g.dy > 8 && g.dy > Math.abs(g.dx) * 1.2;
+        return isH || isV;
+      },
+      onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
+        dragMode.current = 'none';
         pos.stopAnimation((v) => {
           base.current = v;
         });
       },
       onPanResponderMove: (_, g) => {
-        const resist = nRef.current <= 1 ? 0.25 : 1;
-        pos.setValue(base.current - (g.dx * resist) / STEP);
+        if (dragMode.current === 'none') {
+          if (Math.abs(g.dx) > Math.abs(g.dy) && Math.abs(g.dx) > 6) {
+            dragMode.current = 'horizontal';
+          } else if (g.dy > 6 && g.dy > Math.abs(g.dx)) {
+            dragMode.current = 'vertical';
+            cbs.current.onDragDownGrant?.();
+          }
+        }
+        if (dragMode.current === 'horizontal') {
+          const resist = nRef.current <= 1 ? 0.25 : 1;
+          pos.setValue(base.current - (g.dx * resist) / STEP);
+        } else if (dragMode.current === 'vertical') {
+          cbs.current.onDragDownMove?.(g.dy);
+        }
       },
       onPanResponderRelease: (_, g) => {
-        const commit = Math.abs(g.dx) > size * 0.2 || Math.abs(g.vx) > 0.45;
-        if (commit && nRef.current > 1) {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          if (g.dx < 0) cbs.current.onNext();
-          else cbs.current.onPrevious();
+        if (dragMode.current === 'vertical') {
+          cbs.current.onDragDownRelease?.(g.dy, g.vy);
+        } else if (dragMode.current === 'horizontal') {
+          const commit = Math.abs(g.dx) > size * 0.2 || Math.abs(g.vx) > 0.45;
+          if (commit && nRef.current > 1) {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            if (g.dx < 0) cbs.current.onNext();
+            else cbs.current.onPrevious();
+          } else {
+            Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 20, stiffness: 260, mass: 1 }).start();
+          }
+        }
+        dragMode.current = 'none';
+      },
+      onPanResponderTerminate: (_, g) => {
+        if (dragMode.current === 'vertical') {
+          cbs.current.onDragDownRelease?.(g.dy, g.vy);
         } else {
           Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 20, stiffness: 260, mass: 1 }).start();
         }
-      },
-      onPanResponderTerminate: () => {
-        Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 20, stiffness: 260, mass: 1 }).start();
+        dragMode.current = 'none';
       },
     })
   ).current;
