@@ -22,6 +22,8 @@ export interface TrackFile {
   /** BPM из тега TBPM */
   bpmTag?: number;
   size?: number;
+  mtime?: number;
+  trackNumber?: number;
   extension: AudioExtension;
 }
 

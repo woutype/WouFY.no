@@ -53,9 +53,37 @@ interface Props {
 /** Настоящий спектр (FFT) поверх обложки. Семплирование включается только пока визуализатор на экране. */
 export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, radius }) => {
   const bars = useRef(Array.from({ length: BARS }, () => new Animated.Value(0.08))).current;
-  const levels = useRef(new Float32Array(BARS).fill(0.08)).current;
+  const targetLevels = useRef(new Float32Array(BARS).fill(0.08)).current;
+  const currentLevels = useRef(new Float32Array(BARS).fill(0.08)).current;
   const playing = useRef(isPlaying);
   playing.current = isPlaying;
+
+  // 60-120 FPS плавный рендер-луп дисплея (декупленный от аудио-буферов)
+  useEffect(() => {
+    let rafId: number;
+    let active = true;
+
+    const loop = () => {
+      if (!active) return;
+      const isPlay = playing.current;
+      for (let b = 0; b < BARS; b++) {
+        const target = isPlay ? targetLevels[b] : 0.08;
+        const cur = currentLevels[b];
+        // Шелковистая интерполяция: быстрая атака на ударах, плавный спад
+        const factor = target > cur ? 0.42 : 0.14;
+        const next = cur + (target - cur) * factor;
+        currentLevels[b] = next;
+        bars[b].setValue(next);
+      }
+      rafId = requestAnimationFrame(loop);
+    };
+
+    rafId = requestAnimationFrame(loop);
+    return () => {
+      active = false;
+      cancelAnimationFrame(rafId);
+    };
+  }, [bars, currentLevels, targetLevels]);
 
   useEffect(() => {
     if (!player) return;
@@ -83,7 +111,7 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
         for (let i = 0; i < take; i++) ring[N - take + i] = frames[frames.length - take + i];
         filled = Math.min(N, filled + take);
         const now = Date.now();
-        if (filled < N || now - last < 33) return;
+        if (filled < N || now - last < 16) return;
         last = now;
 
         for (let i = 0; i < N; i++) {
@@ -101,10 +129,8 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
             if (mag > peak) peak = mag;
           }
           const db = 20 * Math.log10(peak + 1e-6);
-          const target = Math.min(1, Math.max(0.06, (db + 62) / 52));
-          // быстрая атака, медленное затухание
-          levels[b] = target > levels[b] ? levels[b] * 0.35 + target * 0.65 : levels[b] * 0.82 + target * 0.18;
-          bars[b].setValue(levels[b]);
+          const target = Math.min(1, Math.max(0.08, (db + 62) / 52));
+          targetLevels[b] = target;
         }
       });
     } catch {
@@ -118,16 +144,13 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
         /* ignore */
       }
     };
-  }, [player, bars, levels]);
+  }, [player, targetLevels]);
 
-  // при паузе мягко опускаем столбики
+  // при паузе сбрасываем целевые уровни
   useEffect(() => {
     if (isPlaying) return;
-    bars.forEach((v, i) => {
-      levels[i] = 0.08;
-      Animated.timing(v, { toValue: 0.08, duration: 300, useNativeDriver: true }).start();
-    });
-  }, [isPlaying, bars, levels]);
+    for (let i = 0; i < BARS; i++) targetLevels[i] = 0.08;
+  }, [isPlaying, targetLevels]);
 
   const barH = size * 0.45;
   return (

@@ -17,6 +17,56 @@ import { CoverArt, Glass, PressableScale } from './ui';
 
 export const ROW_H = 68;
 
+export type SortOption = 'default' | 'date' | 'album' | 'artist';
+
+const SORT_LABELS: Record<SortOption, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
+  default: { label: 'По умолчанию', icon: 'reorder-two-outline' },
+  date: { label: 'Дата добавления', icon: 'calendar-outline' },
+  album: { label: 'Альбом (по номерам)', icon: 'disc-outline' },
+  artist: { label: 'Артист', icon: 'person-outline' },
+};
+
+function getTrackNumber(t: TrackFile): number {
+  if (t.trackNumber && !isNaN(t.trackNumber)) return t.trackNumber;
+  const match = (t.title || t.filename).match(/^(\d+)[\.\s\-_]/);
+  if (match) return parseInt(match[1], 10);
+  return 999;
+}
+
+function applySort(list: TrackFile[], mode: SortOption): TrackFile[] {
+  if (mode === 'default') return list;
+  const copy = [...list];
+  if (mode === 'date') {
+    return copy.sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
+  }
+  if (mode === 'album') {
+    return copy.sort((a, b) => {
+      const albA = (a.album || 'Сингл').trim();
+      const albB = (b.album || 'Сингл').trim();
+      const c = albA.localeCompare(albB, 'ru', { sensitivity: 'base' });
+      if (c !== 0) return c;
+      const numA = getTrackNumber(a);
+      const numB = getTrackNumber(b);
+      if (numA !== numB) return numA - numB;
+      return a.title.localeCompare(b.title, 'ru', { sensitivity: 'base' });
+    });
+  }
+  if (mode === 'artist') {
+    return copy.sort((a, b) => {
+      const artA = (a.artist || 'Неизвестный исполнитель').trim();
+      const artB = (b.artist || 'Неизвестный исполнитель').trim();
+      const c = artA.localeCompare(artB, 'ru', { sensitivity: 'base' });
+      if (c !== 0) return c;
+      const albA = (a.album || 'Сингл').trim();
+      const albB = (b.album || 'Сингл').trim();
+      const c2 = albA.localeCompare(albB, 'ru', { sensitivity: 'base' });
+      if (c2 !== 0) return c2;
+      return getTrackNumber(a) - getTrackNumber(b);
+    });
+  }
+  return copy;
+}
+
 interface RowProps {
   track: TrackFile;
   queueIndex: number;
@@ -39,7 +89,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
     if (p.shift === 0) {
       shiftAnim.setValue(0);
     } else {
-      Animated.timing(shiftAnim, { toValue: p.shift * ROW_H, duration: 140, useNativeDriver: true }).start();
+      Animated.timing(shiftAnim, { toValue: p.shift * ROW_H, duration: 80, useNativeDriver: true }).start();
     }
   }, [p.shift, shiftAnim]);
 
@@ -106,6 +156,7 @@ interface Props {
   onSearchChange: (q: string) => void;
   onPlay: (index: number) => void;
   onMove: (from: number, to: number) => void;
+  onReorder?: (newTracks: TrackFile[]) => void;
   onRefresh: () => Promise<void>;
   bottomPad: number;
 }
@@ -118,6 +169,7 @@ export const QueueView: React.FC<Props> = ({
   onSearchChange,
   onPlay,
   onMove,
+  onReorder,
   onRefresh,
   bottomPad,
 }) => {
@@ -125,11 +177,22 @@ export const QueueView: React.FC<Props> = ({
   const [refreshing, setRefreshing] = useState(false);
   const [drag, setDrag] = useState<{ from: number; hover: number } | null>(null);
   const dragY = useRef(new Animated.Value(0)).current;
+  const [sortMode, setSortMode] = useState<SortOption>('default');
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
 
   const [localTracks, setLocalTracks] = useState(tracks);
   useEffect(() => {
-    if (!drag) setLocalTracks(tracks);
-  }, [tracks, drag]);
+    if (!drag) setLocalTracks(sortMode === 'default' ? tracks : applySort(tracks, sortMode));
+  }, [tracks, drag, sortMode]);
+
+  const handleSelectSort = (mode: SortOption) => {
+    Haptics.selectionAsync();
+    setSortMode(mode);
+    setShowFilterMenu(false);
+    const sorted = applySort(tracks, mode);
+    setLocalTracks(sorted);
+    onReorder?.(sorted);
+  };
 
   const filtering = searchQuery.trim().length > 0;
   const data = useMemo(() => {
@@ -207,21 +270,26 @@ export const QueueView: React.FC<Props> = ({
     const { from, hover } = d;
     if (from < 0) return;
     dragInfo.current.from = -1;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
     if (hover === from) {
-      Animated.timing(dragY, { toValue: 0, duration: 80, useNativeDriver: true }).start(() => {
+      Animated.timing(dragY, { toValue: 0, duration: 60, useNativeDriver: true }).start(() => {
         setDrag(null);
       });
     } else {
-      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 80, useNativeDriver: true }).start(() => {
+      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 60, useNativeDriver: true }).start(() => {
         setLocalTracks((prev) => {
           const next = [...prev];
           const [moved] = next.splice(from, 1);
           next.splice(hover, 0, moved);
           return next;
         });
+        setSortMode('default');
         dragY.setValue(0);
         setDrag(null);
-        onMove(from, hover);
+        setTimeout(() => {
+          onMove(from, hover);
+        }, 0);
       });
     }
   }, [dragY, onMove]);
@@ -261,34 +329,85 @@ export const QueueView: React.FC<Props> = ({
     );
   };
 
-  const totalMin = Math.round(tracks.length ? tracks.length * 3.4 : 0);
+  const totalMin = Math.round(localTracks.length ? localTracks.length * 3.4 : 0);
 
   return (
     <View style={{ flex: 1 }}>
       <View style={styles.searchWrap}>
-        <Glass radius={14} style={{ height: 40 }}>
-          <View style={styles.searchInner}>
-            <Ionicons name="search" size={16} color={colors.text3} />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Поиск по названию и исполнителю"
-              placeholderTextColor={colors.text3}
-              value={searchQuery}
-              onChangeText={onSearchChange}
-              autoCorrect={false}
-              returnKeyType="search"
-              selectionColor={colors.text}
-            />
-            {filtering && (
-              <PressableScale onPress={() => onSearchChange('')} hitSlop={10}>
-                <Ionicons name="close-circle" size={18} color={colors.text3} />
-              </PressableScale>
-            )}
+        <View style={styles.searchRow}>
+          <View style={{ flex: 1 }}>
+            <Glass radius={14} style={{ height: 40 }}>
+              <View style={styles.searchInner}>
+                <Ionicons name="search" size={16} color={colors.text3} />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Поиск по названию и исполнителю"
+                  placeholderTextColor={colors.text3}
+                  value={searchQuery}
+                  onChangeText={onSearchChange}
+                  autoCorrect={false}
+                  returnKeyType="search"
+                  selectionColor={colors.text}
+                />
+                {filtering && (
+                  <PressableScale onPress={() => onSearchChange('')} hitSlop={10}>
+                    <Ionicons name="close-circle" size={18} color={colors.text3} />
+                  </PressableScale>
+                )}
+              </View>
+            </Glass>
           </View>
-        </Glass>
-        <Text style={styles.count}>
-          {filtering ? `Найдено: ${data.length}` : `${tracks.length} ${plural(tracks.length)}${totalMin ? ` · ~${totalMin} мин` : ''}`}
-        </Text>
+          <PressableScale onPress={() => setShowFilterMenu((v) => !v)} hitSlop={6}>
+            <View style={[styles.filterBtn, (sortMode !== 'default' || showFilterMenu) && styles.filterBtnActive]}>
+              <Ionicons
+                name="funnel-outline"
+                size={17}
+                color={(sortMode !== 'default' || showFilterMenu) ? colors.onAccent : colors.text}
+              />
+            </View>
+          </PressableScale>
+        </View>
+
+        {showFilterMenu && (
+          <Glass radius={16} style={styles.filterMenu}>
+            <View style={styles.filterInner}>
+              {(['date', 'album', 'artist', 'default'] as const).map((opt) => {
+                const active = sortMode === opt;
+                return (
+                  <PressableScale key={opt} onPress={() => handleSelectSort(opt)}>
+                    <View style={[styles.filterOption, active && styles.filterOptionActive]}>
+                      <Ionicons
+                        name={SORT_LABELS[opt].icon}
+                        size={17}
+                        color={active ? colors.onAccent : colors.text}
+                      />
+                      <Text style={[styles.filterOptionText, active && styles.filterOptionTextActive]}>
+                        {SORT_LABELS[opt].label}
+                      </Text>
+                      {active && (
+                        <Ionicons name="checkmark" size={16} color={colors.onAccent} style={{ marginLeft: 'auto' }} />
+                      )}
+                    </View>
+                  </PressableScale>
+                );
+              })}
+            </View>
+          </Glass>
+        )}
+
+        <View style={styles.metaRow}>
+          <Text style={styles.count}>
+            {filtering ? `Найдено: ${data.length}` : `${localTracks.length} ${plural(localTracks.length)}${totalMin ? ` · ~${totalMin} мин` : ''}`}
+          </Text>
+          {sortMode !== 'default' && (
+            <PressableScale onPress={() => handleSelectSort('default')}>
+              <View style={styles.activePill}>
+                <Text style={styles.activePillText}>{SORT_LABELS[sortMode].label}</Text>
+                <Ionicons name="close-circle" size={13} color={colors.text2} />
+              </View>
+            </PressableScale>
+          )}
+        </View>
       </View>
 
       <FlatList
@@ -346,9 +465,57 @@ function plural(n: number) {
 
 const styles = StyleSheet.create({
   searchWrap: { paddingHorizontal: 16, paddingBottom: 8 },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   searchInner: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 8 },
   searchInput: { flex: 1, color: colors.text, fontSize: 15, paddingVertical: 0 },
-  count: { ...type.caption, color: colors.text3, marginTop: 8, marginLeft: 4 },
+  filterBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: colors.glass,
+    borderWidth: StyleSheet.hairlineWidth * 2,
+    borderColor: colors.stroke,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterBtnActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  filterMenu: {
+    marginTop: 8,
+    borderWidth: StyleSheet.hairlineWidth * 2,
+    borderColor: colors.stroke,
+    overflow: 'hidden',
+  },
+  filterInner: { padding: 6, gap: 2 },
+  filterOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    gap: 10,
+  },
+  filterOptionActive: {
+    backgroundColor: colors.accent,
+  },
+  filterOptionText: { ...type.body, fontSize: 14, color: colors.text, fontWeight: '500' },
+  filterOptionTextActive: { color: colors.onAccent, fontWeight: '700' },
+  metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8, paddingHorizontal: 4 },
+  activePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  activePillText: { ...type.caption, fontSize: 11, color: colors.text2, fontWeight: '600' },
+  count: { ...type.caption, color: colors.text3, marginLeft: 2 },
   row: {
     height: ROW_H,
     flexDirection: 'row',

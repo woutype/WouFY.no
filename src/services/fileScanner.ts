@@ -58,7 +58,7 @@ async function seedSamples(): Promise<void> {
 
 const metaCache = new Map<string, Awaited<ReturnType<typeof parseID3Tags>>>();
 
-async function collect(dir: string, out: { uri: string; name: string; size?: number }[], lrc: Set<string>) {
+async function collect(dir: string, out: { uri: string; name: string; size?: number; mtime?: number }[], lrc: Set<string>) {
   let items: string[] = [];
   try {
     items = await FileSystem.readDirectoryAsync(dir);
@@ -75,7 +75,7 @@ async function collect(dir: string, out: { uri: string; name: string; size?: num
       if (info.isDirectory) {
         await collect(`${uri}/`, out, lrc);
       } else if (AUDIO_RE.test(item)) {
-        out.push({ uri, name: item, size: info.size });
+        out.push({ uri, name: item, size: info.size, mtime: info.modificationTime });
       } else if (/\.lrc$/i.test(item)) {
         lrc.add(uri);
       }
@@ -89,7 +89,7 @@ async function collect(dir: string, out: { uri: string; name: string; size?: num
 export async function scanLibrary(): Promise<TrackFile[]> {
   await ensureAppFolders();
 
-  let found: { uri: string; name: string; size?: number }[] = [];
+  let found: { uri: string; name: string; size?: number; mtime?: number }[] = [];
   let lrcSet = new Set<string>();
   await collect(docDir(), found, lrcSet);
 
@@ -142,6 +142,12 @@ export async function scanLibrary(): Promise<TrackFile[]> {
       album = 'Сингл';
     }
 
+    let trackNumber = meta.trackNumber;
+    if (!trackNumber) {
+      const match = (title || baseName).match(/^(\d+)[\.\s\-_]/);
+      if (match) trackNumber = parseInt(match[1], 10);
+    }
+
     tracks.push({
       id,
       uri: f.uri,
@@ -155,6 +161,8 @@ export async function scanLibrary(): Promise<TrackFile[]> {
       lrcUri: lrcSet.has(lrcUri) ? lrcUri : undefined,
       bpmTag: meta.bpm,
       size: f.size,
+      mtime: f.mtime,
+      trackNumber,
       extension: ext as AudioExtension,
     });
   }

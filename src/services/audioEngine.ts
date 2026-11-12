@@ -239,7 +239,17 @@ export class AudioEngine {
     if (!this.state.shuffle) this.baseOrder = q.map((t) => t.id);
     this.preloadedId = null;
     this.set({ queue: q, index });
-    this.persist();
+    setTimeout(() => this.persist(), 50);
+    this.onTrackChange(this.currentTrack, this.upcoming());
+  }
+
+  reorderQueue(newQueue: TrackFile[]) {
+    const cur = this.currentTrack;
+    const index = cur ? newQueue.findIndex((t) => t.id === cur.id) : -1;
+    if (!this.state.shuffle) this.baseOrder = newQueue.map((t) => t.id);
+    this.preloadedId = null;
+    this.set({ queue: newQueue, index });
+    setTimeout(() => this.persist(), 50);
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
 

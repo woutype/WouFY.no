@@ -174,6 +174,7 @@ function Root() {
               onSearchChange={setSearch}
               onPlay={(i) => engine.playIndex(i)}
               onMove={(a, b) => engine.moveQueueItem(a, b)}
+              onReorder={(q) => engine.reorderQueue(q)}
               onRefresh={rescan}
               bottomPad={bottomPad}
             />

@@ -49,6 +49,7 @@ interface PressableScaleProps {
   hitSlop?: number;
   scaleTo?: number;
   disabled?: boolean;
+  onLayout?: (e: LayoutChangeEvent) => void;
   children?: React.ReactNode;
 }
 
@@ -60,6 +61,7 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
   hitSlop = 8,
   scaleTo = 0.9,
   disabled,
+  onLayout,
   children,
 }) => {
   const scale = useRef(new Animated.Value(1)).current;
@@ -79,6 +81,7 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
       disabled={disabled}
       hitSlop={hitSlop}
       style={pressableStyle}
+      onLayout={onLayout}
       onPressIn={() => to(scaleTo)}
       onPressOut={() => to(1)}
       onLongPress={onLongPress}

@@ -170,8 +170,8 @@ export const SettingsModal: React.FC<Props> = ({
               })}
             </View>
 
-            <Text style={[styles.h1, { marginTop: 28 }]}>Текущий трек</Text>
-            <Glass radius={20}>
+            <Text style={[styles.h1, { marginTop: 32, marginBottom: 10 }]}>Текущий трек</Text>
+            <Glass radius={20} style={{ marginBottom: 12 }}>
               <View style={[styles.row, { padding: 16 }]}>
                 <View style={styles.info}>
                   <Text style={styles.rowTitle} numberOfLines={1}>{bpmInfo?.title ?? '—'}</Text>
@@ -185,8 +185,8 @@ export const SettingsModal: React.FC<Props> = ({
               </View>
             </Glass>
 
-            <Text style={[styles.h1, { marginTop: 28 }]}>Библиотека</Text>
-            <Glass radius={20}>
+            <Text style={[styles.h1, { marginTop: 24, marginBottom: 10 }]}>Библиотека</Text>
+            <Glass radius={20} style={{ marginBottom: 24 }}>
               <View style={[styles.row, { padding: 16 }]}>
                 <View style={styles.info}>
                   <Text style={styles.rowTitle}>{trackCount} треков</Text>

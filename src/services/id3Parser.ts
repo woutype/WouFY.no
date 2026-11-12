@@ -7,6 +7,7 @@ export interface AudioMetadata {
   album?: string;
   bpm?: number;
   artworkUri?: string; // file:// из кэша
+  trackNumber?: number;
   lyrics?: string;
   syncedLyrics?: SyncedLyricLine[];
 }
@@ -226,6 +227,10 @@ export async function parseID3Tags(fileUri: string, cacheKey: string): Promise<A
         meta.album = decodeText(data, pStart + 1, pEnd, enc).trim();
       } else if (frameId === 'TBPM') {
         meta.bpm = parseBpm(decodeText(data, pStart + 1, pEnd, enc));
+      } else if (frameId === 'TRCK') {
+        const trckStr = decodeText(data, pStart + 1, pEnd, enc).trim();
+        const num = parseInt(trckStr.split('/')[0], 10);
+        if (!isNaN(num) && num > 0) meta.trackNumber = num;
       } else if (frameId === 'USLT') {
         const [, afterDesc] = findTerminator(data, pStart + 4, pEnd, enc);
         meta.lyrics = decodeText(data, afterDesc, pEnd, enc).trim();
