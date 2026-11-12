@@ -26,6 +26,10 @@ interface Transition {
   plan: MixPlan;
   /** «медиа-секунд» до конца A, с которых идёт склейка */
   trigger: number;
+  /** wall-clock момент старта склейки (мс) */
+  startedAt: number;
+  /** wall-clock продолжительность склейки (мс) = trigger / rateA_avg * 1000 */
+  durationMs: number;
   uiSwitched: boolean;
   lastRateAt: number;
   lastRateA: number;
@@ -500,10 +504,12 @@ export class AudioEngine {
     // НЕ делаем seekTo прямо здесь — seekTo блокирует аудио-поток на ~100-200 мс и
     // создаёт слышимый щелчок. Вместо этого seekTo уже выполнен раньше при предзагрузке
     // (см. scheduleBeatSync), поэтому здесь просто включаем плеер.
+    const now = Date.now();
     safe(() => {
       idle.setPlaybackRate(rateB, 'high');
-      idle.volume = volB * master;
+      idle.volume = 0;      // ← стартуем строго с 0, driveTransition сразу поднимет до volB
       idle.play();
+      a.volume = master;    // ← убеждаемся что A играет на полной громкости прямо сейчас
       if (plan.tempo) a.setPlaybackRate(rateA, 'high');
     });
 
@@ -513,47 +519,53 @@ export class AudioEngine {
       toId: nxt.id,
       plan,
       trigger: plan.triggerRemaining,
+      startedAt: now,
+      durationMs: this.dj.crossfadeDuration * 1000,
       uiSwitched: false,
-      lastRateAt: Date.now(),
+      lastRateAt: now,
       lastRateA: rateA,
       lastRateB: rateB,
-      lastVolA: volA * master,
-      lastVolB: volB * master,
+      lastVolA: master,
+      lastVolB: 0,
     };
     this.set({ mixing: true });
   };
 
-  private driveTransition(pos: number, dur: number) {
+  private driveTransition(_pos: number, _dur: number) {
     const t = this.trans!;
-    const remaining = dur - pos;
+
+    // ── Прогресс по wall-clock времени (надёжнее, чем позиция плеера) ────────────────
+    // currentTime плеера A обнуляется когда трек заканчивается и поэтому ломает расчёт.
+    // Date.now() всегда растёт монотонно.
+    const elapsed = Date.now() - t.startedAt;
     const aStopped = !(safe(() => t.from.playing) ?? true);
-    const ended = remaining <= 0.03 || (aStopped && remaining < 0.35);
-    const p = ended ? 1 : clamp(1 - remaining / t.trigger, 0, 1);
+    // Принудительно заканчиваем если плеер А остановился или время вышло
+    const ended = elapsed >= t.durationMs || aStopped;
+    const p = ended ? 1 : clamp(elapsed / t.durationMs, 0, 1);
 
     const { volA, volB } = volumesAt(p, this.dj.fadeVolumeEnabled);
     const master = this.state.volume;
     const targetVolA = volA * master;
     const targetVolB = volB * master;
 
-    // Обновляем громкость на каждом тике — порог 0.005 блокирует лишние native-вызовы
-    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.005 || p >= 1) {
+    // Обновляем громкость на каждом тике — порог 0.004 блокирует лишние native-вызовы
+    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.004 || p >= 1) {
       safe(() => (t.from.volume = targetVolA));
       t.lastVolA = targetVolA;
     }
-    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.005 || p >= 1) {
+    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.004 || p >= 1) {
       safe(() => (t.to.volume = targetVolB));
       t.lastVolB = targetVolB;
     }
 
-    // Rate обновляем каждый тик (25 мс) без лишнего 350 мс дросселя,
-    // порог 0.01 блокирует копеечные изменения
+    // Rate обновляем каждый тик (25 мс), порог 0.008 блокирует микроизменения
     if (t.plan.tempo) {
       const { rateA, rateB } = ratesAt(t.plan, p);
-      if (Math.abs(rateA - t.lastRateA) >= 0.01) {
+      if (Math.abs(rateA - t.lastRateA) >= 0.008) {
         safe(() => t.from.setPlaybackRate(rateA, 'high'));
         t.lastRateA = rateA;
       }
-      if (Math.abs(rateB - t.lastRateB) >= 0.01) {
+      if (Math.abs(rateB - t.lastRateB) >= 0.008) {
         safe(() => t.to.setPlaybackRate(rateB, 'high'));
         t.lastRateB = rateB;
       }
