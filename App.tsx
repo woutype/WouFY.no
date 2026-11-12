@@ -166,30 +166,34 @@ function Root() {
         pointerEvents={expanded ? 'none' : 'auto'}
       >
         <AmbientBackground uri={track?.artworkUri} />
-        <SheetPanel mode={sheet} onModeChange={setSheet} progress={progress} onSettle={settle} topInset={m.top}>
-          {sheet === 'queue' ? (
-            <QueueView
-              tracks={state.queue}
-              currentIndex={state.index}
-              isPlaying={state.isPlaying}
-              searchQuery={search}
-              onSearchChange={setSearch}
-              onPlay={(i) => engine.playIndex(i)}
-              onMove={(a, b) => engine.moveQueueItem(a, b)}
-              onReorder={(q) => engine.reorderQueue(q)}
-              onRefresh={rescan}
-              bottomPad={bottomPad}
-            />
-          ) : (
-            <LyricsView
-              engine={engine}
-              track={track}
-              duration={state.duration}
-              isPlaying={state.isPlaying}
-              bottomPad={bottomPad}
-              onSaved={rescan}
-            />
-          )}
+        <SheetPanel
+          mode={sheet}
+          onModeChange={setSheet}
+          progress={progress}
+          onSettle={settle}
+          topInset={m.top}
+          width={m.W}
+        >
+          <QueueView
+            tracks={state.queue}
+            currentIndex={state.index}
+            isPlaying={state.isPlaying}
+            searchQuery={search}
+            onSearchChange={setSearch}
+            onPlay={(i) => engine.playIndex(i)}
+            onMove={(a, b) => engine.moveQueueItem(a, b)}
+            onReorder={(q) => engine.reorderQueue(q)}
+            onRefresh={rescan}
+            bottomPad={bottomPad}
+          />
+          <LyricsView
+            engine={engine}
+            track={track}
+            duration={state.duration}
+            isPlaying={state.isPlaying}
+            bottomPad={bottomPad}
+            onSaved={rescan}
+          />
         </SheetPanel>
       </Animated.View>
 

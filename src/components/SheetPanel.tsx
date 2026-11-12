@@ -1,5 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, LayoutChangeEvent, PanResponder, StyleSheet, Text, View } from 'react-native';
+import {
+  Animated,
+  Dimensions,
+  LayoutChangeEvent,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  PanResponder,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { colors, type } from '../theme';
@@ -12,27 +23,41 @@ interface Props {
   progress: Animated.Value;
   onSettle: (target: 0 | 1) => void;
   topInset: number;
-  children: React.ReactNode;
+  width?: number;
+  children: [React.ReactNode, React.ReactNode] | React.ReactNode[];
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-/** Каркас вторичных экранов: вкладки-подчёркивания и закрытие по свайпу вниз */
-export const SheetPanel: React.FC<Props> = ({ mode, onModeChange, progress, onSettle, topInset, children }) => {
+/** Каркас вторичных экранов: горизонтальный пейджер между Очередью и Текстом, скользящее подчёркивание */
+export const SheetPanel: React.FC<Props> = ({
+  mode,
+  onModeChange,
+  progress,
+  onSettle,
+  topInset,
+  width,
+  children,
+}) => {
+  const screenWidth = width && width > 0 ? width : Dimensions.get('window').width;
   const base = useRef(0);
   const lastVal = useRef(0);
   const [layouts, setLayouts] = useState<{ [k in 'queue' | 'lyrics']?: { x: number; width: number } }>({});
-  const tabAnim = useRef(new Animated.Value(mode === 'queue' ? 0 : 1)).current;
+  const scrollRef = useRef<ScrollView>(null);
+  const scrollX = useRef(new Animated.Value(mode === 'queue' ? 0 : screenWidth)).current;
+  const isProgrammatic = useRef(false);
 
+  // Синхронизация скролла при внешнем изменении mode (нажатие на таб или кнопка из плеера)
   useEffect(() => {
-    Animated.spring(tabAnim, {
-      toValue: mode === 'queue' ? 0 : 1,
-      useNativeDriver: false,
-      damping: 20,
-      stiffness: 240,
-      mass: 0.8,
-    }).start();
-  }, [mode, tabAnim]);
+    const targetX = mode === 'queue' ? 0 : screenWidth;
+    isProgrammatic.current = true;
+    (scrollRef.current as any)?.scrollTo({ x: targetX, animated: true });
+    // Через 350мс снимаем флаг
+    const timer = setTimeout(() => {
+      isProgrammatic.current = false;
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [mode, screenWidth]);
 
   useEffect(() => {
     const id = progress.addListener(({ value }) => {
@@ -68,41 +93,40 @@ export const SheetPanel: React.FC<Props> = ({ mode, onModeChange, progress, onSe
     })
   ).current;
 
-  // Свайп ВЛЕВО / ВПРАВО по экрану → переключение между Очередь и Текст
-  const bodySwipePan = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) =>
-        Math.abs(g.dx) > 22 && Math.abs(g.dx) > Math.abs(g.dy) * 1.7,
-      onPanResponderTerminationRequest: () => true,
-      onPanResponderRelease: (_, g) => {
-        if (g.dx < -40 || g.vx < -0.4) {
-          if (mode === 'queue') {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            onModeChange('lyrics');
-          }
-        } else if (g.dx > 40 || g.vx > 0.4) {
-          if (mode === 'lyrics') {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            onModeChange('queue');
-          }
-        }
-      },
-    })
-  ).current;
+  const handleTabPress = (targetMode: 'queue' | 'lyrics') => {
+    if (targetMode === mode) return;
+    onModeChange(targetMode);
+  };
+
+  const onMomentumScrollEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const page = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
+    const newMode = page === 0 ? 'queue' : 'lyrics';
+    if (newMode !== mode) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      onModeChange(newMode);
+    }
+  };
 
   const qX = layouts.queue?.x ?? 0;
   const qW = layouts.queue?.width ?? 112;
   const lX = layouts.lyrics?.x ?? 136;
   const lW = layouts.lyrics?.width ?? 76;
 
-  const lineLeft = tabAnim.interpolate({
-    inputRange: [0, 1],
+  // Подчёркивание плавно следует за пальцем в реальном времени при свайпе
+  const lineLeft = scrollX.interpolate({
+    inputRange: [0, screenWidth],
     outputRange: [qX, lX],
+    extrapolate: 'clamp',
   });
-  const lineWidth = tabAnim.interpolate({
-    inputRange: [0, 1],
+  const lineWidth = scrollX.interpolate({
+    inputRange: [0, screenWidth],
     outputRange: [qW, lW],
+    extrapolate: 'clamp',
   });
+
+  const childrenArray = React.Children.toArray(children);
+  const queueChild = childrenArray[0];
+  const lyricsChild = childrenArray[1];
 
   return (
     <View style={{ flex: 1, paddingTop: topInset }}>
@@ -114,12 +138,12 @@ export const SheetPanel: React.FC<Props> = ({ mode, onModeChange, progress, onSe
             return (
               <PressableScale
                 key={m}
-                onPress={() => onModeChange(m)}
+                onPress={() => handleTabPress(m)}
                 haptic="selection"
                 scaleTo={0.96}
                 onLayout={(e: LayoutChangeEvent) => {
-                  const { x, width } = e.nativeEvent.layout;
-                  setLayouts((prev) => ({ ...prev, [m]: { x, width } }));
+                  const { x, width: w } = e.nativeEvent.layout;
+                  setLayouts((prev) => ({ ...prev, [m]: { x, width: w } }));
                 }}
               >
                 <View style={styles.tab}>
@@ -130,7 +154,7 @@ export const SheetPanel: React.FC<Props> = ({ mode, onModeChange, progress, onSe
               </PressableScale>
             );
           })}
-          {/* Единое плавно скользящее подчёркивание */}
+          {/* Единое плавно скользящее подчёркивание за свайпом */}
           <Animated.View style={[styles.slidingUnderline, { left: lineLeft, width: lineWidth }]} />
         </View>
         <PressableScale onPress={() => onSettle(1)} hitSlop={12}>
@@ -139,9 +163,31 @@ export const SheetPanel: React.FC<Props> = ({ mode, onModeChange, progress, onSe
           </View>
         </PressableScale>
       </View>
-      <View style={{ flex: 1 }} {...bodySwipePan.panHandlers}>
-        {children}
-      </View>
+
+      {/* Горизонтальный пейджер между вкладками Очередь и Текст */}
+      <Animated.ScrollView
+        ref={scrollRef as any}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        bounces={false}
+        directionalLockEnabled
+        scrollEventThrottle={16}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { x: scrollX } } }],
+          { useNativeDriver: false }
+        )}
+        onMomentumScrollEnd={onMomentumScrollEnd}
+        contentOffset={{ x: mode === 'queue' ? 0 : screenWidth, y: 0 }}
+        style={{ flex: 1 }}
+      >
+        <View style={{ width: screenWidth, flex: 1 }}>
+          {queueChild}
+        </View>
+        <View style={{ width: screenWidth, flex: 1 }}>
+          {lyricsChild}
+        </View>
+      </Animated.ScrollView>
     </View>
   );
 };
