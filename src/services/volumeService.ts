@@ -1,11 +1,4 @@
-let VolumeManager: any = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const vm = require('react-native-volume-manager');
-  VolumeManager = vm?.VolumeManager ?? vm?.default ?? vm;
-} catch {
-  VolumeManager = null;
-}
+import { VolumeManager } from 'react-native-volume-manager';
 
 let currentVolume = 0.8;
 type Listener = (volume: number) => void;
@@ -15,7 +8,7 @@ let nativeListenerActive = false;
 let removeNativeListener: (() => void) | null = null;
 
 function setupNativeListener() {
-  if (nativeListenerActive || !VolumeManager?.addVolumeListener) return;
+  if (nativeListenerActive) return;
   try {
     const sub = VolumeManager.addVolumeListener((result: { volume: number }) => {
       if (typeof result?.volume === 'number') {
@@ -32,49 +25,46 @@ function setupNativeListener() {
       }
     };
     nativeListenerActive = true;
-  } catch {
-    /* native volume listener not supported in current environment */
+  } catch (e) {
+    console.warn('[volumeService] native listener setup failed:', e);
   }
 }
 
 export const volumeService = {
+  /** Получить реальный текущий уровень громкости устройства (0.0 .. 1.0) */
   async getVolume(): Promise<number> {
-    if (VolumeManager?.getVolume) {
-      try {
-        const res = await VolumeManager.getVolume();
-        const v = typeof res === 'number' ? res : res?.volume;
-        if (typeof v === 'number') {
-          currentVolume = Math.max(0, Math.min(1, v));
-          return currentVolume;
-        }
-      } catch {
-        /* ignore */
+    try {
+      const res = await VolumeManager.getVolume();
+      const v = typeof res === 'number' ? res : res?.volume;
+      if (typeof v === 'number') {
+        currentVolume = Math.max(0, Math.min(1, v));
+        return currentVolume;
       }
+    } catch (e) {
+      console.warn('[volumeService] getVolume failed:', e);
     }
     return currentVolume;
   },
 
+  /** Установить системную громкость телефона (кнопки и слайдер iPhone) */
   async setVolume(volume: number) {
     const v = Math.max(0, Math.min(1, volume));
     currentVolume = v;
     listeners.forEach((fn) => fn(v));
 
-    if (VolumeManager?.setVolume) {
-      try {
-        await VolumeManager.setVolume(v);
-      } catch {
-        /* ignore */
-      }
+    try {
+      await VolumeManager.setVolume(v, { showUI: false });
+    } catch (e) {
+      console.warn('[volumeService] setVolume failed:', e);
     }
   },
 
   addListener(fn: Listener): () => void {
     listeners.add(fn);
     setupNativeListener();
-    // немедленно сообщаем текущий уровень
     fn(currentVolume);
 
-    // синхронизируем с реальным системным уровнем
+    // Сразу опрашиваем физический уровень громкости телефона
     this.getVolume().then((v) => {
       fn(v);
     });

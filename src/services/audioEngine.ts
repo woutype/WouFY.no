@@ -101,11 +101,11 @@ export class AudioEngine {
     });
     this.timer = setInterval(this.tick, TICK_MS);
 
-    // Синхронизация с громкостью телефона (кнопки громкости iPhone)
+    // Синхронизация с физической громкостью телефона (кнопки iPhone и Центр управления)
     volumeService.addListener((vol) => {
-      if (Math.abs(this.state.volume - vol) >= 0.015) {
+      if (Date.now() - this.lastUserVolumeChangeAt < 250) return;
+      if (Math.abs(this.state.volume - vol) >= 0.005) {
         this.set({ volume: vol });
-        if (!this.trans) safe(() => (this.A.volume = vol));
         this.persist();
       }
     });
@@ -209,7 +209,7 @@ export class AudioEngine {
     safe(() => {
       this.A.replace({ uri: t.uri });
       this.A.setPlaybackRate(1, 'low');
-      this.A.volume = this.state.volume;
+      this.A.volume = 1;
     });
     this.updateLockScreen(this.A, t);
     this.notifyTrackChange();
@@ -290,11 +290,15 @@ export class AudioEngine {
     this.persist();
   }
 
-  setVolume(v: number) {
+  private lastUserVolumeChangeAt = 0;
+
+  setVolume(v: number, syncToDevice = true) {
     const volume = clamp(v, 0, 1);
+    this.lastUserVolumeChangeAt = Date.now();
     this.set({ volume });
-    volumeService.setVolume(volume);
-    if (!this.trans) safe(() => (this.A.volume = volume));
+    if (syncToDevice) {
+      volumeService.setVolume(volume);
+    }
     this.persist();
   }
 
@@ -312,7 +316,7 @@ export class AudioEngine {
       this.B.pause();
       this.A.replace({ uri: t.uri });
       this.A.setPlaybackRate(1, 'low');
-      this.A.volume = this.state.volume;
+      this.A.volume = 1;
       this.A.play();
     });
     this.preloadedId = null;
@@ -499,8 +503,6 @@ export class AudioEngine {
       return;
     }
 
-    const master = this.state.volume;
-
     // ── Beat-sync: подгоняем темп трека B под трек A ───────────────────────────────
     // Трек B стартует с темпом трека A (наложение в ритм), а за время перехода
     // плавно выравнивается на свою родную скорость 1.0 (BPM трека B).
@@ -513,7 +515,7 @@ export class AudioEngine {
       }
       idle.volume = 0;      // ← стартуем строго с 0, driveTransition плавно поднимет громкость
       idle.play();
-      a.volume = master;    // ← убеждаемся что A играет на полной громкости
+      a.volume = 1;         // ← A играет на полной громкости (мастер управляется системой)
     });
 
     this.trans = {
@@ -528,7 +530,7 @@ export class AudioEngine {
       initialRateB,
       lastRateB: initialRateB,
       lastRateAt: now,
-      lastVolA: master,
+      lastVolA: 1,
       lastVolB: 0,
     };
     this.set({ mixing: true });
@@ -542,18 +544,15 @@ export class AudioEngine {
     const p = clamp(elapsed / t.durationMs, 0, 1);
 
     const { volA, volB } = volumesAt(p, this.dj.fadeVolumeEnabled);
-    const master = this.state.volume;
-    const targetVolA = volA * master;
-    const targetVolB = volB * master;
 
     // Обновляем громкость плавно (равномерная по мощности кривая cos/sin)
-    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.005 || p >= 1) {
-      safe(() => (t.from.volume = targetVolA));
-      t.lastVolA = targetVolA;
+    if (t.lastVolA === undefined || Math.abs(volA - t.lastVolA) >= 0.005 || p >= 1) {
+      safe(() => (t.from.volume = volA));
+      t.lastVolA = volA;
     }
-    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.005 || p >= 1) {
-      safe(() => (t.to.volume = targetVolB));
-      t.lastVolB = targetVolB;
+    if (t.lastVolB === undefined || Math.abs(volB - t.lastVolB) >= 0.005 || p >= 1) {
+      safe(() => (t.to.volume = volB));
+      t.lastVolB = volB;
     }
 
     // ── Плавное перетекание скорости трека B в его родной темп (1.0) ──────────────────
@@ -591,14 +590,13 @@ export class AudioEngine {
     const t = this.trans;
     if (!t) return;
     if (!t.uiSwitched) this.switchUiToIncoming();
-    const master = this.state.volume;
     safe(() => {
       t.from.pause();
       t.from.volume = 0;
       if (t.plan.tempo && Math.abs(t.lastRateB - 1.0) > 0.002) {
         t.to.setPlaybackRate(1.0, 'low');
       }
-      t.to.volume = master;
+      t.to.volume = 1;
     });
     this.active = this.players.indexOf(t.to);
     this.trans = null;
@@ -619,7 +617,7 @@ export class AudioEngine {
       t.to.pause();
       t.to.volume = 0;
       t.to.setPlaybackRate(1.0, 'low');
-      t.from.volume = this.state.volume;
+      t.from.volume = 1;
     });
     this.trans = null;
     this.preloadedId = null;

@@ -4,6 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { scanLibrary } from './src/services/fileScanner';
 import { bpmService } from './src/services/bpm';
+import { volumeService } from './src/services/volumeService';
 import { flushState, getState, loadState, patchState } from './src/services/library';
 import { useAudioEngine, useEngineState } from './src/hooks/useAudioController';
 import { useMetrics } from './src/layout';
@@ -62,15 +63,24 @@ function Root() {
       const settings = { ...DEFAULT_DJ, ...(st.dj ?? {}) };
       setDj(settings);
       engine.setDJ(settings);
-      if (st.volume !== undefined) engine.setVolume(st.volume);
+      try {
+        const curVol = await volumeService.getVolume();
+        engine.setVolume(curVol, false);
+      } catch {
+        if (st.volume !== undefined) engine.setVolume(st.volume, false);
+      }
       if (st.repeat) engine.setRepeat(st.repeat);
       await rescan();
       if (st.shuffle) engine.setShuffle(true);
       setReady(true);
     })();
     const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') rescan(); // подхватываем файлы, добавленные через «Файлы»
-      else flushState();
+      if (s === 'active') {
+        rescan(); // подхватываем файлы, добавленные через «Файлы»
+        volumeService.getVolume().then((vol) => engine.setVolume(vol, false));
+      } else {
+        flushState();
+      }
     });
     return () => sub.remove();
   }, [engine, rescan]);
