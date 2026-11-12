@@ -187,6 +187,7 @@ function Root() {
           <QueueView
             tracks={state.queue}
             currentIndex={state.index}
+            currentTrackId={engine.currentTrack?.id}
             isPlaying={state.isPlaying}
             searchQuery={search}
             onSearchChange={setSearch}

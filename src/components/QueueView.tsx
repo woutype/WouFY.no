@@ -75,6 +75,7 @@ interface RowProps {
   isPast: boolean;
   canDrag: boolean;
   shift: number; // -1, 0, 1 — сдвиг при перетаскивании соседа
+  hasActiveDrag: boolean;
   dragging: boolean;
   dragY: Animated.Value;
   onPress: () => void;
@@ -85,13 +86,29 @@ interface RowProps {
 
 const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const shiftAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+
   useEffect(() => {
-    if (p.shift === 0) {
+    if (!p.hasActiveDrag) {
       shiftAnim.setValue(0);
     } else {
-      Animated.timing(shiftAnim, { toValue: p.shift * ROW_H, duration: 80, useNativeDriver: true }).start();
+      Animated.timing(shiftAnim, {
+        toValue: p.shift * ROW_H,
+        duration: 110,
+        useNativeDriver: true,
+      }).start();
     }
-  }, [p.shift, shiftAnim]);
+  }, [p.shift, p.hasActiveDrag, shiftAnim]);
+
+  useEffect(() => {
+    Animated.spring(scaleAnim, {
+      toValue: p.dragging ? 1.025 : 1,
+      damping: 22,
+      stiffness: 280,
+      mass: 0.7,
+      useNativeDriver: true,
+    }).start();
+  }, [p.dragging, scaleAnim]);
 
   const cb = useRef(p);
   cb.current = p;
@@ -115,9 +132,9 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
         {
           transform: [
             { translateY: p.dragging ? p.dragY : shiftAnim },
-            { scale: p.dragging ? 1.02 : 1 },
+            { scale: scaleAnim },
           ],
-          zIndex: p.dragging ? 99 : 0,
+          zIndex: p.dragging ? 999 : 1,
         },
       ]}
     >
@@ -151,6 +168,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
 interface Props {
   tracks: TrackFile[]; // очередь в порядке воспроизведения
   currentIndex: number;
+  currentTrackId?: string;
   isPlaying: boolean;
   searchQuery: string;
   onSearchChange: (q: string) => void;
@@ -164,6 +182,7 @@ interface Props {
 export const QueueView: React.FC<Props> = ({
   tracks,
   currentIndex,
+  currentTrackId,
   isPlaying,
   searchQuery,
   onSearchChange,
@@ -180,8 +199,14 @@ export const QueueView: React.FC<Props> = ({
   const [sortMode, setSortMode] = useState<SortOption>('default');
   const [showFilterMenu, setShowFilterMenu] = useState(false);
 
+  const isReorderingRef = useRef(false);
   const [localTracks, setLocalTracks] = useState(tracks);
+
   useEffect(() => {
+    if (isReorderingRef.current) {
+      isReorderingRef.current = false;
+      return;
+    }
     if (!drag) setLocalTracks(sortMode === 'default' ? tracks : applySort(tracks, sortMode));
   }, [tracks, drag, sortMode]);
 
@@ -272,12 +297,16 @@ export const QueueView: React.FC<Props> = ({
     dragInfo.current.from = -1;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-    if (hover === from) {
-      Animated.timing(dragY, { toValue: 0, duration: 60, useNativeDriver: true }).start(() => {
+    if (hover === from || hover < 0) {
+      Animated.timing(dragY, { toValue: 0, duration: 100, useNativeDriver: true }).start(() => {
         setDrag(null);
       });
     } else {
-      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 60, useNativeDriver: true }).start(() => {
+      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 110, useNativeDriver: true }).start(() => {
+        isReorderingRef.current = true;
+        // 1. Синхронно обновляем очередь в движке
+        onMove(from, hover);
+        // 2. В том же тике обновляем локальный список без задержек и гонок
         setLocalTracks((prev) => {
           const next = [...prev];
           const [moved] = next.splice(from, 1);
@@ -287,9 +316,6 @@ export const QueueView: React.FC<Props> = ({
         setSortMode('default');
         dragY.setValue(0);
         setDrag(null);
-        setTimeout(() => {
-          onMove(from, hover);
-        }, 0);
       });
     }
   }, [dragY, onMove]);
@@ -304,21 +330,32 @@ export const QueueView: React.FC<Props> = ({
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const currentTrackIndex = useMemo(
+    () => (currentTrackId ? localTracks.findIndex((t) => t.id === currentTrackId) : currentIndex),
+    [localTracks, currentTrackId, currentIndex]
+  );
+
   const renderItem = ({ item }: { item: { track: TrackFile; qi: number } }) => {
     let shift = 0;
     if (drag) {
       if (drag.from < drag.hover && item.qi > drag.from && item.qi <= drag.hover) shift = -1;
       else if (drag.hover < drag.from && item.qi >= drag.hover && item.qi < drag.from) shift = 1;
     }
+    const isCurrent = currentTrackId
+      ? item.track.id === currentTrackId
+      : item.qi === currentIndex;
+    const isPast = item.qi < (currentTrackIndex >= 0 ? currentTrackIndex : currentIndex);
+
     return (
       <QueueRow
         track={item.track}
         queueIndex={item.qi}
-        isCurrent={item.qi === currentIndex}
+        isCurrent={isCurrent}
         isPlaying={isPlaying}
-        isPast={item.qi < currentIndex}
+        isPast={isPast}
         canDrag={!filtering}
         shift={shift}
+        hasActiveDrag={drag !== null}
         dragging={drag?.from === item.qi}
         dragY={dragY}
         onPress={() => onPlay(item.qi)}
