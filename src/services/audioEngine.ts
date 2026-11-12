@@ -28,19 +28,19 @@ interface Transition {
   trigger: number;
   /** wall-clock момент старта склейки (мс) */
   startedAt: number;
-  /** wall-clock продолжительность склейки (мс) = trigger / rateA_avg * 1000 */
+  /** wall-clock продолжительность склейки (мс) */
   durationMs: number;
   uiSwitched: boolean;
-  lastRateAt: number;
-  lastRateA: number;
-  lastRateB: number;
   lastVolA?: number;
   lastVolB?: number;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-/** Как часто тикает DJ-движок (мс). 25 мс = ~40 Гц — плавный fade/rate без лишней нагрузки. */
-const TICK_MS = 25;
+/**
+ * Тик основного таймера DJ-движка.
+ * 40 мс = 25 Гц обновлений громкости — идеально плавный fade без лишней нагрузки на bridge.
+ */
+const TICK_MS = 40;
 /** За сколько секунд до конца трека начинаем предзагрузку следующего (буферизация). */
 const PRELOAD_AHEAD_SEC = 30;
 
@@ -496,21 +496,23 @@ export class AudioEngine {
       return;
     }
 
-    const { rateA, rateB } = ratesAt(plan, p0);
-    const { volA, volB } = volumesAt(p0, this.dj.fadeVolumeEnabled);
     const master = this.state.volume;
 
-    // ── Beat-sync: выравниваем фазу трека B с треком A ───────────────────────────────
-    // НЕ делаем seekTo прямо здесь — seekTo блокирует аудио-поток на ~100-200 мс и
-    // создаёт слышимый щелчок. Вместо этого seekTo уже выполнен раньше при предзагрузке
-    // (см. scheduleBeatSync), поэтому здесь просто включаем плеер.
+    // ── Beat-sync: выравниваем темп трека B с треком A ───────────────────────────────
+    // Устанавливаем скорость трека B один раз ДО его запуска (пока громкость 0),
+    // чтобы AVPlayer подготовил аудио-поток без щелчков.
     const now = Date.now();
+    const targetRateB = plan.tempo ? clamp(plan.bpmA / plan.targetBpm, 0.90, 1.10) : 1;
     safe(() => {
-      idle.setPlaybackRate(rateB, 'high');
-      idle.volume = 0;      // ← стартуем строго с 0, driveTransition сразу поднимет до volB
+      // Подстраиваем BPM трека B заранее (пока громкость = 0 и звук не идёт),
+      // чтобы нативно подготовить аудио-поток без малейшего заикания.
+      // Играющий трек A намеренно НЕ трогаем на лету, избегая сброса буферов AVPlayer на iOS.
+      if (plan.tempo && Math.abs(targetRateB - 1) > 0.01) {
+        idle.setPlaybackRate(targetRateB);
+      }
+      idle.volume = 0;      // ← стартуем строго с 0, driveTransition плавно поднимет громкость
       idle.play();
-      a.volume = master;    // ← убеждаемся что A играет на полной громкости прямо сейчас
-      if (plan.tempo) a.setPlaybackRate(rateA, 'high');
+      a.volume = master;    // ← убеждаемся что A играет на полной громкости
     });
 
     this.trans = {
@@ -522,9 +524,6 @@ export class AudioEngine {
       startedAt: now,
       durationMs: this.dj.crossfadeDuration * 1000,
       uiSwitched: false,
-      lastRateAt: now,
-      lastRateA: rateA,
-      lastRateB: rateB,
       lastVolA: master,
       lastVolB: 0,
     };
@@ -534,12 +533,9 @@ export class AudioEngine {
   private driveTransition(_pos: number, _dur: number) {
     const t = this.trans!;
 
-    // ── Прогресс по wall-clock времени (надёжнее, чем позиция плеера) ────────────────
-    // currentTime плеера A обнуляется когда трек заканчивается и поэтому ломает расчёт.
-    // Date.now() всегда растёт монотонно.
+    // ── Прогресс по wall-clock времени (абсолютно монотонно и надёжно) ────────────────
     const elapsed = Date.now() - t.startedAt;
     const aStopped = !(safe(() => t.from.playing) ?? true);
-    // Принудительно заканчиваем если плеер А остановился или время вышло
     const ended = elapsed >= t.durationMs || aStopped;
     const p = ended ? 1 : clamp(elapsed / t.durationMs, 0, 1);
 
@@ -548,35 +544,22 @@ export class AudioEngine {
     const targetVolA = volA * master;
     const targetVolB = volB * master;
 
-    // Обновляем громкость на каждом тике — порог 0.004 блокирует лишние native-вызовы
-    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.004 || p >= 1) {
+    // Обновляем громкость плавно (равномерная по мощности кривая cos/sin)
+    // Порог 0.005 отсекает избыточные вызовы bridge
+    if (t.lastVolA === undefined || Math.abs(targetVolA - t.lastVolA) >= 0.005 || p >= 1) {
       safe(() => (t.from.volume = targetVolA));
       t.lastVolA = targetVolA;
     }
-    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.004 || p >= 1) {
+    if (t.lastVolB === undefined || Math.abs(targetVolB - t.lastVolB) >= 0.005 || p >= 1) {
       safe(() => (t.to.volume = targetVolB));
       t.lastVolB = targetVolB;
-    }
-
-    // Rate обновляем каждый тик (25 мс), порог 0.008 блокирует микроизменения
-    if (t.plan.tempo) {
-      const { rateA, rateB } = ratesAt(t.plan, p);
-      if (Math.abs(rateA - t.lastRateA) >= 0.008) {
-        safe(() => t.from.setPlaybackRate(rateA, 'high'));
-        t.lastRateA = rateA;
-      }
-      if (Math.abs(rateB - t.lastRateB) >= 0.008) {
-        safe(() => t.to.setPlaybackRate(rateB, 'high'));
-        t.lastRateB = rateB;
-      }
-      t.lastRateAt = Date.now();
     }
 
     if (p >= 0.5 && !t.uiSwitched) this.switchUiToIncoming();
     if (p >= 1) this.commitTransition();
   }
 
-  /** На середине склейки обложка/название/текст переключаются на новый трек */
+  /** На середине склейки обложка/название/текст переключаются на новый трек (только UI, без I/O) */
   private switchUiToIncoming() {
     const t = this.trans;
     if (!t) return;
@@ -587,7 +570,6 @@ export class AudioEngine {
     safe(() => t.from.clearLockScreenControls());
     this.updateLockScreen(t.to, track);
     this.set({ index: idx, player: t.to, duration: safe(() => t.to.duration) ?? 0 });
-    this.notifyTrackChange();
   }
 
   /** Завершает склейку: B становится основным, A останавливается */
@@ -599,7 +581,6 @@ export class AudioEngine {
     safe(() => {
       t.from.pause();
       t.from.volume = 0;
-      t.to.setPlaybackRate(1, 'high');
       t.to.volume = master;
     });
     this.active = this.players.indexOf(t.to);
@@ -608,10 +589,10 @@ export class AudioEngine {
     this.mixBlockedFor = null;
     this.lastCommandAt = Date.now();
     this.set({ mixing: false, player: t.to, isPlaying: this.playIntent });
-    // seekTo(0) на бывшем A-плеере откладываем: сразу после паузы
-    // seekTo блокирует аудио-поток на ~100мс — делаем это когда никто не слушает
+    // seekTo(0) на бывшем A-плеере откладываем на 300 мс после паузы
     const fromPlayer = t.from;
     setTimeout(() => safe(() => fromPlayer.seekTo(0)), 300);
+    this.notifyTrackChange();
   }
 
   private cancelTransition() {
@@ -621,7 +602,6 @@ export class AudioEngine {
       t.to.pause();
       t.to.volume = 0;
       t.from.volume = this.state.volume;
-      t.from.setPlaybackRate(1, 'high');
     });
     this.trans = null;
     this.preloadedId = null;

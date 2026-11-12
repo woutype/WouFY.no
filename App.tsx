@@ -50,8 +50,10 @@ function Root() {
     engine.configure({
       bpmLookup: (t) => bpmService.get(t.id),
       onTrackChange: (cur, upcoming) => {
-        bpmService.request(cur, true);
-        upcoming.forEach((t) => bpmService.request(t));
+        if (!engine.getState().mixing) {
+          bpmService.request(cur, true);
+          upcoming.forEach((t) => bpmService.request(t));
+        }
       },
       onPersist: (s) => patchState(s),
     });
