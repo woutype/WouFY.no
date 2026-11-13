@@ -149,7 +149,7 @@ export const SettingsModal: React.FC<Props> = ({
                   <View style={[styles.row, styles.sub]}>
                     <View style={styles.info}>
                       <Text style={styles.rowTitle}>Плавная громкость</Text>
-                      <Text style={styles.rowDesc}>Выключено — мгновенная смена в середине перехода</Text>
+                      <Text style={styles.rowDesc}>Включено — мягкая S-кривая, выключено — линейный переход</Text>
                     </View>
                     <Switch value={settings.fadeVolumeEnabled} onValueChange={(v) => set({ fadeVolumeEnabled: v })} trackColor={track} ios_backgroundColor="rgba(255,255,255,0.14)" />
                   </View>

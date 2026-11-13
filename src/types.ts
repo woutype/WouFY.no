@@ -33,7 +33,7 @@ export interface DJSettings {
   crossfadeDuration: number;
   /** подгон темпа (beatmatch) */
   bpmTransitionEnabled: boolean;
-  /** плавная кривая громкости (иначе — «резкий своп» в середине) */
+  /** плавная S-кривая громкости (иначе — линейный фейдер на всю длительность) */
   fadeVolumeEnabled: boolean;
 }
 

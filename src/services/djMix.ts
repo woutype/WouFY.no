@@ -74,7 +74,12 @@ export function ratesAt(plan: MixPlan, p: number): { rateA: number; rateB: numbe
 
 export function volumesAt(p: number, smoothFade: boolean): { volA: number; volB: number } {
   const q = clamp(p, 0, 1);
-  if (!smoothFade) return { volA: q < 0.5 ? 1 : 0, volB: q < 0.5 ? 0 : 1 };
-  // равномерная по мощности кривая — суммарная громкость не «проваливается» в середине
-  return { volA: Math.cos((q * Math.PI) / 2), volB: Math.sin((q * Math.PI) / 2) };
+  if (!smoothFade) {
+    // Линейный кроссфейд на всю длительность
+    return { volA: 1 - q, volB: q };
+  }
+  // Плавная S-кривая (smoothstep) на всю длительность: мягкий старт, ровно 50% на середине и мягкий финиш
+  const s = q * q * (3 - 2 * q);
+  return { volA: 1 - s, volB: s };
 }
+

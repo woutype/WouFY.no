@@ -510,8 +510,10 @@ export class AudioEngine {
     const now = Date.now();
     const initialRateB = plan.tempo ? clamp(plan.bpmA / plan.targetBpm, 0.88, 1.12) : 1;
     safe(() => {
-      if (plan.tempo && Math.abs(initialRateB - 1) > 0.005) {
+      if (plan.tempo && Math.abs(initialRateB - 1) > 0.002) {
         idle.setPlaybackRate(initialRateB, 'low');
+      } else {
+        idle.setPlaybackRate(1.0, 'low');
       }
       idle.volume = 0;      // ← стартуем строго с 0, driveTransition плавно поднимет громкость
       idle.play();
@@ -545,7 +547,7 @@ export class AudioEngine {
 
     const { volA, volB } = volumesAt(p, this.dj.fadeVolumeEnabled);
 
-    // Обновляем громкость плавно (равномерная по мощности кривая cos/sin)
+    // Обновляем громкость плавно (на всю длительность перехода)
     if (t.lastVolA === undefined || Math.abs(volA - t.lastVolA) >= 0.005 || p >= 1) {
       safe(() => (t.from.volume = volA));
       t.lastVolA = volA;
@@ -556,14 +558,13 @@ export class AudioEngine {
     }
 
     // ── Плавное перетекание скорости трека B в его родной темп (1.0) ──────────────────
-    if (t.plan.tempo && Math.abs(t.initialRateB - 1.0) > 0.005) {
+    if (t.plan.tempo && Math.abs(t.initialRateB - 1.0) > 0.002) {
+      const curRateB = t.initialRateB + (1.0 - t.initialRateB) * p;
       const now = Date.now();
-      if (now - t.lastRateAt >= 250) {
-        const curRateB = t.initialRateB + (1.0 - t.initialRateB) * p;
-        if (Math.abs(curRateB - t.lastRateB) >= 0.005) {
-          safe(() => t.to.setPlaybackRate(curRateB, 'low'));
-          t.lastRateB = curRateB;
-        }
+      // Обновляем скорость не чаще раз в 120 мс и если изменение >= 0.002, либо при завершении (p >= 1)
+      if ((now - t.lastRateAt >= 120 && Math.abs(curRateB - t.lastRateB) >= 0.002) || p >= 1) {
+        safe(() => t.to.setPlaybackRate(curRateB, 'low'));
+        t.lastRateB = curRateB;
         t.lastRateAt = now;
       }
     }
@@ -593,9 +594,8 @@ export class AudioEngine {
     safe(() => {
       t.from.pause();
       t.from.volume = 0;
-      if (t.plan.tempo && Math.abs(t.lastRateB - 1.0) > 0.002) {
-        t.to.setPlaybackRate(1.0, 'low');
-      }
+      t.to.setPlaybackRate(1.0, 'low');
+      t.from.setPlaybackRate(1.0, 'low');
       t.to.volume = 1;
     });
     this.active = this.players.indexOf(t.to);
@@ -617,6 +617,7 @@ export class AudioEngine {
       t.to.pause();
       t.to.volume = 0;
       t.to.setPlaybackRate(1.0, 'low');
+      t.from.setPlaybackRate(1.0, 'low');
       t.from.volume = 1;
     });
     this.trans = null;
