@@ -1,7 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { Asset } from 'expo-asset';
 import { parseID3Tags } from './id3Parser';
-import { getState, patchState, loadCachedTracks, saveCachedTracks } from './library';
+import { loadCachedTracks, saveCachedTracks } from './library';
 import { AudioExtension, TrackFile } from '../types';
 
 /** Папка, в которую пользователь кладёт музыку (видна в Файлах → На iPhone → Woufy → Music) */
@@ -32,27 +31,6 @@ export async function ensureAppFolders(): Promise<void> {
     }
   } catch (e) {
     console.warn('[fileScanner] ensureAppFolders failed:', e);
-  }
-}
-
-/** Копирует демо-треки при первом запуске, только если библиотека пуста */
-async function seedSamples(): Promise<void> {
-  const dest = musicDir();
-  const files: [any, string][] = [
-    [require('../../assets/sample.mp3'), 'NEXTIME - ТАЗОМ.mp3'],
-    [require('../../assets/sample2.mp3'), 'NEXTIME - КИС Ю.mp3'],
-  ];
-  for (const [mod, name] of files) {
-    try {
-      const target = `${dest}${name}`;
-      const info = await FileSystem.getInfoAsync(target);
-      if (info.exists) continue;
-      const asset = Asset.fromModule(mod);
-      await asset.downloadAsync();
-      if (asset.localUri) await FileSystem.copyAsync({ from: asset.localUri, to: target });
-    } catch (e) {
-      console.warn('[fileScanner] seed failed:', e);
-    }
   }
 }
 
@@ -127,14 +105,6 @@ export async function scanLibrary(): Promise<TrackFile[]> {
   let found: { uri: string; name: string }[] = [];
   let lrcSet = new Set<string>();
   await collect(docDir(), found, lrcSet);
-
-  if (found.length === 0 && !getState().samplesSeeded) {
-    await seedSamples();
-    patchState({ samplesSeeded: true });
-    found = [];
-    lrcSet = new Set<string>();
-    await collect(docDir(), found, lrcSet);
-  }
 
   const root = docDir();
   const tracks: TrackFile[] = [];
