@@ -81,9 +81,8 @@ interface RowProps {
   shift: number; // -1, 0, 1 — сдвиг при перетаскивании соседа
   hasActiveDrag: boolean;
   dragging: boolean;
-  dragY: Animated.Value;
   onPlay: (index: number, track: TrackFile) => void;
-  onDragStart: (index: number) => void;
+  onDragStart: (index: number, activeY: Animated.Value) => void;
   onDragMove: (dy: number) => void;
   onDragEnd: () => void;
 }
@@ -102,30 +101,37 @@ const DragCell = (props: any) => {
 };
 
 const QueueRow = React.memo(function QueueRow(p: RowProps) {
-  const shiftAnim = useRef(new Animated.Value(0)).current;
+  // Выделенный стабильный translateY для каждой строки — предотвращает нативный рассинхрон
+  const translateY = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
-  // Плавный сдвиг строк без дерганий и рывков
+  // Плавный сдвиг соседних строк при перетаскивании
   useLayoutEffect(() => {
+    if (p.dragging) return;
     if (!p.hasActiveDrag) {
-      shiftAnim.stopAnimation();
-      shiftAnim.setValue(0);
+      Animated.spring(translateY, {
+        toValue: 0,
+        damping: 24,
+        stiffness: 260,
+        mass: 0.5,
+        useNativeDriver: true,
+      }).start();
       return;
     }
-    Animated.spring(shiftAnim, {
+    Animated.spring(translateY, {
       toValue: p.shift * ROW_H,
       damping: 24,
-      stiffness: 240,
+      stiffness: 260,
       mass: 0.5,
       useNativeDriver: true,
     }).start();
-  }, [p.shift, p.hasActiveDrag, shiftAnim]);
+  }, [p.shift, p.hasActiveDrag, p.dragging, translateY]);
 
   useEffect(() => {
     Animated.spring(scaleAnim, {
-      toValue: p.dragging ? 1.025 : 1,
+      toValue: p.dragging ? 1.028 : 1,
       damping: 20,
-      stiffness: 220,
+      stiffness: 240,
       mass: 0.5,
       useNativeDriver: true,
     }).start();
@@ -135,10 +141,10 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
   cb.current = p;
   const handlePan = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 2,
+      onStartShouldSetPanResponder: () => cb.current.canDrag,
+      onMoveShouldSetPanResponder: (_, g) => cb.current.canDrag && Math.abs(g.dy) > 2,
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: () => cb.current.onDragStart(cb.current.queueIndex),
+      onPanResponderGrant: () => cb.current.onDragStart(cb.current.queueIndex, translateY),
       onPanResponderMove: (_, g) => cb.current.onDragMove(g.dy),
       onPanResponderRelease: () => cb.current.onDragEnd(),
       onPanResponderTerminate: () => cb.current.onDragEnd(),
@@ -151,11 +157,17 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
         styles.row,
         p.dragging && styles.rowDragging,
         {
-          transform: [{ translateY: p.dragging ? p.dragY : shiftAnim }, { scale: scaleAnim }],
+          transform: [{ translateY }, { scale: scaleAnim }],
         },
       ]}
     >
-      <PressableScale onPress={() => cb.current.onPlay(cb.current.queueIndex, p.track)} scaleTo={0.98} style={styles.rowMain} haptic="light">
+      <PressableScale
+        onPress={() => cb.current.onPlay(cb.current.queueIndex, p.track)}
+        scaleTo={0.98}
+        style={styles.rowMain}
+        haptic="light"
+        disabled={p.hasActiveDrag}
+      >
         <View style={{ opacity: p.isPast && !p.isCurrent ? 0.55 : 1 }}>
           <CoverArt uri={p.track.artworkUri} size={44} radius={10} />
           {p.isCurrent && (
@@ -174,7 +186,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
         </View>
       </PressableScale>
       {p.canDrag && (
-        <View style={styles.handle} {...handlePan.panHandlers}>
+        <View style={styles.handle} {...handlePan.panHandlers} hitSlop={{ top: 8, bottom: 8, left: 12, right: 12 }}>
           <Ionicons name="reorder-three" size={26} color={p.dragging ? colors.text : colors.text3} />
         </View>
       )}
@@ -212,7 +224,6 @@ export const QueueView: React.FC<Props> = ({
   const listRef = useRef<FlatList<{ track: TrackFile; qi: number }>>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [drag, setDrag] = useState<{ from: number; hover: number } | null>(null);
-  const dragY = useRef(new Animated.Value(0)).current;
   const [sortMode, setSortMode] = useState<SortOption>('default');
   const [showFilterMenu, setShowFilterMenu] = useState(false);
 
@@ -275,7 +286,14 @@ export const QueueView: React.FC<Props> = ({
 
   // перетаскивание (только когда нет фильтра: позиции строк = индексы очереди)
   const scrollY = useRef(0);
-  const dragInfo = useRef({ from: -1, startScroll: 0, dy: 0, hover: -1, listH: 600 });
+  const dragInfo = useRef<{
+    from: number;
+    startScroll: number;
+    dy: number;
+    hover: number;
+    listH: number;
+    activeY?: Animated.Value;
+  }>({ from: -1, startScroll: 0, dy: 0, hover: -1, listH: 600 });
   const autoScroll = useRef<ReturnType<typeof setInterval> | null>(null);
   const tracksLen = useRef(localTracks.length);
   tracksLen.current = localTracks.length;
@@ -284,16 +302,27 @@ export const QueueView: React.FC<Props> = ({
 
   const updateHover = useCallback(() => {
     const d = dragInfo.current;
-    if (d.from < 0) return;
-    const total = d.dy + (scrollY.current - d.startScroll);
-    dragY.setValue(total);
-    const hover = Math.max(0, Math.min(tracksLen.current - 1, Math.round(d.from + total / ROW_H)));
+    if (d.from < 0 || !d.activeY) return;
+    const rawTotal = d.dy + (scrollY.current - d.startScroll);
+    // Ограничиваем сдвиг пределами списка: нельзя утащить строку в пустоту
+    const minOffset = -d.from * ROW_H;
+    const maxOffset = Math.max(0, (tracksLen.current - 1 - d.from) * ROW_H);
+    let clamped = rawTotal;
+    if (clamped < minOffset) {
+      clamped = minOffset - Math.sqrt(Math.min(100, minOffset - clamped)) * 2;
+    } else if (clamped > maxOffset) {
+      clamped = maxOffset + Math.sqrt(Math.min(100, clamped - maxOffset)) * 2;
+    }
+
+    d.activeY.setValue(clamped);
+
+    const hover = Math.max(0, Math.min(tracksLen.current - 1, Math.round(d.from + clamped / ROW_H)));
     if (hover !== d.hover) {
       d.hover = hover;
       Haptics.selectionAsync();
       setDrag({ from: d.from, hover });
     }
-  }, [dragY]);
+  }, []);
 
   const stopAuto = () => {
     if (autoScroll.current) clearInterval(autoScroll.current);
@@ -301,23 +330,30 @@ export const QueueView: React.FC<Props> = ({
   };
 
   const onDragStart = useCallback(
-    (from: number) => {
+    (from: number, activeY: Animated.Value) => {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      dragY.stopAnimation();
-      dragY.setValue(0);
-      dragInfo.current = { ...dragInfo.current, from, startScroll: scrollY.current, dy: 0, hover: from };
+      activeY.stopAnimation();
+      activeY.setValue(0);
+      dragInfo.current = {
+        ...dragInfo.current,
+        from,
+        startScroll: scrollY.current,
+        dy: 0,
+        hover: from,
+        activeY,
+      };
       setDrag({ from, hover: from });
     },
-    [dragY]
+    []
   );
 
   const onDragMove = useCallback(
     (dy: number) => {
       const d = dragInfo.current;
-      if (d.from < 0) return;
+      if (d.from < 0 || !d.activeY) return;
       d.dy = dy;
       updateHover();
-      // автопрокрутка у краёв списка — один интервал, скорость плавно растёт к краю
+      // автопрокрутка у краёв списка — плавное ускорение
       const visibleTop = d.from * ROW_H + dy - d.startScroll;
       let speed = 0;
       const zone = 70;
@@ -343,16 +379,24 @@ export const QueueView: React.FC<Props> = ({
   const onDragEnd = useCallback(() => {
     stopAuto();
     const d = dragInfo.current;
-    const { from, hover } = d;
-    if (from < 0) return;
-    dragInfo.current.from = -1;
+    const { from, hover, activeY } = d;
+    if (from < 0 || !activeY) {
+      setDrag(null);
+      return;
+    }
+    d.from = -1;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-    const settle = { damping: 26, stiffness: 300, mass: 0.6, useNativeDriver: true } as const;
-    if (hover === from || hover < 0) {
-      Animated.spring(dragY, { toValue: 0, ...settle }).start(() => setDrag(null));
-    } else {
-      Animated.spring(dragY, { toValue: (hover - from) * ROW_H, ...settle }).start(() => {
+    const targetOffset = hover >= 0 && hover !== from ? (hover - from) * ROW_H : 0;
+    const settle = { damping: 26, stiffness: 320, mass: 0.5, useNativeDriver: true } as const;
+
+    let finished = false;
+    const finalize = () => {
+      if (finished) return;
+      finished = true;
+      activeY.stopAnimation();
+      activeY.setValue(0);
+      if (hover >= 0 && hover !== from) {
         cbs.current.onMove(from, hover);
         setLocalTracks((prev) => {
           const next = [...prev];
@@ -361,10 +405,18 @@ export const QueueView: React.FC<Props> = ({
           return next;
         });
         setSortMode('default');
-        setDrag(null);
-      });
-    }
-  }, [dragY]);
+      }
+      setDrag(null);
+    };
+
+    // Плавный довод трека точно на посадочное место без рывков
+    Animated.spring(activeY, { toValue: targetOffset, ...settle }).start(() => {
+      finalize();
+    });
+
+    // Защитный таймер: гарантирует сброс даже при прерывании анимации
+    setTimeout(finalize, 320);
+  }, []);
 
   useEffect(() => stopAuto, []);
 
@@ -405,7 +457,6 @@ export const QueueView: React.FC<Props> = ({
           shift={shift}
           hasActiveDrag={drag !== null}
           dragging={drag?.from === item.qi}
-          dragY={dragY}
           onPlay={playAt}
           onDragStart={onDragStart}
           onDragMove={onDragMove}
@@ -413,7 +464,7 @@ export const QueueView: React.FC<Props> = ({
         />
       );
     },
-    [drag, currentTrackId, currentIndex, currentTrackIndex, isPlaying, filtering, dragY, playAt, onDragStart, onDragMove, onDragEnd]
+    [drag, currentTrackId, currentIndex, currentTrackIndex, isPlaying, filtering, playAt, onDragStart, onDragMove, onDragEnd]
   );
 
   const totalMin = Math.round(localTracks.length ? localTracks.length * 3.4 : 0);
@@ -738,8 +789,13 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   rowDragging: {
-    backgroundColor: 'rgba(255,255,255,0.09)',
-    borderColor: 'rgba(255,255,255,0.22)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(255,255,255,0.28)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 12,
   },
   dividerWrap: {
     paddingHorizontal: 20,
