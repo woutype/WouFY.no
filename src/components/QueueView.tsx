@@ -546,6 +546,16 @@ export const QueueView: React.FC<Props> = ({
         </View>
       </View>
 
+      {/* Стильный светящийся разделитель вместо грубой темной полосы */}
+      <View style={styles.dividerWrap} pointerEvents="none">
+        <LinearGradient
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.15)', 'rgba(255,255,255,0)']}
+          style={styles.divider}
+        />
+      </View>
+
       <View style={{ flex: 1 }}>
       <DragCtx.Provider value={drag ? drag.from : -1}>
       <FlatList
@@ -566,7 +576,7 @@ export const QueueView: React.FC<Props> = ({
         }}
         scrollEventThrottle={16}
         onLayout={(e) => (dragInfo.current.listH = e.nativeEvent.layout.height)}
-        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: bottomPad }}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 4, paddingBottom: bottomPad }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         showsVerticalScrollIndicator={false}
@@ -594,8 +604,7 @@ export const QueueView: React.FC<Props> = ({
         }
       />
       </DragCtx.Provider>
-      {/* мягкое растворение списка у краёв — без резкого обрезания строк */}
-      <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0.85)', 'rgba(8,8,8,0)']} style={styles.fadeTop} />
+      {/* мягкое растворение списка у нижнего края над мини-плеером */}
       <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0)', 'rgba(8,8,8,0.85)']} style={[styles.fadeBottom, { height: Math.min(bottomPad, 96) }]} />
       </View>
     </View>
@@ -732,7 +741,15 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.09)',
     borderColor: 'rgba(255,255,255,0.22)',
   },
-  fadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 14 },
+  dividerWrap: {
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  divider: {
+    height: 1,
+    width: '100%',
+  },
   fadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0 },
   rowMain: { flexDirection: 'row', alignItems: 'center', flex: 1, paddingVertical: 10 },
   rowText: { flex: 1, marginLeft: 12 },
