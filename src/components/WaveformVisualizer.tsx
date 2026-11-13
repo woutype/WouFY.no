@@ -1,9 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, View } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
 import type { AudioPlayer } from 'expo-audio';
 
-const BARS = 36;
+const BARS = 20;
 const FLOOR = 0.06;
 const FRAME_MS = 33; // ~30 кадров/с — достаточно плавно и вдвое легче для JS
 const N = 1024; // размер окна FFT
@@ -167,7 +168,7 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
     for (let i = 0; i < BARS; i++) targetLevels[i] = FLOOR;
   }, [isPlaying, targetLevels]);
 
-  const barH = size * 0.5;
+  const barH = size * 0.52;
   return (
     <View style={[styles.wrap, { borderRadius: radius }]} pointerEvents="none">
       {/* матовая подложка: лёгкое размытие обложки + тёмная полупрозрачная заливка, без бликов */}
@@ -181,12 +182,18 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
               styles.bar,
               {
                 height: barH,
-                // полоса растёт от центра вверх и вниз; громче — ярче
-                opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1], extrapolate: 'clamp' }),
+                // полоса растёт от центра вверх и вниз; громче — ярче, всегда полупрозрачная
+                opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.25, 0.82], extrapolate: 'clamp' }),
                 transform: [{ scaleY: v }],
               },
             ]}
-          />
+          >
+            <LinearGradient
+              colors={['rgba(165, 172, 185, 0.35)', 'rgba(255, 255, 255, 0.92)', 'rgba(165, 172, 185, 0.35)']}
+              locations={[0, 0.5, 1]}
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
         ))}
       </View>
     </View>
@@ -198,7 +205,7 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 24,
     overflow: 'hidden',
   },
   row: {
@@ -209,8 +216,9 @@ const styles = StyleSheet.create({
   },
   bar: {
     flex: 1,
-    marginHorizontal: 1,
+    marginHorizontal: 3,
     borderRadius: 999,
-    backgroundColor: '#FFFFFF',
+    overflow: 'hidden',
+    backgroundColor: 'transparent',
   },
 });
