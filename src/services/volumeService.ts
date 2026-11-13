@@ -7,6 +7,7 @@
  * подключается через сам пакет, а его работоспособность проверяется пробным вызовом.
  */
 
+import { NativeModules } from 'react-native';
 import { configureAudioSession } from './audioService';
 
 type Listener = (volume: number) => void;
@@ -32,6 +33,15 @@ function getVM(): NativeVolumeManager | null {
   if (broken) return null;
   if (vm !== undefined) return vm;
   vm = null;
+
+  // Критично: проверяем наличие нативного модуля ДО require('react-native-volume-manager').
+  // Иначе библиотека на верхнем уровне создаёт new NativeEventEmitter(Proxy) и моментально
+  // крашит приложение с фатальным экраном ошибки (RedBox / LINKING_ERROR) в Expo Go!
+  if (!NativeModules?.VolumeManager) {
+    broken = true;
+    return null;
+  }
+
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const mod = require('react-native-volume-manager');
@@ -39,6 +49,7 @@ function getVM(): NativeVolumeManager | null {
     if (cand && typeof cand.getVolume === 'function' && typeof cand.addVolumeListener === 'function') vm = cand;
   } catch {
     vm = null; // Expo Go или среда без слинкованного модуля
+    broken = true;
   }
   if (vm) {
     // пробный вызов: если нативной части нет — библиотека бросит ошибку, и мы переходим на внутренний режим
