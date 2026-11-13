@@ -350,6 +350,14 @@ export class AudioEngine {
 
   /* ───────────── управление воспроизведением ───────────── */
 
+  playTrack(trackOrId: TrackFile | string) {
+    const id = typeof trackOrId === 'string' ? trackOrId : trackOrId.id;
+    const idx = this.state.queue.findIndex((t) => t.id === id);
+    if (idx >= 0) {
+      this.playIndex(idx);
+    }
+  }
+
   playIndex(index: number) {
     const t = this.state.queue[index];
     if (!t) return;
@@ -358,11 +366,14 @@ export class AudioEngine {
     this.errorSkips = 0;
     this.playIntent = true;
     this.lastCommandAt = Date.now();
+    configureAudioSession(true);
     safe(() => {
       this.B.pause();
       this.A.replace({ uri: t.uri });
       this.A.setPlaybackRate(1, 'low');
-      this.A.volume = this.master();
+      const vol = Math.max(0.05, this.master());
+      this.A.volume = vol;
+      this.A.muted = false;
       this.A.play();
     });
     this.prep = null;
@@ -386,7 +397,9 @@ export class AudioEngine {
       this.set({ isPlaying: false });
     } else {
       this.playIntent = true;
+      configureAudioSession(true);
       safe(() => {
+        this.A.muted = false;
         this.A.play();
         if (this.trans) this.trans.to.play();
       });

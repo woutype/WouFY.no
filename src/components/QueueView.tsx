@@ -18,13 +18,20 @@ import { CoverArt, Glass, PressableScale } from './ui';
 
 export const ROW_H = 68;
 
-export type SortOption = 'default' | 'date' | 'album' | 'artist';
+export type SortOption = 'default' | 'title' | 'artist' | 'album';
+export type FilterTag = 'all' | 'lyrics' | 'lossless';
 
 const SORT_LABELS: Record<SortOption, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
-  default: { label: 'По умолчанию', icon: 'reorder-two-outline' },
-  date: { label: 'Дата добавления', icon: 'calendar-outline' },
-  album: { label: 'Альбом (по номерам)', icon: 'disc-outline' },
-  artist: { label: 'Артист', icon: 'person-outline' },
+  default: { label: 'По умолчанию (очередь)', icon: 'reorder-two-outline' },
+  title: { label: 'По названию (А–Я)', icon: 'text-outline' },
+  artist: { label: 'По артисту (А–Я)', icon: 'person-outline' },
+  album: { label: 'По альбому (номера)', icon: 'disc-outline' },
+};
+
+const FILTER_TAG_LABELS: Record<FilterTag, string> = {
+  all: 'Все',
+  lyrics: 'С текстом',
+  lossless: 'Hi-Res / FLAC',
 };
 
 function getTrackNumber(t: TrackFile): number {
@@ -37,8 +44,17 @@ function getTrackNumber(t: TrackFile): number {
 function applySort(list: TrackFile[], mode: SortOption): TrackFile[] {
   if (mode === 'default') return list;
   const copy = [...list];
-  if (mode === 'date') {
-    return copy.sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
+  if (mode === 'title') {
+    return copy.sort((a, b) => a.title.localeCompare(b.title, 'ru', { sensitivity: 'base' }));
+  }
+  if (mode === 'artist') {
+    return copy.sort((a, b) => {
+      const artA = (a.artist || 'Неизвестный исполнитель').trim();
+      const artB = (b.artist || 'Неизвестный исполнитель').trim();
+      const c = artA.localeCompare(artB, 'ru', { sensitivity: 'base' });
+      if (c !== 0) return c;
+      return a.title.localeCompare(b.title, 'ru', { sensitivity: 'base' });
+    });
   }
   if (mode === 'album') {
     return copy.sort((a, b) => {
@@ -50,19 +66,6 @@ function applySort(list: TrackFile[], mode: SortOption): TrackFile[] {
       const numB = getTrackNumber(b);
       if (numA !== numB) return numA - numB;
       return a.title.localeCompare(b.title, 'ru', { sensitivity: 'base' });
-    });
-  }
-  if (mode === 'artist') {
-    return copy.sort((a, b) => {
-      const artA = (a.artist || 'Неизвестный исполнитель').trim();
-      const artB = (b.artist || 'Неизвестный исполнитель').trim();
-      const c = artA.localeCompare(artB, 'ru', { sensitivity: 'base' });
-      if (c !== 0) return c;
-      const albA = (a.album || 'Сингл').trim();
-      const albB = (b.album || 'Сингл').trim();
-      const c2 = albA.localeCompare(albB, 'ru', { sensitivity: 'base' });
-      if (c2 !== 0) return c2;
-      return getTrackNumber(a) - getTrackNumber(b);
     });
   }
   return copy;
@@ -79,13 +82,13 @@ interface RowProps {
   hasActiveDrag: boolean;
   dragging: boolean;
   dragY: Animated.Value;
-  onPlay: (index: number) => void;
+  onPlay: (index: number, track: TrackFile) => void;
   onDragStart: (index: number) => void;
   onDragMove: (dy: number) => void;
   onDragEnd: () => void;
 }
 
-/** Индекс перетаскиваемой ячейки: нужен, чтобы поднять её НАД соседями (zIndex одной строки внутри ячейки не помогает) */
+/** Индекс перетаскиваемой ячейки: нужен, чтобы поднять её НАД соседями */
 const DragCtx = React.createContext<number>(-1);
 
 const DragCell = (props: any) => {
@@ -102,7 +105,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const shiftAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
-  // useLayoutEffect: сброс сдвига происходит в том же кадре, в котором список перестраивается — без «мигания» строк
+  // Плавный сдвиг строк без дерганий и рывков
   useLayoutEffect(() => {
     if (!p.hasActiveDrag) {
       shiftAnim.stopAnimation();
@@ -111,19 +114,19 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
     }
     Animated.spring(shiftAnim, {
       toValue: p.shift * ROW_H,
-      damping: 26,
-      stiffness: 420,
-      mass: 0.6,
+      damping: 24,
+      stiffness: 240,
+      mass: 0.5,
       useNativeDriver: true,
     }).start();
   }, [p.shift, p.hasActiveDrag, shiftAnim]);
 
   useEffect(() => {
     Animated.spring(scaleAnim, {
-      toValue: p.dragging ? 1.03 : 1,
-      damping: 22,
-      stiffness: 300,
-      mass: 0.7,
+      toValue: p.dragging ? 1.025 : 1,
+      damping: 20,
+      stiffness: 220,
+      mass: 0.5,
       useNativeDriver: true,
     }).start();
   }, [p.dragging, scaleAnim]);
@@ -133,7 +136,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const handlePan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 2,
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => cb.current.onDragStart(cb.current.queueIndex),
       onPanResponderMove: (_, g) => cb.current.onDragMove(g.dy),
@@ -152,7 +155,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
         },
       ]}
     >
-      <PressableScale onPress={() => cb.current.onPlay(cb.current.queueIndex)} scaleTo={0.98} style={styles.rowMain} haptic="light">
+      <PressableScale onPress={() => cb.current.onPlay(cb.current.queueIndex, p.track)} scaleTo={0.98} style={styles.rowMain} haptic="light">
         <View style={{ opacity: p.isPast && !p.isCurrent ? 0.55 : 1 }}>
           <CoverArt uri={p.track.artworkUri} size={44} radius={10} />
           {p.isCurrent && (
@@ -186,7 +189,7 @@ interface Props {
   isPlaying: boolean;
   searchQuery: string;
   onSearchChange: (q: string) => void;
-  onPlay: (index: number) => void;
+  onPlay: (index: number, track?: TrackFile) => void;
   onMove: (from: number, to: number) => void;
   onReorder?: (newTracks: TrackFile[]) => void;
   onRefresh: () => Promise<void>;
@@ -222,26 +225,53 @@ export const QueueView: React.FC<Props> = ({
     if (!drag) setLocalTracks(tracks);
   }, [tracks, drag]);
 
+  const [filterTag, setFilterTag] = useState<FilterTag>('all');
+  const hasFilter = searchQuery.trim().length > 0 || filterTag !== 'all' || sortMode !== 'default';
+  const filtering = hasFilter;
+
   const handleSelectSort = (mode: SortOption) => {
     Haptics.selectionAsync();
     setSortMode(mode);
     setShowFilterMenu(false);
-    if (mode === 'default') return;
+    if (mode === 'default') {
+      setLocalTracks(tracks);
+      onReorder?.(tracks);
+      return;
+    }
     const sorted = applySort(tracks, mode);
     setLocalTracks(sorted);
     onReorder?.(sorted);
   };
 
-  const filtering = searchQuery.trim().length > 0;
+  const handleReset = useCallback(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    onSearchChange('');
+    setFilterTag('all');
+    setSortMode('default');
+    setLocalTracks(tracks);
+    onReorder?.(tracks);
+    setShowFilterMenu(false);
+  }, [tracks, onSearchChange, onReorder]);
+
   const data = useMemo(() => {
-    const items = localTracks.map((track, qi) => ({ track, qi }));
-    if (!filtering) return items;
-    const q = searchQuery.toLowerCase();
-    return items.filter(
-      ({ track: t }) =>
-        t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.filename.toLowerCase().includes(q)
-    );
-  }, [localTracks, searchQuery, filtering]);
+    let list = localTracks;
+    if (filterTag === 'lyrics') {
+      list = list.filter((t) => Boolean(t.lyrics || t.syncedLyrics || t.lrcUri));
+    } else if (filterTag === 'lossless') {
+      list = list.filter((t) => ['flac', 'wav', 'aiff', 'aif'].includes((t.extension || '').toLowerCase()));
+    }
+    const q = searchQuery.trim().toLowerCase();
+    if (q.length > 0) {
+      list = list.filter(
+        (t) =>
+          t.title.toLowerCase().includes(q) ||
+          t.artist.toLowerCase().includes(q) ||
+          (t.album && t.album.toLowerCase().includes(q)) ||
+          t.filename.toLowerCase().includes(q)
+      );
+    }
+    return list.map((track, qi) => ({ track, qi }));
+  }, [localTracks, searchQuery, filterTag]);
 
   // перетаскивание (только когда нет фильтра: позиции строк = индексы очереди)
   const scrollY = useRef(0);
@@ -318,11 +348,10 @@ export const QueueView: React.FC<Props> = ({
     dragInfo.current.from = -1;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-    const settle = { damping: 28, stiffness: 380, mass: 0.7, useNativeDriver: true } as const;
+    const settle = { damping: 26, stiffness: 300, mass: 0.6, useNativeDriver: true } as const;
     if (hover === from || hover < 0) {
       Animated.spring(dragY, { toValue: 0, ...settle }).start(() => setDrag(null));
     } else {
-      // строка «доезжает» до своего нового места, затем перестановка и сброс сдвигов — одним обновлением
       Animated.spring(dragY, { toValue: (hover - from) * ROW_H, ...settle }).start(() => {
         cbs.current.onMove(from, hover);
         setLocalTracks((prev) => {
@@ -352,7 +381,9 @@ export const QueueView: React.FC<Props> = ({
     [localTracks, currentTrackId, currentIndex]
   );
 
-  const playAt = useCallback((i: number) => cbs.current.onPlay(i), []);
+  const playAt = useCallback((i: number, track: TrackFile) => {
+    cbs.current.onPlay(i, track);
+  }, []);
 
   const renderItem = useCallback(
     ({ item }: { item: { track: TrackFile; qi: number } }) => {
@@ -397,7 +428,7 @@ export const QueueView: React.FC<Props> = ({
                 <Ionicons name="search" size={16} color={colors.text3} />
                 <TextInput
                   style={styles.searchInput}
-                  placeholder="Поиск по названию и исполнителю"
+                  placeholder="Поиск по названию, артисту, альбому"
                   placeholderTextColor={colors.text3}
                   value={searchQuery}
                   onChangeText={onSearchChange}
@@ -405,7 +436,7 @@ export const QueueView: React.FC<Props> = ({
                   returnKeyType="search"
                   selectionColor={colors.text}
                 />
-                {filtering && (
+                {searchQuery.trim().length > 0 && (
                   <PressableScale onPress={() => onSearchChange('')} hitSlop={10}>
                     <Ionicons name="close-circle" size={18} color={colors.text3} />
                   </PressableScale>
@@ -424,10 +455,41 @@ export const QueueView: React.FC<Props> = ({
           </PressableScale>
         </View>
 
+        {/* Быстрые фильтр-чипы (Все / С текстом / FLAC) + Кнопка Сбросить */}
+        <View style={styles.filterChipsRow}>
+          {(['all', 'lyrics', 'lossless'] as const).map((tag) => {
+            const active = filterTag === tag;
+            return (
+              <PressableScale
+                key={tag}
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  setFilterTag(tag);
+                }}
+                scaleTo={0.94}
+              >
+                <View style={[styles.filterChip, active && styles.filterChipActive]}>
+                  <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
+                    {FILTER_TAG_LABELS[tag]}
+                  </Text>
+                </View>
+              </PressableScale>
+            );
+          })}
+          {hasFilter && (
+            <PressableScale onPress={handleReset} scaleTo={0.92} style={{ marginLeft: 'auto' }}>
+              <View style={styles.resetBtn}>
+                <Ionicons name="refresh-outline" size={13} color={colors.accent} />
+                <Text style={styles.resetBtnText}>Сбросить</Text>
+              </View>
+            </PressableScale>
+          )}
+        </View>
+
         {showFilterMenu && (
           <Glass radius={16} style={styles.filterMenu}>
             <View style={styles.filterInner}>
-              {(['date', 'album', 'artist', 'default'] as const).map((opt) => {
+              {(['title', 'artist', 'album', 'default'] as const).map((opt) => {
                 const active = sortMode === opt;
                 return (
                   <PressableScale key={opt} onPress={() => handleSelectSort(opt)}>
@@ -447,6 +509,14 @@ export const QueueView: React.FC<Props> = ({
                   </PressableScale>
                 );
               })}
+              {hasFilter && (
+                <PressableScale onPress={handleReset}>
+                  <View style={styles.resetMenuBtn}>
+                    <Ionicons name="refresh-outline" size={15} color={colors.accent} />
+                    <Text style={styles.resetMenuText}>Сбросить все фильтры и сортировку</Text>
+                  </View>
+                </PressableScale>
+              )}
             </View>
           </Glass>
         )}
@@ -455,14 +525,24 @@ export const QueueView: React.FC<Props> = ({
           <Text style={styles.count}>
             {filtering ? `Найдено: ${data.length}` : `${localTracks.length} ${plural(localTracks.length)}${totalMin ? ` · ~${totalMin} мин` : ''}`}
           </Text>
-          {sortMode !== 'default' && (
-            <PressableScale onPress={() => handleSelectSort('default')}>
-              <View style={styles.activePill}>
-                <Text style={styles.activePillText}>{SORT_LABELS[sortMode].label}</Text>
-                <Ionicons name="close-circle" size={13} color={colors.text2} />
-              </View>
-            </PressableScale>
-          )}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            {sortMode !== 'default' && (
+              <PressableScale onPress={() => handleSelectSort('default')}>
+                <View style={styles.activePill}>
+                  <Text style={styles.activePillText}>{SORT_LABELS[sortMode].label}</Text>
+                  <Ionicons name="close-circle" size={13} color={colors.text2} />
+                </View>
+              </PressableScale>
+            )}
+            {hasFilter && (
+              <PressableScale onPress={handleReset}>
+                <View style={styles.resetPill}>
+                  <Ionicons name="close-circle" size={12} color={colors.text2} />
+                  <Text style={styles.resetPillText}>Сбросить всё</Text>
+                </View>
+              </PressableScale>
+            )}
+          </View>
         </View>
       </View>
 
@@ -569,7 +649,51 @@ const styles = StyleSheet.create({
   },
   filterOptionText: { ...type.body, fontSize: 14, color: colors.text, fontWeight: '500' },
   filterOptionTextActive: { color: colors.onAccent, fontWeight: '700' },
-  metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8, paddingHorizontal: 4 },
+  resetMenuBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    gap: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.stroke,
+    marginTop: 4,
+  },
+  resetMenuText: { ...type.body, fontSize: 13, color: colors.accent, fontWeight: '600' },
+  filterChipsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  filterChip: {
+    paddingVertical: 5,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  filterChipActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  filterChipText: { ...type.caption, fontSize: 12, color: colors.text2, fontWeight: '600' },
+  filterChipTextActive: { color: colors.onAccent, fontWeight: '700' },
+  resetBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+  },
+  resetBtnText: { ...type.caption, fontSize: 12, color: colors.accent, fontWeight: '700' },
+  metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10, paddingHorizontal: 4 },
   activePill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -582,6 +706,18 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.2)',
   },
   activePillText: { ...type.caption, fontSize: 11, color: colors.text2, fontWeight: '600' },
+  resetPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  resetPillText: { ...type.caption, fontSize: 11, color: colors.accent, fontWeight: '600' },
   count: { ...type.caption, color: colors.text3, marginLeft: 2 },
   row: {
     height: ROW_H,

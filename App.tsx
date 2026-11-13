@@ -100,6 +100,10 @@ function Root() {
     return () => sub.remove();
   }, [engine, rescan]);
 
+  useEffect(() => {
+    bpmService.setActivePlayback(state.isPlaying);
+  }, [state.isPlaying]);
+
   const updateDj = (s: DJSettings) => {
     setDj(s);
     engine.setDJ(s);
@@ -206,7 +210,7 @@ function Root() {
             isPlaying={state.isPlaying}
             searchQuery={search}
             onSearchChange={setSearch}
-            onPlay={(i) => engine.playIndex(i)}
+            onPlay={(i, track) => (track ? engine.playTrack(track) : engine.playIndex(i))}
             onMove={(a, b) => engine.moveQueueItem(a, b)}
             onReorder={(q) => engine.reorderQueue(q)}
             onRefresh={rescan}

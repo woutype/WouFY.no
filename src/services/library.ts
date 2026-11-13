@@ -84,7 +84,13 @@ export async function loadCachedTracks(): Promise<TrackFile[]> {
     if (info.exists) {
       const raw = await FileSystem.readAsStringAsync(TRACKS_CACHE_FILE);
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const root = FileSystem.documentDirectory ?? '';
+        return parsed.map((t: TrackFile) => ({
+          ...t,
+          uri: t.id.startsWith('file://') ? t.id : `${root}${t.id}`,
+        }));
+      }
     }
   } catch (e) {
     console.warn('[library] failed to load cached tracks:', e);

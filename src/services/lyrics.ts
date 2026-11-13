@@ -93,7 +93,8 @@ export function buildEstimate(plain: string[], duration: number): LyricLine[] {
   });
 }
 
-const CACHE_DIR = `${FileSystem.documentDirectory ?? ''}lyrics_cache/`;
+const CACHE_DIR = `${FileSystem.documentDirectory ?? ''}.woufy/lyrics_cache/`;
+const LEGACY_CACHE_DIR = `${FileSystem.documentDirectory ?? ''}lyrics_cache/`;
 
 async function ensureCacheDir() {
   try {
@@ -201,12 +202,22 @@ export async function loadLyrics(track: TrackFile, duration: number, allowOnline
     }
   }
 
-  // 3. Локальный кэш приложения (lyrics_cache/)
+  // 3. Локальный кэш приложения (.woufy/lyrics_cache/ или lyrics_cache/)
   try {
     const cp = cachePathFor(track);
-    const cInfo = await FileSystem.getInfoAsync(cp);
+    let cInfo = await FileSystem.getInfoAsync(cp);
+    let targetPath = cp;
+    if (!cInfo.exists) {
+      const safeId = (track.id || `${track.artist}_${track.title}`).replace(/[^a-zA-Z0-9_\u0400-\u04FF]/g, '_');
+      const legacyPath = `${LEGACY_CACHE_DIR}${safeId}.lrc`;
+      const legacyInfo = await FileSystem.getInfoAsync(legacyPath);
+      if (legacyInfo.exists) {
+        targetPath = legacyPath;
+        cInfo = legacyInfo;
+      }
+    }
     if (cInfo.exists) {
-      const raw = await FileSystem.readAsStringAsync(cp);
+      const raw = await FileSystem.readAsStringAsync(targetPath);
       const lines = parseLrc(raw);
       if (lines) return { lines, synced: true, source: 'lrc-file', plain: lines.map((l) => l.text) };
     }
@@ -227,7 +238,7 @@ export async function loadLyrics(track: TrackFile, duration: number, allowOnline
       if (raw) {
         const lines = parseLrc(raw);
         if (lines) {
-          // Кэшируем локально для офлайн-доступа
+          // Кэшируем строго в скрытую папку кэша, не захламляя Music/
           saveLrc(track, lines).catch(() => {});
           return { lines, synced: true, source: 'lrclib', plain: lines.map((l) => l.text) };
         }
@@ -254,28 +265,21 @@ const fmt = (t: number) => {
   return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
 };
 
-/** Сохраняет разметку в <имя трека>.lrc рядом с файлом и в локальный кэш */
+/** Сохраняет разметку строго в кэш (.woufy/lyrics_cache/), не трогая папку Music */
 export async function saveLrc(track: TrackFile, lines: LyricLine[]): Promise<string> {
-  const path = lrcPathFor(track);
   const header = `[ti:${track.title}]\n[ar:${track.artist}]\n[by:Woufy]\n`;
   const body = lines.map((l) => `[${fmt(l.time)}]${l.text}`).join('\n');
   const content = `${header}${body}\n`;
 
+  await ensureCacheDir();
+  const cp = cachePathFor(track);
   try {
-    await FileSystem.writeAsStringAsync(path, content);
-  } catch {
-    /* если доступ к директории трека ограничен, сохраняем в кэш */
-  }
-
-  try {
-    await ensureCacheDir();
-    const cp = cachePathFor(track);
     await FileSystem.writeAsStringAsync(cp, content);
-  } catch {
-    /* ignore */
+  } catch (e) {
+    console.warn('[lyrics] failed to write to cache:', e);
   }
 
-  return path;
+  return cp;
 }
 
 /** Сдвиг всех временных меток на deltaSec (например +0.5 сек или -0.5 сек) */

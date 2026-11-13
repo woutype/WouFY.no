@@ -7,6 +7,8 @@
  * подключается через сам пакет, а его работоспособность проверяется пробным вызовом.
  */
 
+import { configureAudioSession } from './audioService';
+
 type Listener = (volume: number) => void;
 const listeners = new Set<Listener>();
 
@@ -19,6 +21,8 @@ interface NativeVolumeManager {
   getVolume: () => Promise<number | { volume: number }>;
   setVolume: (val: number, options?: { showUI?: boolean }) => Promise<void>;
   enable?: (enabled: boolean, async?: boolean) => Promise<void> | void;
+  enableInSilenceMode?: (enabled?: boolean) => Promise<void> | void;
+  setCategory?: (value: string, mixWithOthers?: boolean) => Promise<void> | void;
 }
 
 let vm: NativeVolumeManager | null | undefined; // undefined — ещё не искали
@@ -50,8 +54,10 @@ function getVM(): NativeVolumeManager | null {
         () => markBroken()
       );
       try {
-        // активируем аудио-сессию, чтобы iOS присылал события от кнопок громкости
-        Promise.resolve(vm.enable?.(true, true)).catch(() => {});
+        // Устанавливаем режим Playback (чтобы звук играл при аппаратном беззвучном переключателе)
+        Promise.resolve(vm.enableInSilenceMode?.(true)).catch(() => {});
+        Promise.resolve(vm.setCategory?.('Playback', true)).catch(() => {});
+        configureAudioSession(true);
       } catch {
         /* необязательно */
       }
@@ -85,6 +91,12 @@ function setupNativeListener() {
         listeners.forEach((fn) => fn(currentVolume));
       }
     });
+    // addVolumeListener в нативном коде iOS переопределяет категорию на Ambient;
+    // сразу возвращаем категорию Playback и активную сессию
+    Promise.resolve(VM.enableInSilenceMode?.(true)).catch(() => {});
+    Promise.resolve(VM.setCategory?.('Playback', true)).catch(() => {});
+    configureAudioSession(true);
+
     removeNativeListener = () => {
       try {
         if (typeof sub === 'function') sub();

@@ -122,9 +122,15 @@ class BpmService {
     this.emit();
   }
 
+  /** Пауза анализа во время активного воспроизведения музыки */
+  setActivePlayback(isPlaying: boolean) {
+    this.setPaused(isPlaying);
+  }
+
   /** Поставить трек в очередь анализа (если сетка битов ещё неизвестна). urgent — в начало очереди. */
   request(track: TrackFile | undefined, urgent = false) {
     if (!track) return;
+    if (this.tags.has(track.id) || track.bpmTag) return;
     if (getState().bpm?.[track.id]?.grid || this.failed.has(track.id)) return;
     if (this.queued.has(track.id)) {
       if (urgent) {

@@ -114,11 +114,20 @@ export const IconButton: React.FC<IconButtonProps> = ({
 }) => (
   <PressableScale onPress={onPress} haptic={haptic} hitSlop={6}>
     {glass ? (
-      <Glass radius={box / 2} style={{ width: box, height: box }}>
-        <View style={styles.center}>
-          <Ionicons name={name} size={size} color={active ? colors.text : color} />
-        </View>
-      </Glass>
+      <View
+        style={[
+          styles.glassButton,
+          {
+            width: box,
+            height: box,
+            borderRadius: box / 2,
+            backgroundColor: active ? 'rgba(255, 255, 255, 0.16)' : 'rgba(255, 255, 255, 0.08)',
+            borderColor: active ? 'rgba(255, 255, 255, 0.32)' : 'rgba(255, 255, 255, 0.15)',
+          },
+        ]}
+      >
+        <Ionicons name={name} size={size} color={active ? colors.text : color} />
+      </View>
     ) : (
       <View style={{ width: box, height: box, alignItems: 'center', justifyContent: 'center' }}>
         <Ionicons name={name} size={size} color={active ? colors.text : color} />
@@ -303,8 +312,13 @@ export const Scrubber: React.FC<ScrubberProps> = ({ value, max, onScrub, onCommi
 };
 
 const styles = StyleSheet.create({
+  glassButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
   glassBorder: {
-    borderWidth: StyleSheet.hairlineWidth * 2,
+    borderWidth: 1,
     borderColor: colors.stroke,
   },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
