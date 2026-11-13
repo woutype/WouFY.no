@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   FlatList,
@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import { TrackFile } from '../types';
 import { colors, type } from '../theme';
 import { CoverArt, Glass, PressableScale } from './ui';
@@ -78,33 +79,50 @@ interface RowProps {
   hasActiveDrag: boolean;
   dragging: boolean;
   dragY: Animated.Value;
-  onPress: () => void;
+  onPlay: (index: number) => void;
   onDragStart: (index: number) => void;
   onDragMove: (dy: number) => void;
   onDragEnd: () => void;
 }
 
+/** Индекс перетаскиваемой ячейки: нужен, чтобы поднять её НАД соседями (zIndex одной строки внутри ячейки не помогает) */
+const DragCtx = React.createContext<number>(-1);
+
+const DragCell = (props: any) => {
+  const dragIdx = useContext(DragCtx);
+  const lifted = dragIdx >= 0 && dragIdx === props.index;
+  return (
+    <View onLayout={props.onLayout} style={[props.style, lifted && { zIndex: 999, elevation: 12 }]}>
+      {props.children}
+    </View>
+  );
+};
+
 const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const shiftAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
-  useEffect(() => {
+  // useLayoutEffect: сброс сдвига происходит в том же кадре, в котором список перестраивается — без «мигания» строк
+  useLayoutEffect(() => {
     if (!p.hasActiveDrag) {
+      shiftAnim.stopAnimation();
       shiftAnim.setValue(0);
-    } else {
-      Animated.timing(shiftAnim, {
-        toValue: p.shift * ROW_H,
-        duration: 110,
-        useNativeDriver: true,
-      }).start();
+      return;
     }
+    Animated.spring(shiftAnim, {
+      toValue: p.shift * ROW_H,
+      damping: 26,
+      stiffness: 420,
+      mass: 0.6,
+      useNativeDriver: true,
+    }).start();
   }, [p.shift, p.hasActiveDrag, shiftAnim]);
 
   useEffect(() => {
     Animated.spring(scaleAnim, {
-      toValue: p.dragging ? 1.025 : 1,
+      toValue: p.dragging ? 1.03 : 1,
       damping: 22,
-      stiffness: 280,
+      stiffness: 300,
       mass: 0.7,
       useNativeDriver: true,
     }).start();
@@ -115,7 +133,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const handlePan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 2,
+      onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => cb.current.onDragStart(cb.current.queueIndex),
       onPanResponderMove: (_, g) => cb.current.onDragMove(g.dy),
@@ -130,15 +148,11 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
         styles.row,
         p.dragging && styles.rowDragging,
         {
-          transform: [
-            { translateY: p.dragging ? p.dragY : shiftAnim },
-            { scale: scaleAnim },
-          ],
-          zIndex: p.dragging ? 999 : 1,
+          transform: [{ translateY: p.dragging ? p.dragY : shiftAnim }, { scale: scaleAnim }],
         },
       ]}
     >
-      <PressableScale onPress={p.onPress} scaleTo={0.98} style={styles.rowMain} haptic="light">
+      <PressableScale onPress={() => cb.current.onPlay(cb.current.queueIndex)} scaleTo={0.98} style={styles.rowMain} haptic="light">
         <View style={{ opacity: p.isPast && !p.isCurrent ? 0.55 : 1 }}>
           <CoverArt uri={p.track.artworkUri} size={44} radius={10} />
           {p.isCurrent && (
@@ -158,7 +172,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
       </PressableScale>
       {p.canDrag && (
         <View style={styles.handle} {...handlePan.panHandlers}>
-          <Ionicons name="reorder-three" size={26} color={colors.text3} />
+          <Ionicons name="reorder-three" size={26} color={p.dragging ? colors.text : colors.text3} />
         </View>
       )}
     </Animated.View>
@@ -199,21 +213,20 @@ export const QueueView: React.FC<Props> = ({
   const [sortMode, setSortMode] = useState<SortOption>('default');
   const [showFilterMenu, setShowFilterMenu] = useState(false);
 
-  const isReorderingRef = useRef(false);
+  /**
+   * Локальная копия очереди нужна, чтобы в момент «бросания» перестановка и сброс сдвигов
+   * применились одним обновлением (атомарно) — иначе строки на кадр прыгают назад.
+   */
   const [localTracks, setLocalTracks] = useState(tracks);
-
   useEffect(() => {
-    if (isReorderingRef.current) {
-      isReorderingRef.current = false;
-      return;
-    }
-    if (!drag) setLocalTracks(sortMode === 'default' ? tracks : applySort(tracks, sortMode));
-  }, [tracks, drag, sortMode]);
+    if (!drag) setLocalTracks(tracks);
+  }, [tracks, drag]);
 
   const handleSelectSort = (mode: SortOption) => {
     Haptics.selectionAsync();
     setSortMode(mode);
     setShowFilterMenu(false);
+    if (mode === 'default') return;
     const sorted = applySort(tracks, mode);
     setLocalTracks(sorted);
     onReorder?.(sorted);
@@ -236,9 +249,12 @@ export const QueueView: React.FC<Props> = ({
   const autoScroll = useRef<ReturnType<typeof setInterval> | null>(null);
   const tracksLen = useRef(localTracks.length);
   tracksLen.current = localTracks.length;
+  const cbs = useRef({ onMove, onPlay });
+  cbs.current = { onMove, onPlay };
 
   const updateHover = useCallback(() => {
     const d = dragInfo.current;
+    if (d.from < 0) return;
     const total = d.dy + (scrollY.current - d.startScroll);
     dragY.setValue(total);
     const hover = Math.max(0, Math.min(tracksLen.current - 1, Math.round(d.from + total / ROW_H)));
@@ -257,8 +273,9 @@ export const QueueView: React.FC<Props> = ({
   const onDragStart = useCallback(
     (from: number) => {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      dragInfo.current = { ...dragInfo.current, from, startScroll: scrollY.current, dy: 0, hover: from };
+      dragY.stopAnimation();
       dragY.setValue(0);
+      dragInfo.current = { ...dragInfo.current, from, startScroll: scrollY.current, dy: 0, hover: from };
       setDrag({ from, hover: from });
     },
     [dragY]
@@ -267,24 +284,28 @@ export const QueueView: React.FC<Props> = ({
   const onDragMove = useCallback(
     (dy: number) => {
       const d = dragInfo.current;
+      if (d.from < 0) return;
       d.dy = dy;
       updateHover();
-      // автопрокрутка у краёв списка
-      const visibleTop = d.from * ROW_H + dy - d.startScroll; // позиция строки в окне списка
-      stopAuto();
+      // автопрокрутка у краёв списка — один интервал, скорость плавно растёт к краю
+      const visibleTop = d.from * ROW_H + dy - d.startScroll;
       let speed = 0;
-      if (visibleTop < 40) speed = -10;
-      else if (visibleTop > d.listH - ROW_H - 40) speed = 10;
-      if (speed !== 0) {
-        autoScroll.current = setInterval(() => {
-          const max = Math.max(0, tracksLen.current * ROW_H - d.listH + bottomPad);
-          const next = Math.max(0, Math.min(max, scrollY.current + speed));
-          if (next === scrollY.current) return;
-          scrollY.current = next;
-          listRef.current?.scrollToOffset({ offset: next, animated: false });
-          updateHover();
-        }, 16);
+      const zone = 70;
+      if (visibleTop < zone) speed = -Math.min(16, 3 + ((zone - visibleTop) / zone) * 13);
+      else if (visibleTop > d.listH - ROW_H - zone) speed = Math.min(16, 3 + ((visibleTop - (d.listH - ROW_H - zone)) / zone) * 13);
+      if (speed === 0) {
+        stopAuto();
+        return;
       }
+      stopAuto();
+      autoScroll.current = setInterval(() => {
+        const max = Math.max(0, tracksLen.current * ROW_H - d.listH + bottomPad);
+        const next = Math.max(0, Math.min(max, scrollY.current + speed));
+        if (next === scrollY.current) return;
+        scrollY.current = next;
+        listRef.current?.scrollToOffset({ offset: next, animated: false });
+        updateHover();
+      }, 16);
     },
     [updateHover, bottomPad]
   );
@@ -297,16 +318,13 @@ export const QueueView: React.FC<Props> = ({
     dragInfo.current.from = -1;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
+    const settle = { damping: 28, stiffness: 380, mass: 0.7, useNativeDriver: true } as const;
     if (hover === from || hover < 0) {
-      Animated.timing(dragY, { toValue: 0, duration: 100, useNativeDriver: true }).start(() => {
-        setDrag(null);
-      });
+      Animated.spring(dragY, { toValue: 0, ...settle }).start(() => setDrag(null));
     } else {
-      Animated.timing(dragY, { toValue: (hover - from) * ROW_H, duration: 110, useNativeDriver: true }).start(() => {
-        isReorderingRef.current = true;
-        // 1. Синхронно обновляем очередь в движке
-        onMove(from, hover);
-        // 2. В том же тике обновляем локальный список без задержек и гонок
+      // строка «доезжает» до своего нового места, затем перестановка и сброс сдвигов — одним обновлением
+      Animated.spring(dragY, { toValue: (hover - from) * ROW_H, ...settle }).start(() => {
+        cbs.current.onMove(from, hover);
         setLocalTracks((prev) => {
           const next = [...prev];
           const [moved] = next.splice(from, 1);
@@ -314,11 +332,10 @@ export const QueueView: React.FC<Props> = ({
           return next;
         });
         setSortMode('default');
-        dragY.setValue(0);
         setDrag(null);
       });
     }
-  }, [dragY, onMove]);
+  }, [dragY]);
 
   useEffect(() => stopAuto, []);
 
@@ -335,36 +352,38 @@ export const QueueView: React.FC<Props> = ({
     [localTracks, currentTrackId, currentIndex]
   );
 
-  const renderItem = ({ item }: { item: { track: TrackFile; qi: number } }) => {
-    let shift = 0;
-    if (drag) {
-      if (drag.from < drag.hover && item.qi > drag.from && item.qi <= drag.hover) shift = -1;
-      else if (drag.hover < drag.from && item.qi >= drag.hover && item.qi < drag.from) shift = 1;
-    }
-    const isCurrent = currentTrackId
-      ? item.track.id === currentTrackId
-      : item.qi === currentIndex;
-    const isPast = item.qi < (currentTrackIndex >= 0 ? currentTrackIndex : currentIndex);
+  const playAt = useCallback((i: number) => cbs.current.onPlay(i), []);
 
-    return (
-      <QueueRow
-        track={item.track}
-        queueIndex={item.qi}
-        isCurrent={isCurrent}
-        isPlaying={isPlaying}
-        isPast={isPast}
-        canDrag={!filtering}
-        shift={shift}
-        hasActiveDrag={drag !== null}
-        dragging={drag?.from === item.qi}
-        dragY={dragY}
-        onPress={() => onPlay(item.qi)}
-        onDragStart={onDragStart}
-        onDragMove={onDragMove}
-        onDragEnd={onDragEnd}
-      />
-    );
-  };
+  const renderItem = useCallback(
+    ({ item }: { item: { track: TrackFile; qi: number } }) => {
+      let shift = 0;
+      if (drag) {
+        if (drag.from < drag.hover && item.qi > drag.from && item.qi <= drag.hover) shift = -1;
+        else if (drag.hover < drag.from && item.qi >= drag.hover && item.qi < drag.from) shift = 1;
+      }
+      const isCurrent = currentTrackId ? item.track.id === currentTrackId : item.qi === currentIndex;
+      const isPast = item.qi < (currentTrackIndex >= 0 ? currentTrackIndex : currentIndex);
+      return (
+        <QueueRow
+          track={item.track}
+          queueIndex={item.qi}
+          isCurrent={isCurrent}
+          isPlaying={isPlaying}
+          isPast={isPast}
+          canDrag={!filtering}
+          shift={shift}
+          hasActiveDrag={drag !== null}
+          dragging={drag?.from === item.qi}
+          dragY={dragY}
+          onPlay={playAt}
+          onDragStart={onDragStart}
+          onDragMove={onDragMove}
+          onDragEnd={onDragEnd}
+        />
+      );
+    },
+    [drag, currentTrackId, currentIndex, currentTrackIndex, isPlaying, filtering, dragY, playAt, onDragStart, onDragMove, onDragEnd]
+  );
 
   const totalMin = Math.round(localTracks.length ? localTracks.length * 3.4 : 0);
 
@@ -447,14 +466,20 @@ export const QueueView: React.FC<Props> = ({
         </View>
       </View>
 
+      <View style={{ flex: 1 }}>
+      <DragCtx.Provider value={drag ? drag.from : -1}>
       <FlatList
         ref={listRef}
         data={data}
         keyExtractor={(i) => i.track.id}
         renderItem={renderItem}
+        CellRendererComponent={DragCell}
         extraData={drag}
         getItemLayout={(_, i) => ({ length: ROW_H, offset: ROW_H * i, index: i })}
         scrollEnabled={!drag}
+        initialNumToRender={14}
+        windowSize={9}
+        maxToRenderPerBatch={10}
         onScroll={(e) => {
           scrollY.current = e.nativeEvent.contentOffset.y;
           if (dragInfo.current.from >= 0) updateHover();
@@ -488,6 +513,11 @@ export const QueueView: React.FC<Props> = ({
           </View>
         }
       />
+      </DragCtx.Provider>
+      {/* мягкое растворение списка у краёв — без резкого обрезания строк */}
+      <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0.85)', 'rgba(8,8,8,0)']} style={styles.fadeTop} />
+      <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0)', 'rgba(8,8,8,0.85)']} style={[styles.fadeBottom, { height: Math.min(bottomPad, 96) }]} />
+      </View>
     </View>
   );
 };
@@ -563,13 +593,11 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   rowDragging: {
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderColor: 'rgba(255,255,255,0.45)',
-    shadowColor: '#FFFFFF',
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 2 },
+    backgroundColor: 'rgba(255,255,255,0.09)',
+    borderColor: 'rgba(255,255,255,0.22)',
   },
+  fadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 14 },
+  fadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0 },
   rowMain: { flexDirection: 'row', alignItems: 'center', flex: 1, paddingVertical: 10 },
   rowText: { flex: 1, marginLeft: 12 },
   rowTitle: { ...type.headline, fontSize: 16, color: colors.text, fontWeight: '600' },

@@ -5,9 +5,17 @@ import { DJSettings, RepeatMode } from '../types';
  * Небольшое JSON-хранилище в Documents/.woufy/state.json
  * (скрытая папка: Files её не показывает, сканер её пропускает).
  */
+/** Сетка битов трека: биты стоят в моменты phase + k·60/bpm (секунды от начала файла) */
+export interface BeatGridRecord {
+  bpm: number;
+  phase: number;
+}
+
 export interface BpmRecord {
   value: number;
   source: 'auto' | 'manual';
+  /** точная сетка битов (для наложения битов друг на друга при DJ-склейке) */
+  grid?: BeatGridRecord;
 }
 
 export interface PersistedState {

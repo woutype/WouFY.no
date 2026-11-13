@@ -1,8 +1,11 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, View } from 'react-native';
+import { BlurView } from 'expo-blur';
 import type { AudioPlayer } from 'expo-audio';
 
-const BARS = 28;
+const BARS = 36;
+const FLOOR = 0.06;
+const FRAME_MS = 33; // ~30 кадров/с — достаточно плавно и вдвое легче для JS
 const N = 1024; // размер окна FFT
 const MIN_HZ = 50;
 const MAX_HZ = 12000;
@@ -52,30 +55,40 @@ interface Props {
 
 /** Настоящий спектр (FFT) поверх обложки. Семплирование включается только пока визуализатор на экране. */
 export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, radius }) => {
-  const bars = useRef(Array.from({ length: BARS }, () => new Animated.Value(0.08))).current;
-  const targetLevels = useRef(new Float32Array(BARS).fill(0.08)).current;
-  const currentLevels = useRef(new Float32Array(BARS).fill(0.08)).current;
+  const bars = useRef(Array.from({ length: BARS }, () => new Animated.Value(FLOOR))).current;
+  const targetLevels = useRef(new Float32Array(BARS).fill(FLOOR)).current;
+  const currentLevels = useRef(new Float32Array(BARS).fill(FLOOR)).current;
   const playing = useRef(isPlaying);
   playing.current = isPlaying;
 
-  // 60-120 FPS плавный рендер-луп дисплея (декупленный от аудио-буферов)
+  // Рендер-луп: быстрая атака на ударах, плавный спад; соседние полосы слегка сглаживаются между собой
   useEffect(() => {
     let rafId: number;
     let active = true;
+    let lastFrame = 0;
+    const tmp = new Float32Array(BARS);
 
-    const loop = () => {
+    const loop = (ts: number) => {
       if (!active) return;
+      rafId = requestAnimationFrame(loop);
+      if (ts - lastFrame < FRAME_MS) return;
+      lastFrame = ts;
       const isPlay = playing.current;
       for (let b = 0; b < BARS; b++) {
-        const target = isPlay ? targetLevels[b] : 0.08;
-        const cur = currentLevels[b];
-        // Шелковистая интерполяция: быстрая атака на ударах, плавный спад
-        const factor = target > cur ? 0.42 : 0.14;
-        const next = cur + (target - cur) * factor;
-        currentLevels[b] = next;
-        bars[b].setValue(next);
+        const l = targetLevels[Math.max(0, b - 1)];
+        const r = targetLevels[Math.min(BARS - 1, b + 1)];
+        tmp[b] = isPlay ? targetLevels[b] * 0.6 + (l + r) * 0.2 : FLOOR;
       }
-      rafId = requestAnimationFrame(loop);
+      for (let b = 0; b < BARS; b++) {
+        const cur = currentLevels[b];
+        const target = tmp[b];
+        const factor = target > cur ? 0.5 : 0.16;
+        const next = cur + (target - cur) * factor;
+        if (Math.abs(next - cur) > 0.002) {
+          currentLevels[b] = next;
+          bars[b].setValue(next);
+        }
+      }
     };
 
     rafId = requestAnimationFrame(loop);
@@ -128,8 +141,10 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
             const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]) / (N / 4);
             if (mag > peak) peak = mag;
           }
-          const db = 20 * Math.log10(peak + 1e-6);
-          const target = Math.min(1, Math.max(0.08, (db + 62) / 52));
+          // наклон +3 дБ/окт: у музыки спектр падает к высоким — без него правая часть почти не двигалась бы
+          const tilt = 3 * Math.log2(Math.sqrt(edges[b] * edges[b + 1]) / 200);
+          const db = 20 * Math.log10(peak + 1e-6) + tilt;
+          const target = Math.min(1, Math.max(FLOOR, (db + 60) / 50));
           targetLevels[b] = target;
         }
       });
@@ -149,30 +164,30 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
   // при паузе сбрасываем целевые уровни
   useEffect(() => {
     if (isPlaying) return;
-    for (let i = 0; i < BARS; i++) targetLevels[i] = 0.08;
+    for (let i = 0; i < BARS; i++) targetLevels[i] = FLOOR;
   }, [isPlaying, targetLevels]);
 
-  const barH = size * 0.45;
+  const barH = size * 0.5;
   return (
     <View style={[styles.wrap, { borderRadius: radius }]} pointerEvents="none">
+      {/* матовая подложка: лёгкое размытие обложки + тёмная полупрозрачная заливка, без бликов */}
+      <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(10,10,11,0.5)' }]} />
       <View style={[styles.row, { height: barH }]}>
-        {bars.map((v, i) => {
-          const centerDist = Math.abs(i - (BARS - 1) / 2) / ((BARS - 1) / 2);
-          const barOpacity = 0.72 + (1 - centerDist) * 0.28;
-          return (
-            <Animated.View
-              key={i}
-              style={[
-                styles.bar,
-                {
-                  height: barH,
-                  opacity: barOpacity,
-                  transform: [{ scaleY: v }],
-                },
-              ]}
-            />
-          );
-        })}
+        {bars.map((v, i) => (
+          <Animated.View
+            key={i}
+            style={[
+              styles.bar,
+              {
+                height: barH,
+                // полоса растёт от центра вверх и вниз; громче — ярче
+                opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.35, 1], extrapolate: 'clamp' }),
+                transform: [{ scaleY: v }],
+              },
+            ]}
+          />
+        ))}
       </View>
     </View>
   );
@@ -181,10 +196,9 @@ export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, r
 const styles = StyleSheet.create({
   wrap: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(10,10,11,0.58)',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 22,
+    paddingHorizontal: 20,
     overflow: 'hidden',
   },
   row: {
@@ -195,12 +209,8 @@ const styles = StyleSheet.create({
   },
   bar: {
     flex: 1,
-    marginHorizontal: 1.5,
+    marginHorizontal: 1,
     borderRadius: 999,
     backgroundColor: '#FFFFFF',
-    shadowColor: '#FFFFFF',
-    shadowOpacity: 0.45,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 0 },
   },
 });

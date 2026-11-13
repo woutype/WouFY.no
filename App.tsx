@@ -32,7 +32,7 @@ function Root() {
   const progress = useRef(new Animated.Value(1)).current;
 
   // перерисовка при появлении нового BPM
-  useSyncExternalStore(bpmService.subscribe.bind(bpmService), () => JSON.stringify(getState().bpm ?? {}));
+  useSyncExternalStore(bpmService.subscribe.bind(bpmService), () => bpmService.version);
 
   /* ───────── загрузка библиотеки ───────── */
   const rescan = useCallback(async () => {
@@ -50,11 +50,12 @@ function Root() {
   useEffect(() => {
     engine.configure({
       bpmLookup: (t) => bpmService.get(t.id),
+      gridLookup: (t) => bpmService.gridOf(t.id),
+      // анализ темпа (беззвучный «разведчик») ставим на паузу на время склейки — чтобы не нагружать процессор
+      onMixingChange: (mixing) => bpmService.setPaused(mixing),
       onTrackChange: (cur, upcoming) => {
-        if (!engine.getState().mixing) {
-          bpmService.request(cur, true);
-          upcoming.forEach((t) => bpmService.request(t));
-        }
+        bpmService.request(cur, true);
+        upcoming.forEach((t) => bpmService.request(t));
       },
       onPersist: (s) => patchState(s),
     });

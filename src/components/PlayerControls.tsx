@@ -36,7 +36,9 @@ const Timeline: React.FC<{ engine: AudioEngine; duration: number }> = ({ engine,
         value={shown}
         max={duration > 0 ? duration : 1}
         disabled={duration <= 0}
+        relative
         onScrub={setScrub}
+        onCancel={() => setScrub(null)}
         onCommit={(v) => {
           pending.current = { v, t: Date.now() };
           setScrub(null);

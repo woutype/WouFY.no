@@ -1,6 +1,6 @@
 import { createAudioPlayer, AudioPlayer, AudioStatus } from 'expo-audio';
 import { DJSettings, DEFAULT_DJ, RepeatMode, TrackFile } from '../types';
-import { planMix, ratesAt, volumesAt, MixPlan } from './djMix';
+import { planMix, ratesAt, volumesAt, beatPhase, wrapHalf, MixPlan, TrackTempo, BeatGrid } from './djMix';
 import { configureAudioSession } from './audioService';
 import { volumeService } from './volumeService';
 
@@ -24,18 +24,32 @@ interface Transition {
   to: AudioPlayer;
   toId: string;
   plan: MixPlan;
-  /** «медиа-секунд» до конца A, с которых идёт склейка */
-  trigger: number;
-  /** wall-clock момент старта склейки (мс) */
-  startedAt: number;
-  /** wall-clock продолжительность склейки (мс) */
+  /** длительность склейки, мс: ровно столько, чтобы A закончился в конце перехода */
   durationMs: number;
+  /** сколько склейки уже прошло (только пока играет — на паузе не копится) */
+  elapsedMs: number;
+  lastTickAt: number;
   uiSwitched: boolean;
-  initialRateB: number;
+  lastRateA: number;
   lastRateB: number;
   lastRateAt: number;
-  lastVolA?: number;
-  lastVolB?: number;
+  /** сглаженная поправка скорости B от фазовой автоподстройки (PLL) */
+  corr: number;
+  /** выполнена первичная подгонка фазы B */
+  hardSynced: boolean;
+  /** до этого момента (мс склейки) PLL не трогает скорость — идёт перемотка */
+  holdUntilMs: number;
+  lastVolA: number;
+  lastVolB: number;
+}
+
+/** Подготовка трека B: загружен и стоит на своём бите, ждёт момента старта */
+interface Prep {
+  id: string;
+  startPos: number;
+  ready: boolean;
+  seeking: boolean;
+  attempts: number;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -44,6 +58,15 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  * 40 мс = 25 Гц обновлений громкости — идеально плавный fade без лишней нагрузки на bridge.
  */
 const TICK_MS = 40;
+/** Как часто обновляем скорость воспроизведения во время склейки (чаще — рывки AVPlayer) */
+const RATE_STEP_MS = 150;
+/** Опережение старта B, сек (задержка команды play) */
+const START_LEAD_SEC = 0.05;
+/** Усиление и предел фазовой автоподстройки B к битам A */
+const PLL_GAIN = 0.5;
+const PLL_MAX = 0.05;
+/** Если B в начале склейки сдвинут от бита больше чем на эту долю — один раз «довинчиваем» его перемоткой (B ещё почти неслышен) */
+const HARD_SYNC_ERR = 0.05;
 /** За сколько секунд до конца трека начинаем предзагрузку следующего (буферизация). */
 const PRELOAD_AHEAD_SEC = 30;
 
@@ -69,7 +92,7 @@ export class AudioEngine {
   private baseOrder: string[] = [];
   private dj: DJSettings = DEFAULT_DJ;
   private trans: Transition | null = null;
-  private preloadedId: string | null = null;
+  private prep: Prep | null = null;
   private mixBlockedFor: string | null = null;
   private playIntent = false;
   private lastCommandAt = 0;
@@ -77,6 +100,8 @@ export class AudioEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private subs: { remove: () => void }[] = [];
   private bpmLookup: (t: TrackFile) => number | undefined = () => undefined;
+  private gridLookup: (t: TrackFile) => BeatGrid | undefined = () => undefined;
+  private onMixingChange: (mixing: boolean) => void = () => {};
   private onTrackChange: (cur: TrackFile | undefined, upcoming: (TrackFile | undefined)[]) => void = () => {};
   private onPersist: (s: { order: string[]; shuffle: boolean; repeat: RepeatMode; volume: number; lastTrackId?: string }) => void =
     () => {};
@@ -103,7 +128,7 @@ export class AudioEngine {
 
     // Синхронизация с физической громкостью телефона (кнопки iPhone и Центр управления)
     volumeService.addListener((vol) => {
-      if (Date.now() - this.lastUserVolumeChangeAt < 250) return;
+      if (Date.now() - this.lastUserVolumeChangeAt < 400) return;
       if (Math.abs(this.state.volume - vol) >= 0.005) {
         this.set({ volume: vol });
         this.persist();
@@ -128,10 +153,14 @@ export class AudioEngine {
 
   configure(opts: {
     bpmLookup?: (t: TrackFile) => number | undefined;
+    gridLookup?: (t: TrackFile) => BeatGrid | undefined;
+    onMixingChange?: (mixing: boolean) => void;
     onTrackChange?: (cur: TrackFile | undefined, upcoming: (TrackFile | undefined)[]) => void;
     onPersist?: (s: { order: string[]; shuffle: boolean; repeat: RepeatMode; volume: number; lastTrackId?: string }) => void;
   }) {
     if (opts.bpmLookup) this.bpmLookup = opts.bpmLookup;
+    if (opts.gridLookup) this.gridLookup = opts.gridLookup;
+    if (opts.onMixingChange) this.onMixingChange = opts.onMixingChange;
     if (opts.onTrackChange) this.onTrackChange = opts.onTrackChange;
     if (opts.onPersist) this.onPersist = opts.onPersist;
   }
@@ -139,7 +168,7 @@ export class AudioEngine {
   setDJ(dj: DJSettings) {
     this.dj = dj;
     if (!dj.crossfadeEnabled && this.trans) this.cancelTransition();
-    this.preloadedId = null;
+    this.prep = null;
     this.mixBlockedFor = null;
   }
 
@@ -247,7 +276,7 @@ export class AudioEngine {
     else if (from < index && to >= index) index -= 1;
     else if (from > index && to <= index) index += 1;
     if (!this.state.shuffle) this.baseOrder = q.map((t) => t.id);
-    this.preloadedId = null;
+    this.prep = null;
     this.set({ queue: q, index });
     setTimeout(() => this.persist(), 50);
     this.onTrackChange(this.currentTrack, this.upcoming());
@@ -257,7 +286,7 @@ export class AudioEngine {
     const cur = this.currentTrack;
     const index = cur ? newQueue.findIndex((t) => t.id === cur.id) : -1;
     if (!this.state.shuffle) this.baseOrder = newQueue.map((t) => t.id);
-    this.preloadedId = null;
+    this.prep = null;
     this.set({ queue: newQueue, index });
     setTimeout(() => this.persist(), 50);
     this.onTrackChange(this.currentTrack, this.upcoming());
@@ -280,7 +309,7 @@ export class AudioEngine {
       const index = cur ? queue.findIndex((t) => t.id === cur.id) : -1;
       this.set({ shuffle: false, queue, index });
     }
-    this.preloadedId = null;
+    this.prep = null;
     this.persist();
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
@@ -292,14 +321,24 @@ export class AudioEngine {
 
   private lastUserVolumeChangeAt = 0;
 
+  /** Множитель громкости плееров: при системной громкости плееры играют на 100% (громкость задаёт сам телефон) */
+  private master(): number {
+    return volumeService.isAvailable() ? 1 : this.state.volume;
+  }
+
+  /**
+   * syncToDevice=true — значение пришло из приложения (слайдер): пишем в системную громкость.
+   * syncToDevice=false — значение прочитано с устройства: только обновляем слайдер.
+   */
   setVolume(v: number, syncToDevice = true) {
     const volume = clamp(v, 0, 1);
-    this.lastUserVolumeChangeAt = Date.now();
+    if (syncToDevice) this.lastUserVolumeChangeAt = Date.now();
     this.set({ volume });
-    if (syncToDevice && volumeService.isAvailable()) {
-      volumeService.setVolume(volume);
+    if (volumeService.isAvailable()) {
+      if (syncToDevice) volumeService.setVolume(volume);
+      // плееры остаются на 1.0 — иначе громкость применилась бы дважды
     } else {
-      volumeService.setVolume(volume);
+      if (syncToDevice) volumeService.setVolume(volume);
       if (!this.trans) {
         safe(() => {
           this.A.volume = volume;
@@ -323,10 +362,10 @@ export class AudioEngine {
       this.B.pause();
       this.A.replace({ uri: t.uri });
       this.A.setPlaybackRate(1, 'low');
-      this.A.volume = volumeService.isAvailable() ? 1 : this.state.volume;
+      this.A.volume = this.master();
       this.A.play();
     });
-    this.preloadedId = null;
+    this.prep = null;
     this.set({ index, isPlaying: true, duration: 0, player: this.A, mixing: false });
     this.updateLockScreen(this.A, t);
     this.notifyTrackChange();
@@ -460,6 +499,73 @@ export class AudioEngine {
 
   /* ───────────── DJ-склейка ───────────── */
 
+  private tempoOf(t: TrackFile): TrackTempo {
+    return { bpm: this.bpmLookup(t), grid: this.gridLookup(t) };
+  }
+
+  /**
+   * Где стартует склейка. A должен закончиться ровно в конце перехода, поэтому старт — за (X · средняя скорость A)
+   * секунд до конца. Если известна сетка битов — сдвигаем старт на ближайший бит A назад
+   * (лучше на начало такта, если это не раньше чем на ~30% длительности), чтобы B вошёл «в долю».
+   */
+  private pickStart(plan: MixPlan, dur: number, pos: number, X: number): { sA: number; durationMs: number } | null {
+    const avg = plan.tempo ? plan.avgRateA : 1;
+    const ideal = dur - X * avg;
+    let sA = ideal;
+    if (plan.beatSync) {
+      const { periodA: pA, phaseA: phA } = plan;
+      const kIdeal = Math.floor((ideal - phA) / pA + 1e-6);
+      const barK = kIdeal - (((kIdeal % 4) + 4) % 4);
+      const barT = phA + barK * pA;
+      sA = ideal - barT <= 0.3 * X * avg ? barT : phA + kIdeal * pA;
+      while (sA < pos - 0.04) sA += pA; // уже проскочили — берём следующий бит
+    } else if (sA < pos) {
+      sA = pos;
+    }
+    if (sA > dur - 0.4) return null;
+    const durationMs = ((dur - sA) / avg) * 1000;
+    if (durationMs < X * 1000 * 0.45) return null;
+    return { sA, durationMs: Math.min(durationMs, X * 1000 * 1.5) };
+  }
+
+  /** Загружает трек B заранее и ставит его на «свой» бит — к старту остаётся только play() */
+  private ensurePrepared(nxt: TrackFile, plan: MixPlan) {
+    const idle = this.B;
+    const startPos = plan.beatSync ? plan.bStartPos : 0;
+    if (!this.prep || this.prep.id !== nxt.id) {
+      safe(() => {
+        idle.pause();
+        idle.replace({ uri: nxt.uri });
+        idle.volume = 0;
+        idle.setPlaybackRate(1, 'low');
+      });
+      this.prep = { id: nxt.id, startPos, ready: false, seeking: false, attempts: 0 };
+    }
+    const prep = this.prep;
+    if (!prep.seeking && Math.abs(prep.startPos - startPos) > 0.03) {
+      prep.startPos = startPos;
+      prep.ready = false;
+      prep.attempts = 0;
+    }
+    if (prep.ready || prep.seeking) return;
+    if (!(safe(() => idle.isLoaded) ?? false)) return;
+    const cur = safe(() => idle.currentTime) ?? 0;
+    if (Math.abs(cur - prep.startPos) < 0.05 || prep.attempts >= 3) {
+      prep.ready = true;
+      return;
+    }
+    prep.seeking = true;
+    prep.attempts++;
+    const target = prep.startPos;
+    Promise.resolve(safe(() => idle.seekTo(target)))
+      .catch(() => {})
+      .finally(() => {
+        if (this.prep !== prep) return;
+        prep.seeking = false;
+        prep.ready = Math.abs(prep.startPos - target) < 0.03 && (Math.abs((safe(() => idle.currentTime) ?? 0) - target) < 0.08 || prep.attempts >= 3);
+      });
+  }
+
   private tick = () => {
     if (!this.playIntent) return;
     const a = this.A;
@@ -481,50 +587,36 @@ export class AudioEngine {
 
     const cur = this.currentTrack;
     const nxt = this.state.queue[nextIdx];
-    const plan = planMix(this.bpmLookup(cur), this.bpmLookup(nxt), X, this.dj.bpmTransitionEnabled);
+    const plan = planMix(this.tempoOf(cur), this.tempoOf(nxt), this.dj.bpmTransitionEnabled);
     const remaining = dur - pos;
+    const avg = plan.tempo ? plan.avgRateA : 1;
 
-    // ── Ранняя предзагрузка: грузим трек заблаговременно (PRELOAD_AHEAD_SEC до конца),
-    //    чтобы декодирование завершилось задолго до старта склейки ──────────────────────
-    const idle = this.B;
-    if (this.preloadedId !== nxt.id && remaining <= PRELOAD_AHEAD_SEC) {
-      safe(() => {
-        idle.pause();
-        idle.replace({ uri: nxt.uri });
-        idle.volume = 0;
-        idle.setPlaybackRate(1);
-      });
-      this.preloadedId = nxt.id;
-    }
+    // Ранняя предзагрузка: декодирование и установка на бит завершаются задолго до склейки
+    if (remaining <= PRELOAD_AHEAD_SEC + X * avg) this.ensurePrepared(nxt, plan);
+    else return;
 
-    // Ещё далеко до начала склейки — ждём
-    if (remaining > plan.triggerRemaining || pos < 1) return;
-
-    // ── Старт склейки ────────────────────────────────────────────────────────────────
-    const loaded = safe(() => idle.isLoaded) ?? false;
-    const p0 = clamp(1 - remaining / plan.triggerRemaining, 0, 1);
-
-    if (!loaded || p0 > 0.4) {
-      // Плеер B ещё не готов — если мало времени, сдаёмся и делаем обычный переход
-      if (remaining < plan.triggerRemaining * 0.55) this.mixBlockedFor = cur.id;
+    const start = this.pickStart(plan, dur, pos, X);
+    if (!start) {
+      // слишком поздно для нормальной склейки — обычный переход в конце трека
+      if (remaining < X * 0.6) this.mixBlockedFor = cur.id;
       return;
     }
+    if (pos < start.sA - START_LEAD_SEC) return;
 
-    // ── Beat-sync: подгоняем темп трека B под трек A ───────────────────────────────
-    // Трек B стартует с темпом трека A (наложение в ритм), а за время перехода
-    // плавно выравнивается на свою родную скорость 1.0 (BPM трека B).
-    // Используем 'low' (.varispeed) — чистый аналоговый питч-шифт без пересборки CoreAudio графа.
+    const prep = this.prep;
+    const idle = this.B;
+    if (!prep || prep.id !== nxt.id || !prep.ready || !(safe(() => idle.isLoaded) ?? false)) return; // ждём B
+
+    // ── Старт склейки ──
+    // B стартует с темпом A (1 / ratio) и идёт с 0% громкости; A плавно ускоряется/замедляется к темпу B.
     const now = Date.now();
-    const initialRateB = plan.tempo ? clamp(plan.bpmA / plan.targetBpm, 0.88, 1.12) : 1;
+    const master = this.master();
+    const initialRateB = plan.tempo ? clamp(plan.bpmA / plan.targetBpm, 0.5, 2) : 1;
     safe(() => {
-      if (plan.tempo && Math.abs(initialRateB - 1) > 0.002) {
-        idle.setPlaybackRate(initialRateB, 'low');
-      } else {
-        idle.setPlaybackRate(1.0, 'low');
-      }
-      idle.volume = 0;      // ← стартуем строго с 0, driveTransition плавно поднимет громкость
+      idle.setPlaybackRate(initialRateB, 'low');
+      idle.volume = 0;
+      a.volume = master;
       idle.play();
-      a.volume = volumeService.isAvailable() ? 1 : this.state.volume;
     });
 
     this.trans = {
@@ -532,55 +624,89 @@ export class AudioEngine {
       to: idle,
       toId: nxt.id,
       plan,
-      trigger: plan.triggerRemaining,
-      startedAt: now,
-      durationMs: this.dj.crossfadeDuration * 1000,
+      durationMs: start.durationMs,
+      elapsedMs: 0,
+      lastTickAt: now,
       uiSwitched: false,
-      initialRateB,
+      lastRateA: 1,
       lastRateB: initialRateB,
       lastRateAt: now,
-      lastVolA: volumeService.isAvailable() ? 1 : this.state.volume,
+      corr: 0,
+      hardSynced: false,
+      holdUntilMs: 0,
+      lastVolA: master,
       lastVolB: 0,
     };
     this.set({ mixing: true });
+    this.onMixingChange(true);
   };
 
-  private driveTransition(_pos: number, _dur: number) {
+  private driveTransition(pos: number, dur: number) {
     const t = this.trans!;
+    const now = Date.now();
+    // прогресс считаем только по времени, когда реально играем (пауза посреди склейки не «съедает» её)
+    t.elapsedMs += Math.min(120, now - t.lastTickAt);
+    t.lastTickAt = now;
+    const p = clamp(t.elapsedMs / t.durationMs, 0, 1);
 
-    // ── Прогресс по wall-clock времени (строго монотонно и без преждевременных срывов) ──
-    const elapsed = Date.now() - t.startedAt;
-    const p = clamp(elapsed / t.durationMs, 0, 1);
-
+    // ── громкость: A 100%→0, B 0→100% одновременно ──
     const { volA, volB } = volumesAt(p, this.dj.fadeVolumeEnabled);
-    const master = volumeService.isAvailable() ? 1 : this.state.volume;
+    const master = this.master();
     const targetA = volA * master;
     const targetB = volB * master;
-
-    // Обновляем громкость плавно (на всю длительность перехода)
-    if (t.lastVolA === undefined || Math.abs(targetA - t.lastVolA) >= 0.005 || p >= 1) {
+    if (Math.abs(targetA - t.lastVolA) >= 0.006 || p >= 1) {
       safe(() => (t.from.volume = targetA));
       t.lastVolA = targetA;
     }
-    if (t.lastVolB === undefined || Math.abs(targetB - t.lastVolB) >= 0.005 || p >= 1) {
+    if (Math.abs(targetB - t.lastVolB) >= 0.006 || p >= 1) {
       safe(() => (t.to.volume = targetB));
       t.lastVolB = targetB;
     }
 
-    // ── Плавное перетекание скорости трека B в его родной темп (1.0) ──────────────────
-    if (t.plan.tempo && Math.abs(t.initialRateB - 1.0) > 0.002) {
-      const curRateB = t.initialRateB + (1.0 - t.initialRateB) * p;
-      const now = Date.now();
-      // Обновляем скорость не чаще раз в 120 мс и если изменение >= 0.002, либо при завершении (p >= 1)
-      if ((now - t.lastRateAt >= 120 && Math.abs(curRateB - t.lastRateB) >= 0.002) || p >= 1) {
-        safe(() => t.to.setPlaybackRate(curRateB, 'low'));
-        t.lastRateB = curRateB;
-        t.lastRateAt = now;
+    // ── темп: оба трека идут к общему BPM; A ускоряется, B из темпа A сходится к своему ──
+    if (t.plan.tempo && p < 1 && now - t.lastRateAt >= RATE_STEP_MS) {
+      const base = ratesAt(t.plan, p);
+      let rateB = base.rateB;
+
+      // Фазовая автоподстройка: сравниваем «долю бита» у A и у B и чуть подруливаем скорость B,
+      // чтобы удары легли друг на друга (как при ручном питч-бенде у диджея)
+      if (t.plan.beatSync && t.elapsedMs > 350 && t.elapsedMs >= t.holdUntilMs) {
+        const tb = safe(() => t.to.currentTime);
+        if (tb !== undefined && Number.isFinite(tb)) {
+          const phiA = beatPhase(pos, t.plan.phaseA, t.plan.periodA);
+          const phiB = beatPhase(tb, t.plan.phaseB, t.plan.periodB);
+          const err = wrapHalf(phiA - phiB); // >0 — B отстаёт от бита
+          if (!t.hardSynced) {
+            t.hardSynced = true;
+            if (Math.abs(err) > HARD_SYNC_ERR) {
+              // B пока играет с громкостью ≈ 0 — перемотка на долю бита не слышна
+              const target = Math.max(0, tb + err * t.plan.periodB);
+              safe(() => t.to.seekTo(target));
+              t.holdUntilMs = t.elapsedMs + 500;
+              t.corr = 0;
+            }
+          } else {
+            const target = clamp(err * PLL_GAIN, -PLL_MAX, PLL_MAX);
+            t.corr += (target - t.corr) * 0.3;
+          }
+        }
       }
+      rateB *= 1 + t.corr;
+
+      if (Math.abs(base.rateA - t.lastRateA) >= 0.0025) {
+        safe(() => t.from.setPlaybackRate(base.rateA, 'low'));
+        t.lastRateA = base.rateA;
+      }
+      if (Math.abs(rateB - t.lastRateB) >= 0.0025) {
+        safe(() => t.to.setPlaybackRate(rateB, 'low'));
+        t.lastRateB = rateB;
+      }
+      t.lastRateAt = now;
     }
 
     if (p >= 0.5 && !t.uiSwitched) this.switchUiToIncoming();
-    if (p >= 1) this.commitTransition();
+    // A дошёл до конца файла — склейка завершена
+    if (p >= 1 || pos >= dur - 0.06) this.commitTransition();
   }
 
   /** На середине склейки обложка/название/текст переключаются на новый трек (только UI, без I/O) */
@@ -596,7 +722,7 @@ export class AudioEngine {
     this.set({ index: idx, player: t.to, duration: safe(() => t.to.duration) ?? 0 });
   }
 
-  /** Завершает склейку: B становится основным, A останавливается */
+  /** Завершает склейку: B становится основным (темп 1.0 = родной BPM), A останавливается */
   private commitTransition() {
     const t = this.trans;
     if (!t) return;
@@ -606,17 +732,18 @@ export class AudioEngine {
       t.from.volume = 0;
       t.to.setPlaybackRate(1.0, 'low');
       t.from.setPlaybackRate(1.0, 'low');
-      t.to.volume = volumeService.isAvailable() ? 1 : this.state.volume;
+      t.to.volume = this.master();
     });
     this.active = this.players.indexOf(t.to);
     this.trans = null;
-    this.preloadedId = null;
+    this.prep = null;
     this.mixBlockedFor = null;
     this.lastCommandAt = Date.now();
     this.set({ mixing: false, player: t.to, isPlaying: this.playIntent });
-    // seekTo(0) на бывшем A-плеере откладываем на 300 мс после паузы
+    // seekTo(0) на бывшем A-плеере откладываем: сначала он должен полностью остановиться
     const fromPlayer = t.from;
     setTimeout(() => safe(() => fromPlayer.seekTo(0)), 300);
+    this.onMixingChange(false);
     this.notifyTrackChange();
   }
 
@@ -628,12 +755,13 @@ export class AudioEngine {
       t.to.volume = 0;
       t.to.setPlaybackRate(1.0, 'low');
       t.from.setPlaybackRate(1.0, 'low');
-      t.from.volume = volumeService.isAvailable() ? 1 : this.state.volume;
+      t.from.volume = this.master();
     });
     this.trans = null;
-    this.preloadedId = null;
+    this.prep = null;
     this.mixBlockedFor = this.currentTrack?.id ?? null;
     this.set({ mixing: false, player: this.A });
+    this.onMixingChange(false);
   }
 
   /* ───────────── экран блокировки и Dynamic Island ───────────── */

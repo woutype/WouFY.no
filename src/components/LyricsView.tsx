@@ -2,34 +2,51 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import { AudioEngine } from '../services/audioEngine';
 import { TrackFile } from '../types';
-import { LyricLine, LyricsData, activeLineIndex, isSectionLine, loadLyrics, saveLrc, shiftLyricsOffset } from '../services/lyrics';
+import {
+  LyricLine,
+  LyricsData,
+  activeLineIndex,
+  fetchOnlineLrc,
+  isSectionLine,
+  loadLyrics,
+  parseLrc,
+  saveLrc,
+  shiftLyricsOffset,
+} from '../services/lyrics';
 import { usePosition } from '../hooks/useAudioController';
 import { colors, formatTime, type } from '../theme';
 import { Glass, PressableScale } from './ui';
 
 const savedCache = new Map<string, LyricsData>();
 
+/** прозрачность неактивных строк по расстоянию до активной — плавное «угасание» вместо резкой границы */
+const DIST_OPACITY = [1, 0.62, 0.46, 0.34, 0.26, 0.2];
+
 const LyricRow = React.memo(function LyricRow(p: {
+  index: number;
   line: LyricLine;
   active: boolean;
-  past: boolean;
-  onPress: () => void;
-  onLayoutY: (y: number, h: number) => void;
+  /** расстояние до активной строки (0…5) */
+  dist: number;
+  onPress: (index: number) => void;
+  onLayoutY: (index: number, y: number) => void;
 }) {
   const a = useRef(new Animated.Value(p.active ? 1 : 0)).current;
   useEffect(() => {
     Animated.spring(a, { toValue: p.active ? 1 : 0, useNativeDriver: true, damping: 22, stiffness: 240, mass: 0.7 }).start();
   }, [p.active, a]);
+  const rest = DIST_OPACITY[Math.min(5, p.dist)];
   return (
-    <Pressable onPress={p.onPress} onLayout={(e) => p.onLayoutY(e.nativeEvent.layout.y, e.nativeEvent.layout.height)}>
+    <Pressable onPress={() => p.onPress(p.index)} onLayout={(e) => p.onLayoutY(p.index, e.nativeEvent.layout.y)}>
       <Animated.Text
         style={[
           p.line.section ? styles.section : styles.line,
           {
-            opacity: a.interpolate({ inputRange: [0, 1], outputRange: [p.past ? 0.32 : 0.45, 1] }),
-            transform: [{ scale: a.interpolate({ inputRange: [0, 1], outputRange: [0.95, 1.04] }) }],
+            opacity: a.interpolate({ inputRange: [0, 1], outputRange: [rest, 1] }),
+            transform: [{ scale: a.interpolate({ inputRange: [0, 1], outputRange: [0.95, 1.03] }) }],
           },
         ]}
       >
@@ -38,6 +55,51 @@ const LyricRow = React.memo(function LyricRow(p: {
     </Pressable>
   );
 });
+
+/** Время для режима разметки — отдельным компонентом, чтобы не перерисовывать весь текст */
+const SyncTime: React.FC<{ engine: AudioEngine }> = ({ engine }) => {
+  const pos = usePosition(engine, 100);
+  return <Text style={styles.syncTime}>{formatTime(pos)}</Text>;
+};
+
+/**
+ * Номер активной строки. Позиция читается у плеера 12 раз в секунду, а React-состояние меняется
+ * только при смене строки — текст не перерисовывается постоянно (раньше все строки пересоздавались 16 раз в секунду).
+ * `pin` фиксирует строку на ~1 сек после нажатия — пока плеер ещё перематывается, строка не «дёргается» назад.
+ */
+function useActiveLine(engine: AudioEngine, lines: LyricLine[], enabled: boolean) {
+  const [active, setActive] = useState(-1);
+  const hold = useRef<{ idx: number; until: number } | null>(null);
+  const linesRef = useRef(lines);
+  linesRef.current = lines;
+
+  const compute = useCallback(() => {
+    const h = hold.current;
+    if (h && Date.now() < h.until) return h.idx;
+    hold.current = null;
+    return activeLineIndex(linesRef.current, engine.getPosition(), 0.12);
+  }, [engine]);
+
+  useEffect(() => {
+    if (!enabled) {
+      setActive(-1);
+      return;
+    }
+    setActive(compute());
+    const id = setInterval(() => setActive((prev) => {
+      const n = compute();
+      return n === prev ? prev : n;
+    }), 80);
+    return () => clearInterval(id);
+  }, [enabled, lines, compute]);
+
+  const pin = useCallback((idx: number) => {
+    hold.current = { idx, until: Date.now() + 1000 };
+    setActive(idx);
+  }, []);
+
+  return { active, pin };
+}
 
 interface Props {
   engine: AudioEngine;
@@ -54,85 +116,132 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
   const [searching, setSearching] = useState(false);
   const [showOffset, setShowOffset] = useState(false);
   const [stamps, setStamps] = useState<number[]>([]);
-  const pos = usePosition(engine, 60);
-  const scrollRef = useRef<any>(null);
+  const [following, setFollowing] = useState(true);
+
+  const scrollRef = useRef<React.ElementRef<typeof ScrollView>>(null);
   const viewH = useRef(500);
   const ys = useRef<Record<number, number>>({});
-  const userScrolling = useRef(false);
+  const follow = useRef(true);
+  const pendingScroll = useRef<number | null>(null);
   const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
 
-  const durKey = Math.round(duration / 5);
+  const lines = data?.lines ?? [];
+  const { active, pin } = useActiveLine(engine, lines, !syncing && lines.length > 0);
 
-  const fetchLyrics = useCallback(
-    async (forceOnline = false) => {
-      if (!track) {
-        setData(null);
-        return;
-      }
-      if (!forceOnline) {
-        const cached = savedCache.get(track.id);
-        if (cached) {
-          setData(cached);
-          return;
-        }
-      }
-      setSearching(true);
-      try {
-        const d = await loadLyrics(track, duration, true);
-        setData(d);
-        if (d.synced) savedCache.set(track.id, d);
-      } catch (e) {
-        console.warn('[lyrics] fetch error:', e);
-      } finally {
-        setSearching(false);
-      }
+  const setFollow = (v: boolean) => {
+    follow.current = v;
+    setFollowing(v);
+  };
+
+  /** прокрутка так, чтобы строка оказалась в верхней трети экрана; если строка ещё не измерена — ждём её onLayout */
+  const scrollToLine = useCallback((idx: number, animated = true) => {
+    if (idx < 0) return;
+    const y = ys.current[idx];
+    if (y === undefined) {
+      pendingScroll.current = idx;
+      return;
+    }
+    pendingScroll.current = null;
+    scrollRef.current?.scrollTo({ y: Math.max(0, y - viewH.current * 0.3), animated });
+  }, []);
+
+  // автоследование за текстом
+  useEffect(() => {
+    if (active >= 0 && follow.current) scrollToLine(active, true);
+  }, [active, scrollToLine]);
+
+  const onLayoutY = useCallback(
+    (i: number, y: number) => {
+      ys.current[i] = y;
+      if (pendingScroll.current === i && follow.current) scrollToLine(i, false);
     },
-    [track, duration]
+    [scrollToLine]
   );
+
+  /* ───────── загрузка текста ───────── */
 
   useEffect(() => {
     let cancelled = false;
     setSyncing(false);
     setShowOffset(false);
     setStamps([]);
+    setFollow(true);
     ys.current = {};
+    pendingScroll.current = null;
     if (!track) {
       setData(null);
+      setSearching(false);
       return;
     }
     const cached = savedCache.get(track.id);
     if (cached) {
       setData(cached);
+      setSearching(false);
       return;
     }
-    setSearching(true);
-    loadLyrics(track, duration, true)
-      .then((d) => {
-        if (!cancelled) {
-          setData(d);
-          if (d.synced) savedCache.set(track.id, d);
-        }
-      })
-      .finally(() => {
+
+    (async () => {
+      // 1) быстро: встроенные источники (SYLT, .lrc, кэш, LRC в USLT) — без сети
+      setSearching(true);
+      let local: LyricsData | null = null;
+      try {
+        local = await loadLyrics(track, durationRef.current, false);
+      } catch (e) {
+        console.warn('[lyrics] local load error:', e);
+      }
+      if (cancelled) return;
+      if (local) setData(local);
+      if (local?.synced) {
+        savedCache.set(track.id, local);
+        setSearching(false);
+        return;
+      }
+      // 2) сеть (LRCLIB): ждём, пока плеер узнает длительность — по ней выбирается нужная версия
+      for (let i = 0; i < 12 && durationRef.current <= 0 && !cancelled; i++) await new Promise((r) => setTimeout(r, 150));
+      if (cancelled) return;
+      try {
+        const online = await loadLyrics(track, durationRef.current, true);
+        if (cancelled) return;
+        if (online.synced || !local || local.source === 'none') setData(online);
+        if (online.synced) savedCache.set(track.id, online);
+      } catch (e) {
+        console.warn('[lyrics] online load error:', e);
+      } finally {
         if (!cancelled) setSearching(false);
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [track?.id, track?.lrcUri, durKey]);
+  }, [track?.id, track?.lrcUri]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const lines = data?.lines ?? [];
-  const active = useMemo(() => (syncing ? -1 : activeLineIndex(lines, pos, 0.18)), [lines, pos, syncing]);
+  /** Принудительный поиск в онлайн-каталоге (кнопки «обновить» / «искать») */
+  const fetchOnline = useCallback(async () => {
+    if (!track) return;
+    setSearching(true);
+    try {
+      const raw = await fetchOnlineLrc(track, durationRef.current || engine.getDuration());
+      const parsed = raw ? parseLrc(raw) : null;
+      if (parsed) {
+        const d: LyricsData = { lines: parsed, synced: true, source: 'lrclib', plain: parsed.map((l) => l.text) };
+        savedCache.set(track.id, d);
+        setData(d);
+        ys.current = {};
+        saveLrc(track, parsed).catch(() => {});
+      } else if (!data || data.source === 'none') {
+        setData({ lines: [], synced: false, source: 'none', plain: [] });
+      }
+    } catch (e) {
+      console.warn('[lyrics] fetch error:', e);
+    } finally {
+      setSearching(false);
+    }
+  }, [track, data, engine]);
 
-  // автопрокрутка к активной строке по реально измеренным высотам
-  useEffect(() => {
-    if (active < 0 || userScrolling.current) return;
-    const y = ys.current[active];
-    if (y === undefined) return;
-    scrollRef.current?.scrollTo({ y: Math.max(0, y - viewH.current * 0.32), animated: true });
-  }, [active]);
+  /* ───────── смещение, разметка ───────── */
 
   const onAdjustOffset = async (deltaSec: number) => {
     if (!track || !data || data.lines.length === 0) return;
@@ -190,15 +299,63 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     }
   };
 
+  /** Нажатие на строку: перемотка к ней, строка сразу становится активной, и текст снова следует за песней */
+  const linesRef = useRef(lines);
+  linesRef.current = lines;
   const onPressLine = useCallback(
-    (l: LyricLine) => {
+    (i: number) => {
+      const l = linesRef.current[i];
+      if (!l) return;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      if (resumeTimer.current) clearTimeout(resumeTimer.current);
+      setFollow(true);
+      pin(i);
       engine.seek(Math.max(0, l.time));
+      scrollToLine(i, true);
     },
-    [engine]
+    [engine, pin, scrollToLine]
+  );
+
+  /* ───────── ручная прокрутка: на время пальца автоследование выключается ───────── */
+
+  const scheduleResume = (ms: number) => {
+    if (resumeTimer.current) clearTimeout(resumeTimer.current);
+    resumeTimer.current = setTimeout(() => {
+      setFollow(true);
+      scrollToLine(active, true);
+    }, ms);
+  };
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const resumeNow = () => {
+    if (resumeTimer.current) clearTimeout(resumeTimer.current);
+    setFollow(true);
+    scrollToLine(activeRef.current, true);
+  };
+  useEffect(
+    () => () => {
+      if (resumeTimer.current) clearTimeout(resumeTimer.current);
+    },
+    []
   );
 
   const finished = syncing && data ? stamps.length >= data.plain.length : false;
+
+  const rows = useMemo(
+    () =>
+      lines.map((l, i) => (
+        <LyricRow
+          key={i}
+          index={i}
+          line={l}
+          active={i === active}
+          dist={active < 0 ? 3 : Math.abs(i - active)}
+          onPress={onPressLine}
+          onLayoutY={onLayoutY}
+        />
+      )),
+    [lines, active, onPressLine, onLayoutY]
+  );
 
   if (!track) return <View style={{ flex: 1 }} />;
 
@@ -208,9 +365,9 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         <Ionicons name="text" size={40} color={colors.text3} />
         <Text style={styles.emptyTitle}>Текст не найден</Text>
         <Text style={styles.emptyText}>
-          В файле нет встроенного текста. Вы можете найти синхронизированный текст песни в онлайн-каталоге или разместить рядом файл .lrc.
+          В файле нет встроенного текста. Можно найти синхронизированный текст в онлайн-каталоге или положить рядом с треком файл .lrc с тем же именем.
         </Text>
-        <PressableScale onPress={() => fetchLyrics(true)} scaleTo={0.96} style={{ marginTop: 12 }}>
+        <PressableScale onPress={fetchOnline} scaleTo={0.96} style={{ marginTop: 12 }}>
           <View style={styles.findBtn}>
             <Ionicons name="cloud-download-outline" size={18} color={colors.onAccent} style={{ marginRight: 6 }} />
             <Text style={styles.findBtnText}>Искать в онлайн-каталоге</Text>
@@ -223,7 +380,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
   const statusTitle = syncing
     ? 'Разметка'
     : searching
-    ? 'Поиск в сети…'
+    ? 'Поиск текста…'
     : data?.synced
     ? data.source === 'lrclib'
       ? 'Синхронизирован (LRCLIB)'
@@ -252,7 +409,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
                   <Text style={[styles.link, showOffset && { color: colors.text }]}>Смещение</Text>
                 </PressableScale>
               )}
-              <PressableScale onPress={() => fetchLyrics(true)} scaleTo={0.95} hitSlop={6}>
+              <PressableScale onPress={fetchOnline} scaleTo={0.95} hitSlop={6}>
                 <Ionicons name="refresh" size={16} color={colors.text2} />
               </PressableScale>
               <PressableScale onPress={startSync} scaleTo={0.95}>
@@ -263,80 +420,76 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         </View>
       )}
 
-      {/* Быстрая калибровка смещения (+/- 0.5с / 0.1с) как в Dynamic-Lyrics */}
+      {/* Быстрая калибровка смещения (+/- 0.5с / 0.1с) */}
       {showOffset && data?.synced && (
         <View style={styles.offsetBar}>
           <Glass radius={14} intensity={60}>
             <View style={styles.offsetInner}>
               <Text style={styles.offsetTitle}>Сдвиг текста:</Text>
-              <PressableScale onPress={() => onAdjustOffset(-0.5)} scaleTo={0.92}>
-                <View style={styles.offsetBtn}>
-                  <Text style={styles.offsetBtnText}>-0.5s</Text>
-                </View>
-              </PressableScale>
-              <PressableScale onPress={() => onAdjustOffset(-0.1)} scaleTo={0.92}>
-                <View style={styles.offsetBtn}>
-                  <Text style={styles.offsetBtnText}>-0.1s</Text>
-                </View>
-              </PressableScale>
-              <PressableScale onPress={() => onAdjustOffset(+0.1)} scaleTo={0.92}>
-                <View style={styles.offsetBtn}>
-                  <Text style={styles.offsetBtnText}>+0.1s</Text>
-                </View>
-              </PressableScale>
-              <PressableScale onPress={() => onAdjustOffset(+0.5)} scaleTo={0.92}>
-                <View style={styles.offsetBtn}>
-                  <Text style={styles.offsetBtnText}>+0.5s</Text>
-                </View>
-              </PressableScale>
+              {[-0.5, -0.1, 0.1, 0.5].map((d) => (
+                <PressableScale key={d} onPress={() => onAdjustOffset(d)} scaleTo={0.92}>
+                  <View style={styles.offsetBtn}>
+                    <Text style={styles.offsetBtnText}>{d > 0 ? '+' : '-'}{Math.abs(d)}s</Text>
+                  </View>
+                </PressableScale>
+              ))}
             </View>
           </Glass>
         </View>
       )}
 
-      <ScrollView
-        ref={scrollRef}
-        onLayout={(e) => (viewH.current = e.nativeEvent.layout.height)}
-        contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: bottomPad + (syncing ? 120 : 40) }}
-        showsVerticalScrollIndicator={false}
-        onScrollBeginDrag={() => {
-          userScrolling.current = true;
-          if (resumeTimer.current) clearTimeout(resumeTimer.current);
-        }}
-        onScrollEndDrag={() => {
-          if (resumeTimer.current) clearTimeout(resumeTimer.current);
-          resumeTimer.current = setTimeout(() => (userScrolling.current = false), 3000);
-        }}
-      >
-        {syncing && data
-          ? data.plain.map((text, i) => {
-              const done = i < stamps.length;
-              const isNext = i === stamps.length;
-              return (
-                <Text
-                  key={i}
-                  style={[
-                    isSectionLine(text) ? styles.section : styles.line,
-                    { opacity: isNext ? 1 : done ? 0.45 : 0.3 },
-                  ]}
-                >
-                  {text}
-                </Text>
-              );
-            })
-          : lines.map((l, i) => (
-              <LyricRow
-                key={i}
-                line={l}
-                active={i === active}
-                past={i < active}
-                onPress={() => onPressLine(l)}
-                onLayoutY={(y) => {
-                  ys.current[i] = y;
-                }}
-              />
-            ))}
-      </ScrollView>
+      <View style={{ flex: 1 }}>
+        <ScrollView
+          ref={scrollRef}
+          onLayout={(e) => (viewH.current = e.nativeEvent.layout.height)}
+          contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: bottomPad + (syncing ? 120 : 40) }}
+          showsVerticalScrollIndicator={false}
+          scrollEventThrottle={32}
+          onScrollBeginDrag={() => {
+            if (resumeTimer.current) clearTimeout(resumeTimer.current);
+            if (follow.current) setFollow(false);
+          }}
+          onScrollEndDrag={() => scheduleResume(4500)}
+          onMomentumScrollBegin={() => {
+            if (!follow.current && resumeTimer.current) clearTimeout(resumeTimer.current);
+          }}
+          onMomentumScrollEnd={() => {
+            if (!follow.current) scheduleResume(4000);
+          }}
+        >
+          {syncing && data
+            ? data.plain.map((text, i) => {
+                const done = i < stamps.length;
+                const isNext = i === stamps.length;
+                return (
+                  <Text
+                    key={i}
+                    style={[
+                      isSectionLine(text) ? styles.section : styles.line,
+                      { opacity: isNext ? 1 : done ? 0.45 : 0.3 },
+                    ]}
+                  >
+                    {text}
+                  </Text>
+                );
+              })
+            : rows}
+        </ScrollView>
+        {/* мягкое растворение текста у краёв */}
+        <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0.8)', 'rgba(8,8,8,0)']} style={styles.fadeTop} />
+        <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0)', 'rgba(8,8,8,0.8)']} style={[styles.fadeBottom, { height: Math.min(bottomPad, 110) }]} />
+
+        {!syncing && !following && lines.length > 0 && (
+          <View style={[styles.followPillWrap, { bottom: bottomPad + 8 }]} pointerEvents="box-none">
+            <PressableScale onPress={resumeNow} scaleTo={0.95}>
+              <View style={styles.followPill}>
+                <Ionicons name="locate" size={15} color={colors.text} />
+                <Text style={styles.followText}>К текущей строке</Text>
+              </View>
+            </PressableScale>
+          </View>
+        )}
+      </View>
 
       {syncing && data && (
         <View style={[styles.syncBar, { bottom: bottomPad }]}>
@@ -357,7 +510,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
                 <PressableScale onPress={() => engine.togglePlay()}>
                   <Ionicons name={isPlaying ? 'pause' : 'play'} size={22} color={colors.text} />
                 </PressableScale>
-                <Text style={styles.syncTime}>{formatTime(pos)}</Text>
+                <SyncTime engine={engine} />
                 <PressableScale onPress={finished ? save : stamp} scaleTo={0.94} haptic="none">
                   <View style={styles.stampBtn}>
                     <Text style={styles.stampText}>{finished ? 'Сохранить' : 'Метка'}</Text>
@@ -402,6 +555,11 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   findBtnText: { ...type.headline, color: colors.onAccent, fontSize: 14 },
+  followPillWrap: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
+  fadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 22 },
+  fadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0 },
+  followPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.14)', borderWidth: StyleSheet.hairlineWidth * 2, borderColor: colors.stroke },
+  followText: { ...type.caption, color: colors.text, fontWeight: '600' },
   offsetBar: { paddingHorizontal: 24, paddingBottom: 6 },
   offsetInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 6 },
   offsetTitle: { ...type.caption, color: colors.text2, fontSize: 11 },

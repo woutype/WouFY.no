@@ -199,20 +199,33 @@ interface ScrubberProps {
   max: number;
   onScrub?: (v: number) => void;
   onCommit: (v: number) => void;
+  /** жест прерван или это было простое касание в относительном режиме */
+  onCancel?: () => void;
   height?: number;
   disabled?: boolean;
+  /**
+   * Относительный режим (для таймлайна): палец можно поставить в любое место,
+   * и трек перематывается от ТЕКУЩЕЙ позиции на столько, на сколько провели пальцем
+   * (вся ширина шкалы = вся длительность). Простое касание ничего не перематывает.
+   */
+  relative?: boolean;
 }
 
-export const Scrubber: React.FC<ScrubberProps> = ({ value, max, onScrub, onCommit, height = 6, disabled }) => {
+export const Scrubber: React.FC<ScrubberProps> = ({ value, max, onScrub, onCommit, onCancel, height = 6, disabled, relative = false }) => {
   const [width, setWidth] = useState(1);
   const [dragValue, setDragValue] = useState<number | null>(null);
   const grow = useRef(new Animated.Value(0)).current;
   const w = useRef(1);
   const startRatio = useRef(0);
+  const moved = useRef(false);
   const maxRef = useRef(max);
-  const cbs = useRef({ onScrub, onCommit });
+  const valueRef = useRef(value);
+  const relRef = useRef(relative);
+  const cbs = useRef({ onScrub, onCommit, onCancel });
   maxRef.current = max;
-  cbs.current = { onScrub, onCommit };
+  valueRef.current = value;
+  relRef.current = relative;
+  cbs.current = { onScrub, onCommit, onCancel };
 
   const toValue = (ratio: number) => Math.min(1, Math.max(0, ratio)) * maxRef.current;
 
@@ -222,14 +235,23 @@ export const Scrubber: React.FC<ScrubberProps> = ({ value, max, onScrub, onCommi
       onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: (e) => {
-        startRatio.current = e.nativeEvent.locationX / w.current;
-        const v = toValue(startRatio.current);
-        setDragValue(v);
-        cbs.current.onScrub?.(v);
+        moved.current = false;
         Haptics.selectionAsync();
         Animated.spring(grow, { toValue: 1, useNativeDriver: true, ...springs.snappy }).start();
+        if (relRef.current) {
+          // стартуем с того места, где трек сейчас — палец «берёт» таймлайн, а не переставляет метку
+          startRatio.current = maxRef.current > 0 ? valueRef.current / maxRef.current : 0;
+          setDragValue(valueRef.current);
+        } else {
+          startRatio.current = e.nativeEvent.locationX / w.current;
+          const v = toValue(startRatio.current);
+          setDragValue(v);
+          cbs.current.onScrub?.(v);
+        }
       },
       onPanResponderMove: (_, g) => {
+        if (relRef.current && !moved.current && Math.abs(g.dx) < 2) return;
+        moved.current = true;
         const v = toValue(startRatio.current + g.dx / w.current);
         setDragValue(v);
         cbs.current.onScrub?.(v);
@@ -237,11 +259,14 @@ export const Scrubber: React.FC<ScrubberProps> = ({ value, max, onScrub, onCommi
       onPanResponderRelease: (_, g) => {
         const v = toValue(startRatio.current + g.dx / w.current);
         setDragValue(null);
-        cbs.current.onCommit(v);
+        // в относительном режиме простое касание без движения — ничего не перематываем
+        if (!relRef.current || moved.current) cbs.current.onCommit(v);
+        else cbs.current.onCancel?.();
         Animated.spring(grow, { toValue: 0, useNativeDriver: true, ...springs.snappy }).start();
       },
       onPanResponderTerminate: () => {
         setDragValue(null);
+        cbs.current.onCancel?.();
         Animated.spring(grow, { toValue: 0, useNativeDriver: true, ...springs.snappy }).start();
       },
     })
@@ -260,7 +285,9 @@ export const Scrubber: React.FC<ScrubberProps> = ({ value, max, onScrub, onCommi
       pointerEvents={disabled ? 'none' : 'auto'}
       {...responder.panHandlers}
     >
+      {/* дочерние элементы не перехватывают касания — locationX всегда считается от самой шкалы */}
       <Animated.View
+        pointerEvents="none"
         style={{
           height,
           borderRadius: height,

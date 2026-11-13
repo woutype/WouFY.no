@@ -1,85 +1,137 @@
 /**
  * Математика DJ-склейки. Чистые функции без зависимостей от плеера.
  *
- * Модель (по ТЗ):
+ * Модель:
  *  • за X секунд до конца трека A стартует трек B с громкостью 0;
- *  • громкость A плавно падает 100%→0, B растёт 0→100% — одновременно;
- *  • темп: общий «BPM микса» плавно идёт от BPM трека A к целевому T
- *    (BPM трека B, при необходимости ×½ или ×2 — берём вариант, ближайший к A);
- *    A разгоняется/замедляется до T, B стартует с темпом A и сходится к своему родному.
+ *  • громкость A падает 100%→0, B растёт 0→100% — одновременно, за всё время склейки;
+ *  • темп: общий «BPM микса» линейно идёт от BPM трека A (например 100) к BPM трека B (115).
+ *    A ускоряется до 115, а B стартует с темпом A (100) и сходится к своему родному 115.
+ *    В каждый момент оба играют в одном темпе — удары совпадают;
+ *  • биты A и B накладываются друг на друга: трек B стартует с собственного бита (по сетке битов),
+ *    в момент, когда у A тоже бит (по возможности — начало такта), а во время склейки фазу
+ *    постоянно подстраивает «петля захвата» (PLL) в движке.
  */
+
+export interface BeatGrid {
+  /** темп сетки, уд/мин */
+  bpm: number;
+  /** время любого бита в секундах от начала файла (по модулю периода) */
+  phase: number;
+}
+
+export interface TrackTempo {
+  bpm?: number;
+  grid?: BeatGrid;
+}
+
 export interface MixPlan {
   /** Подгон темпа возможен (известны оба BPM) */
   tempo: boolean;
-  /** целевой BPM микса (T) */
-  targetBpm: number;
+  /** BPM трека A */
   bpmA: number;
+  /** целевой BPM микса (родной BPM трека B, при необходимости ×½ / ×2 — ближайший к A) */
+  targetBpm: number;
   /** множитель, на который пришлось умножить BPM трека B (0.5 / 1 / 2) */
   factorB: number;
-  /** сколько секунд (в «медиа-времени» трека A) до конца начинается склейка */
-  triggerRemaining: number;
+  /** средняя скорость A за время склейки (нужна, чтобы A закончился ровно в конце перехода) */
+  avgRateA: number;
+  /** известны сетки обоих треков → можно накладывать бит на бит */
+  beatSync: boolean;
+  periodA: number;
+  phaseA: number;
+  periodB: number;
+  phaseB: number;
+  /** позиция в треке B (сек), с которой он стартует — на своём бите */
+  bStartPos: number;
 }
 
-export function planMix(
-  bpmA: number | undefined,
-  bpmB: number | undefined,
-  duration: number,
-  tempoEnabled: boolean
-): MixPlan {
-  const dur = Math.max(1, duration);
+const MAX_TEMPO_SHIFT = 1.35; // дальше «подгонять» бессмысленно: питч уезжает слишком сильно
+
+export function planMix(a: TrackTempo, b: TrackTempo, tempoEnabled: boolean): MixPlan {
   const base: MixPlan = {
     tempo: false,
-    targetBpm: bpmA ?? 120,
-    bpmA: bpmA ?? 120,
+    bpmA: a.bpm ?? 120,
+    targetBpm: b.bpm ?? 120,
     factorB: 1,
-    triggerRemaining: dur,
+    avgRateA: 1,
+    beatSync: false,
+    periodA: 0.5,
+    phaseA: 0,
+    periodB: 0.5,
+    phaseB: 0,
+    bStartPos: 0,
   };
   if (!tempoEnabled) return base;
 
-  const a = bpmA && bpmA >= 30 ? bpmA : 120;
-  const b = bpmB && bpmB >= 30 ? bpmB : (bpmA ? Math.round(bpmA * 1.08) : 128);
+  const bpmA = a.grid?.bpm ?? a.bpm;
+  const bpmB = b.grid?.bpm ?? b.bpm;
+  if (!bpmA || !bpmB || bpmA < 40 || bpmB < 40) return base;
 
   let best = 1;
   let bestErr = Infinity;
   for (const k of [0.5, 1, 2]) {
-    const err = Math.abs(Math.log((b * k) / a));
+    const err = Math.abs(Math.log((bpmB * k) / bpmA));
     if (err < bestErr) {
       bestErr = err;
       best = k;
     }
   }
-  const target = b * best;
-  const avgRateA = (1 + target / a) / 2;
-  return {
+  const target = bpmB * best;
+  const ratio = target / bpmA;
+  if (ratio > MAX_TEMPO_SHIFT || ratio < 1 / MAX_TEMPO_SHIFT) return base;
+
+  const plan: MixPlan = {
+    ...base,
     tempo: true,
+    bpmA,
     targetBpm: target,
-    bpmA: a,
     factorB: best,
-    triggerRemaining: Math.max(1, dur * avgRateA),
+    avgRateA: (1 + ratio) / 2,
   };
+
+  if (a.grid && b.grid) {
+    plan.beatSync = true;
+    plan.periodA = 60 / a.grid.bpm;
+    plan.phaseA = mod(a.grid.phase, plan.periodA);
+    plan.periodB = 60 / target;
+    plan.phaseB = mod(b.grid.phase, plan.periodB);
+    plan.bStartPos = plan.phaseB;
+  }
+  return plan;
 }
 
-const smooth = (p: number) => p * p * (3 - 2 * p);
+const mod = (v: number, n: number) => ((v % n) + n) % n;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-export function ratesAt(plan: MixPlan, p: number): { rateA: number; rateB: number } {
+/** Скорости воспроизведения A и B в момент прогресса q (0…1) */
+export function ratesAt(plan: MixPlan, q: number): { rateA: number; rateB: number } {
   if (!plan.tempo) return { rateA: 1, rateB: 1 };
-  const q = clamp(p, 0, 1);
-  const mixBpm = plan.bpmA + (plan.targetBpm - plan.bpmA) * q;
+  const p = clamp(q, 0, 1);
+  const mixBpm = plan.bpmA + (plan.targetBpm - plan.bpmA) * p;
   return {
     rateA: clamp(mixBpm / plan.bpmA, 0.5, 2),
     rateB: clamp(mixBpm / plan.targetBpm, 0.5, 2),
   };
 }
 
-export function volumesAt(p: number, smoothFade: boolean): { volA: number; volB: number } {
+/**
+ * Громкости A и B. Всегда A: 1→0 и B: 0→1 на всю длительность склейки.
+ * smooth=true — мягкая S-кривая + equal-power (без провала громкости посередине),
+ * smooth=false — линейный фейдер.
+ */
+export function volumesAt(p: number, smooth: boolean): { volA: number; volB: number } {
   const q = clamp(p, 0, 1);
-  if (!smoothFade) {
-    // Линейный кроссфейд на всю длительность
-    return { volA: 1 - q, volB: q };
-  }
-  // Плавная S-кривая (smoothstep) на всю длительность: мягкий старт, ровно 50% на середине и мягкий финиш
+  if (!smooth) return { volA: 1 - q, volB: q };
   const s = q * q * (3 - 2 * q);
-  return { volA: 1 - s, volB: s };
+  return { volA: Math.cos((s * Math.PI) / 2), volB: Math.sin((s * Math.PI) / 2) };
 }
 
+/** Дробная часть «номера бита» в момент t: 0 — ровно на бите, 0.5 — посередине между битами */
+export function beatPhase(t: number, phase: number, period: number): number {
+  return mod((t - phase) / period, 1);
+}
+
+/** Ошибка фазы, приведённая к (−0.5, 0.5] */
+export function wrapHalf(x: number): number {
+  return x - Math.round(x);
+}

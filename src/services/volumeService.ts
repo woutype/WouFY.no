@@ -1,50 +1,94 @@
-import { NativeModules } from 'react-native';
+
+/**
+ * Синхронизация с системной громкостью телефона (кнопки, Центр управления).
+ *
+ * Раньше модуль искали как NativeModules.VolumeManager, а библиотека регистрируется под другим именем —
+ * поэтому нативный менеджер «не находился» и слайдер не двигался от кнопок. Теперь модуль
+ * подключается через сам пакет, а его работоспособность проверяется пробным вызовом.
+ */
 
 type Listener = (volume: number) => void;
 const listeners = new Set<Listener>();
 
 let currentVolume = 0.8;
-let nativeListenerActive = false;
 let removeNativeListener: (() => void) | null = null;
+let nativeListenerActive = false;
 
-interface NativeVolumeManagerModule {
-  addVolumeListener: (cb: (res: { volume: number }) => void) => { remove: () => void } | (() => void);
+interface NativeVolumeManager {
+  addVolumeListener: (cb: (res: { volume: number }) => void) => { remove?: () => void } | (() => void);
   getVolume: () => Promise<number | { volume: number }>;
   setVolume: (val: number, options?: { showUI?: boolean }) => Promise<void>;
+  enable?: (enabled: boolean, async?: boolean) => Promise<void> | void;
 }
 
-function getNativeVolumeManager(): NativeVolumeManagerModule | null {
+let vm: NativeVolumeManager | null | undefined; // undefined — ещё не искали
+let broken = false; // пробный вызов не удался (например Expo Go без нативного модуля)
+
+function getVM(): NativeVolumeManager | null {
+  if (broken) return null;
+  if (vm !== undefined) return vm;
+  vm = null;
   try {
-    // В Expo Go нативный модуль отсутствует (NativeModules.VolumeManager == null).
-    // Если вызвать require('react-native-volume-manager') без наличия нативного модуля,
-    // библиотека выбросит исключение при инициализации. Поэтому проверяем заранее:
-    if (typeof NativeModules !== 'undefined' && NativeModules?.VolumeManager) {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const mod = require('react-native-volume-manager');
-      return (mod?.VolumeManager ?? mod?.default?.VolumeManager ?? mod?.default ?? null) as NativeVolumeManagerModule;
-    }
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('react-native-volume-manager');
+    const cand = (mod?.VolumeManager ?? mod?.default?.VolumeManager ?? mod?.default ?? null) as NativeVolumeManager | null;
+    if (cand && typeof cand.getVolume === 'function' && typeof cand.addVolumeListener === 'function') vm = cand;
   } catch {
-    // Expo Go или среда без слинкованного модуля
+    vm = null; // Expo Go или среда без слинкованного модуля
   }
-  return null;
+  if (vm) {
+    // пробный вызов: если нативной части нет — библиотека бросит ошибку, и мы переходим на внутренний режим
+    try {
+      Promise.resolve(vm.getVolume()).then(
+        (res) => {
+          const v = typeof res === 'number' ? res : res?.volume;
+          if (typeof v === 'number') {
+            currentVolume = clamp(v);
+            listeners.forEach((fn) => fn(currentVolume));
+          }
+        },
+        () => markBroken()
+      );
+      try {
+        // активируем аудио-сессию, чтобы iOS присылал события от кнопок громкости
+        Promise.resolve(vm.enable?.(true, true)).catch(() => {});
+      } catch {
+        /* необязательно */
+      }
+    } catch {
+      markBroken();
+    }
+  }
+  return vm;
 }
+
+function markBroken() {
+  broken = true;
+  vm = null;
+  if (removeNativeListener) {
+    removeNativeListener();
+    removeNativeListener = null;
+  }
+  nativeListenerActive = false;
+}
+
+const clamp = (v: number) => Math.max(0, Math.min(1, v));
 
 function setupNativeListener() {
   if (nativeListenerActive) return;
-  const VM = getNativeVolumeManager();
+  const VM = getVM();
   if (!VM) return;
-
   try {
     const sub = VM.addVolumeListener((result: { volume: number }) => {
       if (typeof result?.volume === 'number') {
-        currentVolume = Math.max(0, Math.min(1, result.volume));
+        currentVolume = clamp(result.volume);
         listeners.forEach((fn) => fn(currentVolume));
       }
     });
     removeNativeListener = () => {
       try {
-        if (sub && typeof (sub as any).remove === 'function') (sub as any).remove();
-        else if (typeof sub === 'function') (sub as () => void)();
+        if (typeof sub === 'function') sub();
+        else sub?.remove?.();
       } catch {
         /* ignore */
       }
@@ -52,60 +96,69 @@ function setupNativeListener() {
     nativeListenerActive = true;
   } catch (e) {
     console.warn('[volumeService] native listener setup failed:', e);
+    markBroken();
+  }
+}
+
+// ── троттлинг записи в системную громкость: не чаще ~25 раз в секунду, последнее значение всегда доходит ──
+let pending: number | null = null;
+let sendTimer: ReturnType<typeof setTimeout> | null = null;
+let lastSent = 0;
+const SEND_EVERY_MS = 40;
+
+function flushToNative() {
+  sendTimer = null;
+  if (pending === null) return;
+  const v = pending;
+  pending = null;
+  lastSent = Date.now();
+  const VM = getVM();
+  if (!VM) return;
+  try {
+    Promise.resolve(VM.setVolume(v, { showUI: false })).catch((e) => console.warn('[volumeService] setVolume failed:', e));
+  } catch (e) {
+    console.warn('[volumeService] setVolume threw:', e);
   }
 }
 
 export const volumeService = {
-  /** Доступен ли нативный менеджер системной громкости телефона (true в dev build / standalone, false в Expo Go) */
+  /** Доступен ли нативный менеджер системной громкости (true в dev-билде / standalone, false в Expo Go) */
   isAvailable(): boolean {
-    return Boolean(getNativeVolumeManager());
+    return Boolean(getVM());
   },
 
-  /** Получить реальный текущий уровень громкости устройства (0.0 .. 1.0) */
+  /** Реальный текущий уровень громкости устройства (0…1) */
   async getVolume(): Promise<number> {
-    const VM = getNativeVolumeManager();
+    const VM = getVM();
     if (VM) {
       try {
         const res = await VM.getVolume();
         const v = typeof res === 'number' ? res : res?.volume;
-        if (typeof v === 'number') {
-          currentVolume = Math.max(0, Math.min(1, v));
-          return currentVolume;
-        }
+        if (typeof v === 'number') currentVolume = clamp(v);
       } catch (e) {
         console.warn('[volumeService] getVolume failed:', e);
+        markBroken();
       }
     }
     return currentVolume;
   },
 
-  /** Установить системную громкость телефона (кнопки и слайдер iPhone), либо внутреннюю в Expo Go */
-  async setVolume(volume: number) {
-    const v = Math.max(0, Math.min(1, volume));
+  /** Установить системную громкость (кнопки и слайдер iPhone) либо внутреннюю в Expo Go */
+  setVolume(volume: number) {
+    const v = clamp(volume);
     currentVolume = v;
     listeners.forEach((fn) => fn(v));
-
-    const VM = getNativeVolumeManager();
-    if (VM) {
-      try {
-        await VM.setVolume(v, { showUI: false });
-      } catch (e) {
-        console.warn('[volumeService] setVolume failed:', e);
-      }
-    }
+    if (!getVM()) return;
+    pending = v;
+    const since = Date.now() - lastSent;
+    if (since >= SEND_EVERY_MS && !sendTimer) flushToNative();
+    else if (!sendTimer) sendTimer = setTimeout(flushToNative, Math.max(0, SEND_EVERY_MS - since));
   },
 
   addListener(fn: Listener): () => void {
     listeners.add(fn);
     setupNativeListener();
     fn(currentVolume);
-
-    if (this.isAvailable()) {
-      this.getVolume().then((v) => {
-        fn(v);
-      });
-    }
-
     return () => {
       listeners.delete(fn);
       if (listeners.size === 0 && removeNativeListener) {
@@ -116,3 +169,4 @@ export const volumeService = {
     };
   },
 };
+
