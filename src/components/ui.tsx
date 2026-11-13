@@ -24,11 +24,23 @@ interface GlassProps {
   children?: React.ReactNode;
 }
 
-/** Матовое стекло: лёгкое размытие + почти невидимая заливка + тончайшая обводка. Без 3D-засветов. */
+/** Матовое стекло: лёгкое размытие + почти невидимая заливка + идеально плавная обводка без черных засечек на iOS */
 export const Glass: React.FC<GlassProps> = ({ style, radius: r = radius.lg, intensity = 36, children }) => (
-  <View style={[{ borderRadius: r, overflow: 'hidden' }, styles.glassBorder, { borderRadius: r }, style]}>
+  <View style={[{ borderRadius: r, overflow: 'hidden' }, style]}>
     <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
     <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.glass }]} />
+    {/* Накладная обводка поверх BlurView исключает любые черные засечки CoreAnimation на Retina экранах */}
+    <View
+      pointerEvents="none"
+      style={[
+        StyleSheet.absoluteFill,
+        {
+          borderRadius: r,
+          borderWidth: 1,
+          borderColor: 'rgba(255, 255, 255, 0.14)',
+        },
+      ]}
+    />
     {children}
   </View>
 );
