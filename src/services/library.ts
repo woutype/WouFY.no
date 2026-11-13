@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { DJSettings, RepeatMode } from '../types';
+import { DJSettings, RepeatMode, TrackFile } from '../types';
 
 /**
  * Небольшое JSON-хранилище в Documents/.woufy/state.json
@@ -31,6 +31,7 @@ export interface PersistedState {
 
 const DIR = `${FileSystem.documentDirectory ?? ''}.woufy/`;
 const FILE = `${DIR}state.json`;
+const TRACKS_CACHE_FILE = `${DIR}library_cache.json`;
 
 let cache: PersistedState = {};
 let loaded = false;
@@ -73,5 +74,31 @@ export async function flushState() {
     await FileSystem.writeAsStringAsync(FILE, JSON.stringify(cache));
   } catch (e) {
     console.warn('[library] state save failed', e);
+  }
+}
+
+/** Загрузка закэшированного списка треков с метаданными (мгновенно при старте) */
+export async function loadCachedTracks(): Promise<TrackFile[]> {
+  try {
+    const info = await FileSystem.getInfoAsync(TRACKS_CACHE_FILE);
+    if (info.exists) {
+      const raw = await FileSystem.readAsStringAsync(TRACKS_CACHE_FILE);
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.warn('[library] failed to load cached tracks:', e);
+  }
+  return [];
+}
+
+/** Сохранение списка треков в постоянный кэш */
+export async function saveCachedTracks(tracks: TrackFile[]): Promise<void> {
+  try {
+    const info = await FileSystem.getInfoAsync(DIR);
+    if (!info.exists) await FileSystem.makeDirectoryAsync(DIR, { intermediates: true });
+    await FileSystem.writeAsStringAsync(TRACKS_CACHE_FILE, JSON.stringify(tracks));
+  } catch (e) {
+    console.warn('[library] failed to save cached tracks:', e);
   }
 }

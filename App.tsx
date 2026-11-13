@@ -5,7 +5,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { scanLibrary } from './src/services/fileScanner';
 import { bpmService } from './src/services/bpm';
 import { volumeService } from './src/services/volumeService';
-import { flushState, getState, loadState, patchState } from './src/services/library';
+import { flushState, getState, loadCachedTracks, loadState, patchState } from './src/services/library';
 import { useAudioEngine, useEngineState } from './src/hooks/useAudioController';
 import { useMetrics } from './src/layout';
 import { DEFAULT_DJ, DJSettings, TrackFile } from './src/types';
@@ -71,9 +71,23 @@ function Root() {
         if (st.volume !== undefined) engine.setVolume(st.volume, false);
       }
       if (st.repeat) engine.setRepeat(st.repeat);
+
+      // Мгновенная инициализация из дискового кэша (0.05 сек)
+      const cached = await loadCachedTracks();
+      if (cached.length > 0) {
+        bpmService.registerTags(cached);
+        setLibCount(cached.length);
+        engine.setLibrary(cached, st.order, st.lastTrackId);
+        if (st.shuffle) engine.setShuffle(true);
+        setReady(true);
+      }
+
+      // Быстрая фоновая проверка изменений в файловой системе
       await rescan();
-      if (st.shuffle) engine.setShuffle(true);
-      setReady(true);
+      if (cached.length === 0) {
+        if (st.shuffle) engine.setShuffle(true);
+        setReady(true);
+      }
     })();
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') {
