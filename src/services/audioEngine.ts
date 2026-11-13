@@ -296,8 +296,15 @@ export class AudioEngine {
     const volume = clamp(v, 0, 1);
     this.lastUserVolumeChangeAt = Date.now();
     this.set({ volume });
-    if (syncToDevice) {
+    if (syncToDevice && volumeService.isAvailable()) {
       volumeService.setVolume(volume);
+    } else {
+      volumeService.setVolume(volume);
+      if (!this.trans) {
+        safe(() => {
+          this.A.volume = volume;
+        });
+      }
     }
     this.persist();
   }
@@ -316,7 +323,7 @@ export class AudioEngine {
       this.B.pause();
       this.A.replace({ uri: t.uri });
       this.A.setPlaybackRate(1, 'low');
-      this.A.volume = 1;
+      this.A.volume = volumeService.isAvailable() ? 1 : this.state.volume;
       this.A.play();
     });
     this.preloadedId = null;
@@ -517,7 +524,7 @@ export class AudioEngine {
       }
       idle.volume = 0;      // ← стартуем строго с 0, driveTransition плавно поднимет громкость
       idle.play();
-      a.volume = 1;         // ← A играет на полной громкости (мастер управляется системой)
+      a.volume = volumeService.isAvailable() ? 1 : this.state.volume;
     });
 
     this.trans = {
@@ -532,7 +539,7 @@ export class AudioEngine {
       initialRateB,
       lastRateB: initialRateB,
       lastRateAt: now,
-      lastVolA: 1,
+      lastVolA: volumeService.isAvailable() ? 1 : this.state.volume,
       lastVolB: 0,
     };
     this.set({ mixing: true });
@@ -546,15 +553,18 @@ export class AudioEngine {
     const p = clamp(elapsed / t.durationMs, 0, 1);
 
     const { volA, volB } = volumesAt(p, this.dj.fadeVolumeEnabled);
+    const master = volumeService.isAvailable() ? 1 : this.state.volume;
+    const targetA = volA * master;
+    const targetB = volB * master;
 
     // Обновляем громкость плавно (на всю длительность перехода)
-    if (t.lastVolA === undefined || Math.abs(volA - t.lastVolA) >= 0.005 || p >= 1) {
-      safe(() => (t.from.volume = volA));
-      t.lastVolA = volA;
+    if (t.lastVolA === undefined || Math.abs(targetA - t.lastVolA) >= 0.005 || p >= 1) {
+      safe(() => (t.from.volume = targetA));
+      t.lastVolA = targetA;
     }
-    if (t.lastVolB === undefined || Math.abs(volB - t.lastVolB) >= 0.005 || p >= 1) {
-      safe(() => (t.to.volume = volB));
-      t.lastVolB = volB;
+    if (t.lastVolB === undefined || Math.abs(targetB - t.lastVolB) >= 0.005 || p >= 1) {
+      safe(() => (t.to.volume = targetB));
+      t.lastVolB = targetB;
     }
 
     // ── Плавное перетекание скорости трека B в его родной темп (1.0) ──────────────────
@@ -596,7 +606,7 @@ export class AudioEngine {
       t.from.volume = 0;
       t.to.setPlaybackRate(1.0, 'low');
       t.from.setPlaybackRate(1.0, 'low');
-      t.to.volume = 1;
+      t.to.volume = volumeService.isAvailable() ? 1 : this.state.volume;
     });
     this.active = this.players.indexOf(t.to);
     this.trans = null;
@@ -618,7 +628,7 @@ export class AudioEngine {
       t.to.volume = 0;
       t.to.setPlaybackRate(1.0, 'low');
       t.from.setPlaybackRate(1.0, 'low');
-      t.from.volume = 1;
+      t.from.volume = volumeService.isAvailable() ? 1 : this.state.volume;
     });
     this.trans = null;
     this.preloadedId = null;
