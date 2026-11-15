@@ -251,7 +251,6 @@ export const NowPlayingCard: React.FC<Props> = ({
           size={m.cover}
           isPlaying={state.isPlaying}
           showWaveform={showWave}
-          player={state.player}
           onNext={() => engine.next()}
           onPrevious={() => engine.previous()}
           onDragDownGrant={() => {

@@ -1,53 +1,144 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Animated, Modal, PanResponder, ScrollView, StyleSheet, Switch, Text, View, Pressable } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Animated,
+  Easing,
+  LayoutAnimation,
+  Modal,
+  PanResponder,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  View,
+} from 'react-native';
 import { BlurView } from 'expo-blur';
 import Slider from '@react-native-community/slider';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { DJSettings } from '../types';
+import { DJSettings, FxSettings } from '../types';
 import { colors, type } from '../theme';
 import { Glass, PressableScale } from './ui';
+import { fxDiagnostics } from '../services/fxPlayer';
 
 interface Props {
   visible: boolean;
   settings: DJSettings;
   onUpdateSettings: (s: DJSettings) => void;
+  fx: FxSettings;
+  onUpdateFx: (s: FxSettings) => void;
+  fxNativeReady: boolean;
+  fxActive: boolean;
+  musicHaptics: boolean;
+  onToggleHaptics: (on: boolean) => void;
   onClose: () => void;
   trackCount: number;
-  onRescan: () => void;
-  bpmInfo?: { title: string; bpm?: number; source?: 'manual' | 'tag' | 'auto' };
-  onEditBpm: () => void;
+  /** возвращает короткий итог («Найдено 1300 треков · новых: 12») */
+  onRescan: () => Promise<string>;
 }
 
-const SOURCE_LABEL = { manual: 'вручную', tag: 'из тега', auto: 'определён автоматически' } as const;
+const SHEET_H = 760;
+const TRACK = { false: 'rgba(255,255,255,0.14)', true: 'rgba(255,255,255,0.55)' };
+
+/** Плавное раскрытие/сворачивание вложенных блоков */
+const smooth = () => LayoutAnimation.configureNext(LayoutAnimation.create(240, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity));
+
+/** Ползунок: значение показывается мгновенно, в движок уходит не чаще ~12 раз/сек, итог — по отпусканию */
+const LiveSlider: React.FC<{
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  format: (v: number) => string;
+  label: string;
+  onChange: (v: number) => void;
+}> = ({ value, min, max, step = 1, format, label, onChange }) => {
+  const [v, setV] = useState(value);
+  const last = useRef(0);
+  useEffect(() => setV(value), [value]);
+  return (
+    <View style={{ marginTop: 10 }}>
+      <View style={styles.sliderHead}>
+        <Text style={styles.rowTitle}>{label}</Text>
+        <Text style={styles.badge}>{format(v)}</Text>
+      </View>
+      <Slider
+        style={{ height: 36 }}
+        minimumValue={min}
+        maximumValue={max}
+        step={step}
+        value={value}
+        onValueChange={(x) => {
+          setV(x);
+          const now = Date.now();
+          if (now - last.current > 80) {
+            last.current = now;
+            onChange(x);
+          }
+        }}
+        onSlidingComplete={(x) => {
+          setV(x);
+          onChange(x);
+          Haptics.selectionAsync();
+        }}
+        minimumTrackTintColor="#FFFFFF"
+        maximumTrackTintColor="rgba(255,255,255,0.18)"
+        thumbTintColor="#FFFFFF"
+      />
+    </View>
+  );
+};
+
+const ToggleRow: React.FC<{ title: string; desc?: string; value: boolean; onChange: (v: boolean) => void; sub?: boolean }> = ({
+  title,
+  desc,
+  value,
+  onChange,
+  sub,
+}) => (
+  <View style={[styles.row, sub && styles.sub]}>
+    <View style={styles.info}>
+      <Text style={styles.rowTitle}>{title}</Text>
+      {desc ? <Text style={styles.rowDesc}>{desc}</Text> : null}
+    </View>
+    <Switch value={value} onValueChange={onChange} trackColor={TRACK} ios_backgroundColor="rgba(255,255,255,0.14)" />
+  </View>
+);
 
 export const SettingsModal: React.FC<Props> = ({
   visible,
   settings,
   onUpdateSettings,
+  fx,
+  onUpdateFx,
+  fxNativeReady,
+  fxActive,
+  musicHaptics,
+  onToggleHaptics,
   onClose,
   trackCount,
   onRescan,
-  bpmInfo,
-  onEditBpm,
 }) => {
   const [render, setRender] = useState(visible);
-  const y = useRef(new Animated.Value(700)).current;
+  const y = useRef(new Animated.Value(SHEET_H + 100)).current;
   const fade = useRef(new Animated.Value(0)).current;
+  const [scanning, setScanning] = useState(false);
+  const [scanNote, setScanNote] = useState('');
 
   useEffect(() => {
     if (visible) {
       setRender(true);
-      y.setValue(700);
+      y.setValue(SHEET_H + 100);
       Animated.parallel([
-        Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 24, stiffness: 220, mass: 1, overshootClamping: true }),
-        Animated.timing(fade, { toValue: 1, duration: 220, useNativeDriver: true }),
+        Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 26, stiffness: 230, mass: 1, overshootClamping: true }),
+        Animated.timing(fade, { toValue: 1, duration: 240, easing: Easing.out(Easing.quad), useNativeDriver: true }),
       ]).start();
     } else if (render) {
       Animated.parallel([
-        Animated.timing(y, { toValue: 700, duration: 220, useNativeDriver: true }),
-        Animated.timing(fade, { toValue: 0, duration: 200, useNativeDriver: true }),
-      ]).start(() => setRender(false));
+        Animated.timing(y, { toValue: SHEET_H + 100, duration: 240, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+        Animated.timing(fade, { toValue: 0, duration: 220, useNativeDriver: true }),
+      ]).start(({ finished }) => finished && setRender(false));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
@@ -57,34 +148,59 @@ export const SettingsModal: React.FC<Props> = ({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: (_, g) => g.dy > 4 && Math.abs(g.dy) > Math.abs(g.dx),
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: () => {
-        y.stopAnimation();
-      },
+      onPanResponderGrant: () => y.stopAnimation(),
       onPanResponderMove: (_, g) => {
         if (g.dy > 0) y.setValue(g.dy);
       },
       onPanResponderRelease: (_, g) => {
-        if (g.dy > 80 || g.vy > 0.4) {
+        if (g.dy > 90 || g.vy > 0.5) {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          Animated.timing(y, { toValue: 700, duration: 200, useNativeDriver: true }).start(() => {
-            onClose();
-          });
+          Animated.timing(y, { toValue: SHEET_H + 100, duration: 200, useNativeDriver: true }).start(() => onCloseRef.current());
         } else {
           Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 260, mass: 0.9 }).start();
         }
       },
     })
   ).current;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
-  if (!render) return null;
-  const set = (p: Partial<DJSettings>) => {
+  const setDj = (p: Partial<DJSettings>) => {
     Haptics.selectionAsync();
+    smooth();
     onUpdateSettings({ ...settings, ...p });
   };
-  const track = { false: 'rgba(255,255,255,0.14)', true: 'rgba(255,255,255,0.55)' };
+  const setFx = useCallback(
+    (p: Partial<FxSettings>, haptic = true) => {
+      if (haptic) Haptics.selectionAsync();
+      smooth();
+      onUpdateFx({ ...fx, ...p });
+    },
+    [fx, onUpdateFx]
+  );
+  const setFxLive = (p: Partial<FxSettings>) => onUpdateFx({ ...fx, ...p }); // ползунки: без анимации раскладки
+
+  const rescan = async () => {
+    if (scanning) return;
+    setScanning(true);
+    setScanNote('');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      const note = await onRescan();
+      setScanNote(note);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch {
+      setScanNote('Не удалось обновить библиотеку');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  if (!render) return null;
 
   return (
-    <Modal visible transparent animationType="none" onRequestClose={onClose}>
+    <Modal visible transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
       <View style={styles.overlay}>
         <Animated.View style={[StyleSheet.absoluteFill, { opacity: fade, backgroundColor: 'rgba(0,0,0,0.55)' }]}>
           <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
@@ -93,12 +209,11 @@ export const SettingsModal: React.FC<Props> = ({
         <Animated.View style={[styles.sheet, { transform: [{ translateY: y }] }]}>
           <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
           <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(18,18,20,0.72)' }]} />
-          
-          {/* Верхняя зона: полоска + заголовок DJ-склейка (можно тянуть вниз для закрытия) */}
+
           <View {...pan.panHandlers} style={styles.grabArea}>
             <View style={styles.grabber} />
             <View style={styles.headerBar}>
-              <Text style={styles.h1}>DJ-склейка</Text>
+              <Text style={styles.h1}>Настройки</Text>
               <PressableScale onPress={onClose} hitSlop={12}>
                 <View style={styles.closeBtn}>
                   <Ionicons name="close" size={18} color={colors.text2} />
@@ -108,51 +223,45 @@ export const SettingsModal: React.FC<Props> = ({
           </View>
 
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
-            <View style={styles.row}>
-              <View style={styles.info}>
-                <Text style={styles.rowTitle}>Склейка треков</Text>
-                <Text style={styles.rowDesc}>Следующий трек входит, пока текущий затухает</Text>
-              </View>
-              <Switch value={settings.crossfadeEnabled} onValueChange={(v) => set({ crossfadeEnabled: v })} trackColor={track} ios_backgroundColor="rgba(255,255,255,0.14)" />
-            </View>
+            {/* ───── DJ-склейка ───── */}
+            <Text style={styles.section}>DJ-склейка</Text>
+            <ToggleRow
+              title="Склейка треков"
+              desc="Следующий трек входит, пока текущий затухает"
+              value={settings.crossfadeEnabled}
+              onChange={(v) => setDj({ crossfadeEnabled: v })}
+            />
 
             {settings.crossfadeEnabled && (
               <Glass radius={20} style={{ marginTop: 6 }}>
                 <View style={{ padding: 16 }}>
-                  <View style={styles.sliderHead}>
-                    <Text style={styles.rowTitle}>Длительность перехода</Text>
-                    <Text style={styles.badge}>{settings.crossfadeDuration} сек</Text>
-                  </View>
-                  <Slider
-                    style={{ height: 36 }}
-                    minimumValue={1}
-                    maximumValue={15}
-                    step={1}
+                  <LiveSlider
+                    label="Длительность перехода"
                     value={settings.crossfadeDuration}
-                    onValueChange={(v) => v !== settings.crossfadeDuration && set({ crossfadeDuration: Math.round(v) })}
-                    minimumTrackTintColor="#FFFFFF"
-                    maximumTrackTintColor="rgba(255,255,255,0.18)"
-                    thumbTintColor="#FFFFFF"
+                    min={1}
+                    max={15}
+                    step={1}
+                    format={(v) => `${Math.round(v)} сек`}
+                    onChange={(v) => v !== settings.crossfadeDuration && onUpdateSettings({ ...settings, crossfadeDuration: Math.round(v) })}
                   />
                   <View style={styles.sliderHead}>
                     <Text style={styles.scale}>1 сек</Text>
                     <Text style={styles.scale}>15 сек</Text>
                   </View>
-
-                  <View style={[styles.row, styles.sub]}>
-                    <View style={styles.info}>
-                      <Text style={styles.rowTitle}>Подгон темпа (BPM)</Text>
-                      <Text style={styles.rowDesc}>Оба трека одновременно подстраиваются под общий темп</Text>
-                    </View>
-                    <Switch value={settings.bpmTransitionEnabled} onValueChange={(v) => set({ bpmTransitionEnabled: v })} trackColor={track} ios_backgroundColor="rgba(255,255,255,0.14)" />
-                  </View>
-                  <View style={[styles.row, styles.sub]}>
-                    <View style={styles.info}>
-                      <Text style={styles.rowTitle}>Плавная громкость</Text>
-                      <Text style={styles.rowDesc}>Включено — мягкая S-кривая, выключено — линейный переход</Text>
-                    </View>
-                    <Switch value={settings.fadeVolumeEnabled} onValueChange={(v) => set({ fadeVolumeEnabled: v })} trackColor={track} ios_backgroundColor="rgba(255,255,255,0.14)" />
-                  </View>
+                  <ToggleRow
+                    sub
+                    title="Подгон темпа (BPM)"
+                    desc="Оба трека одновременно подстраиваются под общий темп"
+                    value={settings.bpmTransitionEnabled}
+                    onChange={(v) => setDj({ bpmTransitionEnabled: v })}
+                  />
+                  <ToggleRow
+                    sub
+                    title="Плавная громкость"
+                    desc="Включено — мягкая S-кривая, выключено — линейный переход"
+                    value={settings.fadeVolumeEnabled}
+                    onChange={(v) => setDj({ fadeVolumeEnabled: v })}
+                  />
                 </View>
               </Glass>
             )}
@@ -161,7 +270,7 @@ export const SettingsModal: React.FC<Props> = ({
               {[3, 5, 10].map((d) => {
                 const on = settings.crossfadeEnabled && settings.crossfadeDuration === d;
                 return (
-                  <PressableScale key={d} style={{ flex: 1 }} onPress={() => set({ crossfadeEnabled: true, crossfadeDuration: d })}>
+                  <PressableScale key={d} style={{ flex: 1 }} onPress={() => setDj({ crossfadeEnabled: true, crossfadeDuration: d })}>
                     <View style={[styles.pill, on && styles.pillOn]}>
                       <Text style={[styles.pillText, on && { color: colors.onAccent }]}>{d} сек</Text>
                     </View>
@@ -170,30 +279,117 @@ export const SettingsModal: React.FC<Props> = ({
               })}
             </View>
 
-            <Text style={[styles.h1, { marginTop: 32, marginBottom: 10 }]}>Текущий трек</Text>
-            <Glass radius={20} style={{ marginBottom: 12 }}>
-              <View style={[styles.row, { padding: 16 }]}>
-                <View style={styles.info}>
-                  <Text style={styles.rowTitle} numberOfLines={1}>{bpmInfo?.title ?? '—'}</Text>
-                  <Text style={styles.rowDesc}>
-                    {bpmInfo?.bpm ? `${Math.round(bpmInfo.bpm)} BPM · ${SOURCE_LABEL[bpmInfo.source ?? 'auto']}` : 'BPM определяется автоматически…'}
-                  </Text>
-                </View>
-                <PressableScale onPress={onEditBpm}>
-                  <Text style={styles.link}>Изменить</Text>
-                </PressableScale>
-              </View>
-            </Glass>
+            {/* ───── Звуковые эффекты ───── */}
+            <Text style={[styles.section, { marginTop: 30 }]}>Звук</Text>
+            <ToggleRow
+              title="Включить звуковые эффекты"
+              desc="Реверберация, 8D, Slowed, Speed Up"
+              value={fx.enabled}
+              onChange={(v) => setFx({ enabled: v })}
+            />
 
-            <Text style={[styles.h1, { marginTop: 24, marginBottom: 10 }]}>Библиотека</Text>
+            {fx.enabled && (
+              <Glass radius={20} style={{ marginTop: 6 }}>
+                <View style={{ padding: 16 }}>
+                  <ToggleRow
+                    title="Реверберация"
+                    desc="Эффект «зала»: звук слегка тянется после удара"
+                    value={fx.reverb}
+                    onChange={(v) => setFx({ reverb: v })}
+                  />
+                  {fx.reverb && (
+                    <LiveSlider
+                      label="Количество реверберации"
+                      value={fx.reverbAmount}
+                      min={0}
+                      max={100}
+                      format={(v) => `${Math.round(v)}%`}
+                      onChange={(v) => setFxLive({ reverbAmount: Math.round(v) })}
+                    />
+                  )}
+
+                  <ToggleRow sub title="8D аудио" desc="Звук плавно кружит вокруг головы (лучше в наушниках)" value={fx.spatial8d} onChange={(v) => setFx({ spatial8d: v })} />
+
+                  <ToggleRow
+                    sub
+                    title="Slowed"
+                    desc="Медленнее и ниже по тону"
+                    value={fx.slowed}
+                    onChange={(v) => setFx({ slowed: v, speedUp: v ? false : fx.speedUp })}
+                  />
+                  {fx.slowed && (
+                    <View style={styles.nested}>
+                      <ToggleRow
+                        title="Reverb для Slowed"
+                        value={fx.slowedReverb}
+                        onChange={(v) => setFx({ slowedReverb: v })}
+                      />
+                      {fx.slowedReverb && (
+                        <LiveSlider
+                          label="Количество"
+                          value={fx.slowedReverbAmount}
+                          min={0}
+                          max={100}
+                          format={(v) => `${Math.round(v)}%`}
+                          onChange={(v) => setFxLive({ slowedReverbAmount: Math.round(v) })}
+                        />
+                      )}
+                    </View>
+                  )}
+
+                  <ToggleRow
+                    sub
+                    title="Speed Up"
+                    desc="Быстрее и выше по тону"
+                    value={fx.speedUp}
+                    onChange={(v) => setFx({ speedUp: v, slowed: v ? false : fx.slowed })}
+                  />
+                </View>
+              </Glass>
+            )}
+            {(fx.enabled || musicHaptics) && (
+              <Text style={styles.note}>
+                {(() => {
+                  const d = fxDiagnostics();
+                  return `Диагностика: модуль ${d.moduleFound ? 'найден' : 'НЕ найден'} · движок ${fxActive ? 'включён' : 'не включён'} · загрузок ${d.loads}${d.lastError ? ' · ошибка: ' + d.lastError : ''}`;
+                })()}
+              </Text>
+            )}
+            {fx.enabled && (
+              <Text style={styles.note}>
+                {fxNativeReady
+                  ? fxActive
+                    ? 'Нативный движок эффектов: работает.'
+                    : 'Нативный движок эффектов: готов (включится вместе с реверберацией или 8D).'
+                  : 'Нативный движок эффектов не найден в этой сборке — реверберация и 8D недоступны, работают только Slowed и Speed Up. Проверьте, что папка modules/woufy-fx попала в проект.'}
+              </Text>
+            )}
+
+            {/* ───── Тактильный отклик ───── */}
+            <View style={{ marginTop: 18 }}>
+              <ToggleRow
+                title="Тактильный отклик под музыку"
+                desc="Вибрация в такт ударным и басу трека"
+                value={musicHaptics}
+                onChange={(v) => {
+                  Haptics.selectionAsync();
+                  onToggleHaptics(v);
+                }}
+              />
+            </View>
+
+            {/* ───── Библиотека — всегда последней ───── */}
+            <Text style={[styles.section, { marginTop: 30, marginBottom: 10 }]}>Библиотека</Text>
             <Glass radius={20} style={{ marginBottom: 24 }}>
               <View style={[styles.row, { padding: 16 }]}>
                 <View style={styles.info}>
-                  <Text style={styles.rowTitle}>{trackCount} треков</Text>
-                  <Text style={styles.rowDesc}>Файлы → На iPhone → Woufy → Music</Text>
+                  <Text style={styles.rowTitle}>
+                    {trackCount} {trackCount % 10 === 1 && trackCount % 100 !== 11 ? 'трек' : trackCount % 10 >= 2 && trackCount % 10 <= 4 && (trackCount % 100 < 12 || trackCount % 100 > 14) ? 'трека' : 'треков'}
+                  </Text>
+                  <Text style={styles.rowDesc}>{scanNote || 'Файлы → На iPhone → WouFY.no → Music'}</Text>
                 </View>
-                <PressableScale onPress={onRescan}>
-                  <Text style={styles.link}>Обновить</Text>
+                <PressableScale onPress={rescan} disabled={scanning} haptic="none">
+                  {scanning ? <ActivityIndicator color={colors.text} /> : <Text style={styles.link}>Обновить</Text>}
                 </PressableScale>
               </View>
             </Glass>
@@ -206,15 +402,17 @@ export const SettingsModal: React.FC<Props> = ({
 
 const styles = StyleSheet.create({
   overlay: { flex: 1, justifyContent: 'flex-end' },
-  sheet: { height: '82%', borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden' },
+  sheet: { height: '84%', borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden' },
   grabArea: { alignItems: 'center', paddingTop: 10, paddingBottom: 6 },
   grabber: { width: 32, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)', marginBottom: 10 },
   headerBar: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20 },
   closeBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
-  content: { paddingHorizontal: 20, paddingBottom: 48 },
-  h1: { ...type.largeTitle, fontSize: 26, color: colors.text },
+  content: { paddingHorizontal: 20, paddingBottom: 60 },
+  h1: { ...type.largeTitle, fontSize: 28, color: colors.text },
+  section: { ...type.title, fontSize: 20, color: colors.text, marginTop: 12, marginBottom: 6 },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8 },
   sub: { marginTop: 10, borderTopWidth: 1, borderColor: 'rgba(255,255,255,0.08)', paddingTop: 14 },
+  nested: { marginLeft: 6, paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(255,255,255,0.12)', marginTop: 2 },
   info: { flex: 1, marginRight: 14 },
   rowTitle: { ...type.headline, color: colors.text },
   rowDesc: { ...type.caption, fontSize: 13, color: colors.text2, marginTop: 2 },
@@ -226,4 +424,5 @@ const styles = StyleSheet.create({
   pillOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   pillText: { ...type.body, fontWeight: '600', color: colors.text },
   link: { ...type.body, fontWeight: '700', color: colors.text },
+  note: { ...type.caption, fontSize: 12, color: colors.text3, marginTop: 8, lineHeight: 17 },
 });

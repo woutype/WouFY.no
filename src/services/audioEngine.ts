@@ -1,8 +1,13 @@
-import { createAudioPlayer, AudioPlayer, AudioStatus } from 'expo-audio';
-import { DJSettings, DEFAULT_DJ, RepeatMode, TrackFile } from '../types';
+import { createAudioPlayer } from 'expo-audio';
+import { DJSettings, DEFAULT_DJ, DEFAULT_FX, FxSettings, RepeatMode, SLOWED_RATE, SPEEDUP_RATE, TrackFile } from '../types';
 import { planMix, ratesAt, volumesAt, beatPhase, wrapHalf, MixPlan, TrackTempo, BeatGrid } from './djMix';
 import { configureAudioSession } from './audioService';
 import { volumeService } from './volumeService';
+import type { PlayerLike, PlayerStatus } from './playerLike';
+import { createFxPlayer, fxNativeAvailable, fxRemote } from './fxPlayer';
+
+type AudioPlayer = PlayerLike;
+type AudioStatus = PlayerStatus;
 
 export interface EngineState {
   queue: TrackFile[];
@@ -35,10 +40,6 @@ interface Transition {
   lastRateAt: number;
   /** сглаженная поправка скорости B от фазовой автоподстройки (PLL) */
   corr: number;
-  /** выполнена первичная подгонка фазы B */
-  hardSynced: boolean;
-  /** до этого момента (мс склейки) PLL не трогает скорость — идёт перемотка */
-  holdUntilMs: number;
   lastVolA: number;
   lastVolB: number;
 }
@@ -58,15 +59,21 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  * 40 мс = 25 Гц обновлений громкости — идеально плавный fade без лишней нагрузки на bridge.
  */
 const TICK_MS = 40;
-/** Как часто обновляем скорость воспроизведения во время склейки (чаще — рывки AVPlayer) */
-const RATE_STEP_MS = 150;
+/**
+ * Как часто обновляем скорость воспроизведения во время склейки.
+ * Каждая смена скорости у AVPlayer заставляет пересобрать конвейер time-pitch, поэтому шаги делаются
+ * редкими (≈6 раз в секунду) и достаточно крупными; плавность дают сама кривая и качество «high» (спектральный алгоритм).
+ */
+const RATE_STEP_MS = 160;
+/** Минимальное изменение скорости, ради которого стоит трогать плеер */
+const RATE_EPS = 0.004;
+/** Качество коррекции высоты тона: «high» — спектральный алгоритм, без «рваного» звука на музыке */
+const PITCH_Q = 'high' as const;
 /** Опережение старта B, сек (задержка команды play) */
 const START_LEAD_SEC = 0.05;
 /** Усиление и предел фазовой автоподстройки B к битам A */
-const PLL_GAIN = 0.5;
-const PLL_MAX = 0.05;
-/** Если B в начале склейки сдвинут от бита больше чем на эту долю — один раз «довинчиваем» его перемоткой (B ещё почти неслышен) */
-const HARD_SYNC_ERR = 0.05;
+const PLL_GAIN = 0.35;
+const PLL_MAX = 0.02;
 /** За сколько секунд до конца трека начинаем предзагрузку следующего (буферизация). */
 const PRELOAD_AHEAD_SEC = 30;
 
@@ -83,8 +90,38 @@ function safe<T>(fn: () => T): T | undefined {
  * Аудио-движок: два плеера (A/B) для настоящей DJ-склейки, очередь, shuffle/repeat.
  * Вне React: UI подписывается через subscribe/getState.
  */
+export interface FxDerived {
+  speed: number;
+  cents: number;
+  reverb: number;
+  spatial: boolean;
+  tape: boolean;
+}
+
+export function deriveFx(fx: FxSettings): FxDerived {
+  if (!fx.enabled) return { speed: 1, cents: 0, reverb: 0, spatial: false, tape: false };
+  const slowed = fx.slowed && !fx.speedUp;
+  const speed = fx.speedUp ? SPEEDUP_RATE : slowed ? SLOWED_RATE : 1;
+  // 8D всегда идёт с небольшой реверберацией (эхо зала), как в классических 8D-треках
+  const reverb = Math.max(fx.reverb ? fx.reverbAmount : 0, slowed && fx.slowedReverb ? fx.slowedReverbAmount : 0, fx.spatial8d ? 22 : 0);
+  return {
+    speed,
+    cents: speed !== 1 ? 1200 * Math.log2(speed) : 0,
+    reverb,
+    spatial: fx.spatial8d,
+    tape: speed !== 1,
+  };
+}
+
+/**
+ * Аудио-движок: два плеера (A/B) для настоящей DJ-склейки, очередь, shuffle/repeat, звуковые эффекты.
+ * Вне React: UI подписывается через subscribe/getState.
+ */
 export class AudioEngine {
   private players: AudioPlayer[];
+  private mode: 'native' | 'fx' = 'native';
+  private fx: FxSettings = DEFAULT_FX;
+  private fxd: FxDerived = deriveFx(DEFAULT_FX);
   private active = 0;
   private listeners = new Set<() => void>();
   private state: EngineState;
@@ -95,6 +132,8 @@ export class AudioEngine {
   private prep: Prep | null = null;
   private mixBlockedFor: string | null = null;
   private playIntent = false;
+  private playToken = 0;
+  private busy = false;
   private lastCommandAt = 0;
   private errorSkips = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -105,10 +144,11 @@ export class AudioEngine {
   private onTrackChange: (cur: TrackFile | undefined, upcoming: (TrackFile | undefined)[]) => void = () => {};
   private onPersist: (s: { order: string[]; shuffle: boolean; repeat: RepeatMode; volume: number; lastTrackId?: string }) => void =
     () => {};
+  private lastUserVolumeChangeAt = 0;
 
   constructor() {
-    configureAudioSession();
-    this.players = [0, 1].map(() => createAudioPlayer(null, { updateInterval: 100, keepAudioSessionActive: true }));
+    configureAudioSession(true);
+    this.players = this.makePlayers('native');
     this.state = {
       queue: [],
       index: -1,
@@ -120,11 +160,10 @@ export class AudioEngine {
       mixing: false,
       player: this.players[0],
     };
-    this.players.forEach((p) => {
-      const sub = p.addListener('playbackStatusUpdate', (s: AudioStatus) => this.onStatus(p, s));
-      this.subs.push(sub);
-    });
+    this.attachPlayers();
     this.timer = setInterval(this.tick, TICK_MS);
+
+    fxRemote.handler = (cmd, pos) => this.handleRemote(cmd, pos);
 
     // Синхронизация с физической громкостью телефона (кнопки iPhone и Центр управления)
     volumeService.addListener((vol) => {
@@ -134,6 +173,157 @@ export class AudioEngine {
         this.persist();
       }
     });
+  }
+
+  /* ───────────── игроки и режимы ───────────── */
+
+  private makePlayers(mode: 'native' | 'fx'): AudioPlayer[] {
+    if (mode === 'fx') return [createFxPlayer(), createFxPlayer()];
+    return [0, 1].map(
+      () => createAudioPlayer(null, { updateInterval: 100, keepAudioSessionActive: true }) as unknown as AudioPlayer
+    );
+  }
+
+  private attachPlayers() {
+    this.subs.forEach((s) => safe(() => s.remove()));
+    this.subs = [];
+    this.players.forEach((p) => {
+      this.subs.push(p.addListener('playbackStatusUpdate', (s: AudioStatus) => this.onStatus(p, s)));
+    });
+  }
+
+  private handleRemote(cmd: string, pos?: number) {
+    if (cmd === 'play') {
+      if (!this.playIntent) this.togglePlay();
+    } else if (cmd === 'pause') {
+      if (this.playIntent) this.togglePlay();
+    } else if (cmd === 'toggle') this.togglePlay();
+    else if (cmd === 'next') this.next();
+    else if (cmd === 'previous') this.previous();
+    else if (cmd === 'seek' && pos !== undefined) this.seek(pos);
+  }
+
+  /** Возвращает true, если для реверберации/8D доступен нативный модуль */
+  get fxNativeReady() {
+    return fxNativeAvailable();
+  }
+
+  private applyFx(p: AudioPlayer) {
+    const f = this.fxd;
+    safe(() => {
+      p.setReverb?.(f.reverb);
+      p.setSpatial?.(f.spatial);
+      p.setPitchCents?.(f.cents);
+      // без нативного модуля Slowed / Speed Up работают «по-кассетному»: темп и высота тона меняются вместе
+      // Без нативного движка: при подгоне BPM / Slowed / Speed Up используем «varispeed» (смена скорости = передискретизация).
+      // У алгоритма с коррекцией тона каждая смена скорости перезапускала конвейер и давала провалы звука (≈40 мс каждые 0.8 с).
+      if (!p.isFx) p.shouldCorrectPitch = !(f.tape || this.varispeedMixing());
+    });
+  }
+
+  /** Скорость плеера = скорость склейки (подгон BPM) × скорость эффекта (Slowed / Speed Up) */
+  private varispeedMixing(): boolean {
+    return this.mode === 'native' && this.dj.crossfadeEnabled && this.dj.bpmTransitionEnabled;
+  }
+
+  private setRate(p: AudioPlayer, djRate: number) {
+    const r = clamp(djRate * this.fxd.speed, 0.25, 2);
+    // в режиме varispeed качество не передаём — иначе плеер может заново выставить алгоритм с коррекцией тона
+    if (!p.isFx && (this.fxd.tape || this.varispeedMixing())) safe(() => p.setPlaybackRate(r));
+    else safe(() => p.setPlaybackRate(r, PITCH_Q));
+  }
+
+  setFx(fx: FxSettings) {
+    this.fx = fx;
+    this.fxd = deriveFx(fx);
+    this.updateMode();
+  }
+
+  /**
+   * Нативный движок (AVAudioEngine) нужен для реверберации/8D и для DJ-подгона BPM:
+   * его time-pitch меняет темп плавно, без «рваного» звука, который даёт AVPlayer при частой смене скорости.
+   */
+  private updateMode() {
+    const needFx = this.fxd.reverb > 0 || this.fxd.spatial || (this.dj.crossfadeEnabled && this.dj.bpmTransitionEnabled);
+    const want: 'native' | 'fx' = needFx && fxNativeAvailable() ? 'fx' : 'native';
+    if (want !== this.mode) {
+      this.switchMode(want);
+    } else {
+      this.players.forEach((p) => this.applyFx(p));
+      if (!this.trans) {
+        this.setRate(this.A, 1);
+        this.setRate(this.B, 1);
+      }
+    }
+    this.prep = null;
+  }
+
+  /** Активен ли нативный движок (для диагностики в настройках) */
+  get fxActive() {
+    return this.mode === 'fx';
+  }
+
+  /** Переключает «обычные» плееры ↔ плееры эффектов, сохраняя трек, позицию и состояние воспроизведения */
+  private switchMode(mode: 'native' | 'fx') {
+    if (mode === this.mode) return;
+    const cur = this.currentTrack;
+    const pos = this.getPosition();
+    const was = this.playIntent;
+    if (this.trans) this.cancelTransition();
+
+    this.subs.forEach((s) => safe(() => s.remove()));
+    this.subs = [];
+    this.players.forEach((p) =>
+      safe(() => {
+        p.pause();
+        p.clearLockScreenControls();
+        p.remove();
+      })
+    );
+    this.mode = mode;
+    this.players = this.makePlayers(mode);
+    this.active = 0;
+    this.prep = null;
+    this.attachPlayers();
+    this.players.forEach((p) => this.applyFx(p));
+    this.set({ player: this.players[0] });
+
+    if (cur) {
+      const a = this.A;
+      const token = ++this.playToken;
+      safe(() => {
+        a.replace({ uri: cur.uri });
+        a.volume = this.master();
+        a.muted = false;
+      });
+      this.setRate(a, 1);
+      if (pos > 0.5) safe(() => a.seekTo(pos));
+      this.updateLockScreen(a, cur);
+      if (was) {
+        configureAudioSession(true).then(() => {
+          if (token === this.playToken && this.playIntent) safe(() => a.play());
+        });
+      }
+    }
+  }
+
+  /** Повторно активирует аудио-сессию (при возврате в приложение) */
+  resyncSession() {
+    configureAudioSession(true);
+    const t = this.currentTrack;
+    if (t) this.updateLockScreen(this.uiPlayer(), t);
+  }
+
+  /** Обновляет данные треков (теги, обложки дочитываются в фоне) без сброса очереди и воспроизведения */
+  patchTracks(updated: TrackFile[]) {
+    if (updated.length === 0) return;
+    const map = new Map(updated.map((t) => [t.id, t]));
+    this.library = this.library.map((t) => map.get(t.id) ?? t);
+    const queue = this.state.queue.map((t) => map.get(t.id) ?? t);
+    this.state = { ...this.state, queue };
+    this.listeners.forEach((l) => l());
+    const cur = this.currentTrack;
+    if (cur && map.has(cur.id)) this.updateLockScreen(this.uiPlayer(), cur);
   }
 
   /* ───────────── подписка ───────────── */
@@ -170,6 +360,7 @@ export class AudioEngine {
     if (!dj.crossfadeEnabled && this.trans) this.cancelTransition();
     this.prep = null;
     this.mixBlockedFor = null;
+    this.updateMode();
   }
 
   /* ───────────── геттеры для UI ───────────── */
@@ -214,8 +405,15 @@ export class AudioEngine {
 
     let queueIds: string[];
     if (this.state.shuffle && this.state.queue.length > 0) {
-      queueIds = this.state.queue.map((t) => t.id).filter((id) => byId.has(id));
-      for (const id of ordered) if (!queueIds.includes(id)) queueIds.push(id);
+      const inQueue = new Set<string>();
+      queueIds = [];
+      for (const t of this.state.queue) {
+        if (byId.has(t.id)) {
+          queueIds.push(t.id);
+          inQueue.add(t.id);
+        }
+      }
+      for (const id of ordered) if (!inQueue.has(id)) queueIds.push(id);
     } else {
       queueIds = ordered;
     }
@@ -237,9 +435,9 @@ export class AudioEngine {
     if (!t) return;
     safe(() => {
       this.A.replace({ uri: t.uri });
-      this.A.setPlaybackRate(1, 'low');
       this.A.volume = 1;
     });
+    this.applyFx(this.A);
     this.updateLockScreen(this.A, t);
     this.notifyTrackChange();
   }
@@ -264,6 +462,11 @@ export class AudioEngine {
       volume: this.state.volume,
       lastTrackId: this.currentTrack?.id,
     });
+  }
+
+  /** Исходный порядок библиотеки (для сброса сортировки) */
+  libraryOrder(): TrackFile[] {
+    return [...this.library];
   }
 
   moveQueueItem(from: number, to: number) {
@@ -319,8 +522,6 @@ export class AudioEngine {
     this.persist();
   }
 
-  private lastUserVolumeChangeAt = 0;
-
   /** Множитель громкости плееров: при системной громкости плееры играют на 100% (громкость задаёт сам телефон) */
   private master(): number {
     return volumeService.isAvailable() ? 1 : this.state.volume;
@@ -334,16 +535,11 @@ export class AudioEngine {
     const volume = clamp(v, 0, 1);
     if (syncToDevice) this.lastUserVolumeChangeAt = Date.now();
     this.set({ volume });
-    if (volumeService.isAvailable()) {
-      if (syncToDevice) volumeService.setVolume(volume);
-      // плееры остаются на 1.0 — иначе громкость применилась бы дважды
-    } else {
-      if (syncToDevice) volumeService.setVolume(volume);
-      if (!this.trans) {
-        safe(() => {
-          this.A.volume = volume;
-        });
-      }
+    if (syncToDevice) volumeService.setVolume(volume);
+    if (!volumeService.isAvailable() && !this.trans) {
+      safe(() => {
+        this.A.volume = volume;
+      });
     }
     this.persist();
   }
@@ -353,9 +549,7 @@ export class AudioEngine {
   playTrack(trackOrId: TrackFile | string) {
     const id = typeof trackOrId === 'string' ? trackOrId : trackOrId.id;
     const idx = this.state.queue.findIndex((t) => t.id === id);
-    if (idx >= 0) {
-      this.playIndex(idx);
-    }
+    if (idx >= 0) this.playIndex(idx);
   }
 
   playIndex(index: number) {
@@ -366,19 +560,24 @@ export class AudioEngine {
     this.errorSkips = 0;
     this.playIntent = true;
     this.lastCommandAt = Date.now();
-    configureAudioSession(true);
+    const token = ++this.playToken;
+    const a = this.A;
     safe(() => {
       this.B.pause();
-      this.A.replace({ uri: t.uri });
-      this.A.setPlaybackRate(1, 'low');
-      const vol = Math.max(0.05, this.master());
-      this.A.volume = vol;
-      this.A.muted = false;
-      this.A.play();
+      a.replace({ uri: t.uri });
+      a.volume = Math.max(0.05, this.master());
+      a.muted = false;
+    });
+    this.applyFx(a);
+    this.setRate(a, 1);
+    // ВАЖНО: play() только после того, как аудио-сессия (doNotMix) реально активирована — иначе при первом запуске
+    // iOS мог оставить сессию в другом режиме и трек «играл» без звука
+    configureAudioSession(true).then(() => {
+      if (token === this.playToken && this.playIntent) safe(() => a.play());
     });
     this.prep = null;
-    this.set({ index, isPlaying: true, duration: 0, player: this.A, mixing: false });
-    this.updateLockScreen(this.A, t);
+    this.set({ index, isPlaying: true, duration: 0, player: a, mixing: false });
+    this.updateLockScreen(a, t);
     this.notifyTrackChange();
   }
 
@@ -390,6 +589,7 @@ export class AudioEngine {
     this.lastCommandAt = Date.now();
     if (this.playIntent) {
       this.playIntent = false;
+      this.playToken++;
       safe(() => {
         this.A.pause();
         if (this.trans) this.trans.to.pause();
@@ -397,11 +597,16 @@ export class AudioEngine {
       this.set({ isPlaying: false });
     } else {
       this.playIntent = true;
-      configureAudioSession(true);
-      safe(() => {
-        this.A.muted = false;
-        this.A.play();
-        if (this.trans) this.trans.to.play();
+      const token = ++this.playToken;
+      const a = this.A;
+      const to = this.trans?.to;
+      configureAudioSession(true).then(() => {
+        if (token !== this.playToken || !this.playIntent) return;
+        safe(() => {
+          a.muted = false;
+          a.play();
+          to?.play();
+        });
       });
       this.set({ isPlaying: true });
     }
@@ -522,7 +727,7 @@ export class AudioEngine {
    * (лучше на начало такта, если это не раньше чем на ~30% длительности), чтобы B вошёл «в долю».
    */
   private pickStart(plan: MixPlan, dur: number, pos: number, X: number): { sA: number; durationMs: number } | null {
-    const avg = plan.tempo ? plan.avgRateA : 1;
+    const avg = (plan.tempo ? plan.avgRateA : 1) * this.fxd.speed;
     const ideal = dur - X * avg;
     let sA = ideal;
     if (plan.beatSync) {
@@ -550,8 +755,9 @@ export class AudioEngine {
         idle.pause();
         idle.replace({ uri: nxt.uri });
         idle.volume = 0;
-        idle.setPlaybackRate(1, 'low');
       });
+      this.applyFx(idle);
+      this.setRate(idle, 1);
       this.prep = { id: nxt.id, startPos, ready: false, seeking: false, attempts: 0 };
     }
     const prep = this.prep;
@@ -579,6 +785,12 @@ export class AudioEngine {
       });
   }
 
+  private setBusy(b: boolean) {
+    if (b === this.busy) return;
+    this.busy = b;
+    this.onMixingChange(b);
+  }
+
   private tick = () => {
     if (!this.playIntent) return;
     const a = this.A;
@@ -587,11 +799,14 @@ export class AudioEngine {
     if (dur <= 0) return;
 
     if (this.trans) {
+      this.setBusy(true);
       this.driveTransition(pos, dur);
       return;
     }
 
     const X = this.dj.crossfadeDuration;
+    // фоновый анализ BPM не мешает только вдали от склейки: перед ней и во время неё он приостанавливается
+    this.setBusy(this.dj.crossfadeEnabled && dur - pos <= PRELOAD_AHEAD_SEC + X * 1.5 + 10);
     if (!this.dj.crossfadeEnabled || this.state.repeat === 'one' || !this.currentTrack) return;
     if (this.mixBlockedFor === this.currentTrack.id) return;
     const nextIdx = this.nextIndexAuto();
@@ -602,7 +817,7 @@ export class AudioEngine {
     const nxt = this.state.queue[nextIdx];
     const plan = planMix(this.tempoOf(cur), this.tempoOf(nxt), this.dj.bpmTransitionEnabled);
     const remaining = dur - pos;
-    const avg = plan.tempo ? plan.avgRateA : 1;
+    const avg = (plan.tempo ? plan.avgRateA : 1) * this.fxd.speed;
 
     // Ранняя предзагрузка: декодирование и установка на бит завершаются задолго до склейки
     if (remaining <= PRELOAD_AHEAD_SEC + X * avg) this.ensurePrepared(nxt, plan);
@@ -625,8 +840,8 @@ export class AudioEngine {
     const now = Date.now();
     const master = this.master();
     const initialRateB = plan.tempo ? clamp(plan.bpmA / plan.targetBpm, 0.5, 2) : 1;
+    this.setRate(idle, initialRateB);
     safe(() => {
-      idle.setPlaybackRate(initialRateB, 'low');
       idle.volume = 0;
       a.volume = master;
       idle.play();
@@ -641,17 +856,15 @@ export class AudioEngine {
       elapsedMs: 0,
       lastTickAt: now,
       uiSwitched: false,
-      lastRateA: 1,
-      lastRateB: initialRateB,
+      lastRateA: 1 * this.fxd.speed,
+      lastRateB: initialRateB * this.fxd.speed,
       lastRateAt: now,
       corr: 0,
-      hardSynced: false,
-      holdUntilMs: 0,
       lastVolA: master,
       lastVolB: 0,
     };
     this.set({ mixing: true });
-    this.onMixingChange(true);
+    this.setBusy(true);
   };
 
   private driveTransition(pos: number, dur: number) {
@@ -677,42 +890,33 @@ export class AudioEngine {
     }
 
     // ── темп: оба трека идут к общему BPM; A ускоряется, B из темпа A сходится к своему ──
-    if (t.plan.tempo && p < 1 && now - t.lastRateAt >= RATE_STEP_MS) {
+    if (t.plan.tempo && p < 1 && now - t.lastRateAt >= (this.mode === 'fx' ? 45 : RATE_STEP_MS)) {
       const base = ratesAt(t.plan, p);
       let rateB = base.rateB;
 
-      // Фазовая автоподстройка: сравниваем «долю бита» у A и у B и чуть подруливаем скорость B,
-      // чтобы удары легли друг на друга (как при ручном питч-бенде у диджея)
-      if (t.plan.beatSync && t.elapsedMs > 350 && t.elapsedMs >= t.holdUntilMs) {
+      // Мягкая фазовая автоподстройка: чуть подруливаем скорость B, чтобы удары легли друг на друга.
+      // Никаких перемоток посреди склейки — именно они давали «рваный» звук.
+      if (t.plan.beatSync && t.elapsedMs > 600) {
         const tb = safe(() => t.to.currentTime);
         if (tb !== undefined && Number.isFinite(tb)) {
           const phiA = beatPhase(pos, t.plan.phaseA, t.plan.periodA);
           const phiB = beatPhase(tb, t.plan.phaseB, t.plan.periodB);
           const err = wrapHalf(phiA - phiB); // >0 — B отстаёт от бита
-          if (!t.hardSynced) {
-            t.hardSynced = true;
-            if (Math.abs(err) > HARD_SYNC_ERR) {
-              // B пока играет с громкостью ≈ 0 — перемотка на долю бита не слышна
-              const target = Math.max(0, tb + err * t.plan.periodB);
-              safe(() => t.to.seekTo(target));
-              t.holdUntilMs = t.elapsedMs + 500;
-              t.corr = 0;
-            }
-          } else {
-            const target = clamp(err * PLL_GAIN, -PLL_MAX, PLL_MAX);
-            t.corr += (target - t.corr) * 0.3;
-          }
+          const target = clamp(err * PLL_GAIN, -PLL_MAX, PLL_MAX);
+          t.corr += (target - t.corr) * 0.2;
         }
       }
       rateB *= 1 + t.corr;
 
-      if (Math.abs(base.rateA - t.lastRateA) >= 0.0025) {
-        safe(() => t.from.setPlaybackRate(base.rateA, 'low'));
-        t.lastRateA = base.rateA;
+      const fa = base.rateA * this.fxd.speed;
+      const fb = rateB * this.fxd.speed;
+      if (Math.abs(fa - t.lastRateA) >= (this.mode === 'fx' ? 0.0008 : RATE_EPS)) {
+        this.setRate(t.from, base.rateA);
+        t.lastRateA = fa;
       }
-      if (Math.abs(rateB - t.lastRateB) >= 0.0025) {
-        safe(() => t.to.setPlaybackRate(rateB, 'low'));
-        t.lastRateB = rateB;
+      if (Math.abs(fb - t.lastRateB) >= (this.mode === 'fx' ? 0.0008 : RATE_EPS)) {
+        this.setRate(t.to, rateB);
+        t.lastRateB = fb;
       }
       t.lastRateAt = now;
     }
@@ -743,8 +947,10 @@ export class AudioEngine {
     safe(() => {
       t.from.pause();
       t.from.volume = 0;
-      t.to.setPlaybackRate(1.0, 'low');
-      t.from.setPlaybackRate(1.0, 'low');
+    });
+    this.setRate(t.to, 1.0);
+    this.setRate(t.from, 1.0);
+    safe(() => {
       t.to.volume = this.master();
     });
     this.active = this.players.indexOf(t.to);
@@ -756,7 +962,7 @@ export class AudioEngine {
     // seekTo(0) на бывшем A-плеере откладываем: сначала он должен полностью остановиться
     const fromPlayer = t.from;
     setTimeout(() => safe(() => fromPlayer.seekTo(0)), 300);
-    this.onMixingChange(false);
+    this.setBusy(false);
     this.notifyTrackChange();
   }
 
@@ -766,15 +972,15 @@ export class AudioEngine {
     safe(() => {
       t.to.pause();
       t.to.volume = 0;
-      t.to.setPlaybackRate(1.0, 'low');
-      t.from.setPlaybackRate(1.0, 'low');
       t.from.volume = this.master();
     });
+    this.setRate(t.to, 1.0);
+    this.setRate(t.from, 1.0);
     this.trans = null;
     this.prep = null;
     this.mixBlockedFor = this.currentTrack?.id ?? null;
     this.set({ mixing: false, player: this.A });
-    this.onMixingChange(false);
+    this.setBusy(false);
   }
 
   /* ───────────── экран блокировки и Dynamic Island ───────────── */
@@ -783,7 +989,7 @@ export class AudioEngine {
     safe(() =>
       player.setActiveForLockScreen(
         true,
-        { title: t.title, artist: t.artist, albumTitle: t.album || 'Woufy', artworkUrl: t.artworkUri },
+        { title: t.title, artist: t.artist, albumTitle: t.album || 'WouFY.no', artworkUrl: t.artworkUri },
         { showNextTrack: true, showPreviousTrack: true, showSeekForward: true, showSeekBackward: true, isLiveStream: false }
       )
     );
@@ -791,6 +997,7 @@ export class AudioEngine {
 
   dispose() {
     if (this.timer) clearInterval(this.timer);
+    fxRemote.handler = undefined;
     this.subs.forEach((s) => safe(() => s.remove()));
     this.players.forEach((p) => safe(() => p.remove()));
   }

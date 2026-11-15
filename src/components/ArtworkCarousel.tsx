@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, PanResponder, StyleSheet, View } from 'react-native';
+import { Animated, PanResponder, StyleSheet } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import type { AudioPlayer } from 'expo-audio';
 import { TrackFile } from '../types';
 import { CoverArt } from './ui';
-import { WaveformVisualizer } from './WaveformVisualizer';
+import { WaveOverlay, useWaveLevels } from './WaveformVisualizer';
 import { springs } from '../theme';
 
 interface Props {
@@ -13,7 +12,6 @@ interface Props {
   size: number;
   isPlaying: boolean;
   showWaveform: boolean;
-  player: AudioPlayer | null;
   onNext: () => void;
   onPrevious: () => void;
   onDragDownGrant?: () => void;
@@ -28,6 +26,8 @@ const mod = (a: number, n: number) => ((a % n) + n) % n;
 /**
  * Обложка-карусель. Палец ведёт обложку 1:1: свайп влево → следующий трек,
  * вправо → предыдущий. Свайп вниз → плавно открывает очередь.
+ * Соседние обложки прозрачны в покое (не «торчат» по краям, в том числе на паузе) и проявляются только при свайпе.
+ * Волна рисуется внутри каждой обложки и едет вместе с ней.
  */
 export const ArtworkCarousel: React.FC<Props> = ({
   queue,
@@ -35,7 +35,6 @@ export const ArtworkCarousel: React.FC<Props> = ({
   size,
   isPlaying,
   showWaveform,
-  player,
   onNext,
   onPrevious,
   onDragDownGrant,
@@ -44,6 +43,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
 }) => {
   const n = queue.length;
   const STEP = size + GAP;
+  const bars = useWaveLevels(showWaveform, isPlaying);
 
   // «виртуальный слот» текущей обложки; растёт при next и убывает при prev — позиции не сбрасываются
   const [prevIndex, setPrevIndex] = useState(index);
@@ -69,13 +69,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
   const dragMode = useRef<'none' | 'horizontal' | 'vertical'>('none');
 
   useEffect(() => {
-    Animated.spring(pos, {
-      toValue: slot,
-      useNativeDriver: true,
-      damping: 22,
-      stiffness: 230,
-      mass: 1,
-    }).start();
+    Animated.spring(pos, { toValue: slot, useNativeDriver: true, damping: 24, stiffness: 240, mass: 1 }).start();
   }, [slot, pos]);
 
   // обложка «дышит»: на паузе чуть меньше
@@ -100,9 +94,8 @@ export const ArtworkCarousel: React.FC<Props> = ({
       },
       onPanResponderMove: (_, g) => {
         if (dragMode.current === 'none') {
-          if (Math.abs(g.dx) > Math.abs(g.dy) && Math.abs(g.dx) > 6) {
-            dragMode.current = 'horizontal';
-          } else if (g.dy > 6 && g.dy > Math.abs(g.dx)) {
+          if (Math.abs(g.dx) > Math.abs(g.dy) && Math.abs(g.dx) > 6) dragMode.current = 'horizontal';
+          else if (g.dy > 6 && g.dy > Math.abs(g.dx)) {
             dragMode.current = 'vertical';
             cbs.current.onDragDownGrant?.();
           }
@@ -124,17 +117,14 @@ export const ArtworkCarousel: React.FC<Props> = ({
             if (g.dx < 0) cbs.current.onNext();
             else cbs.current.onPrevious();
           } else {
-            Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 20, stiffness: 260, mass: 1 }).start();
+            Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 22, stiffness: 260, mass: 1 }).start();
           }
         }
         dragMode.current = 'none';
       },
       onPanResponderTerminate: (_, g) => {
-        if (dragMode.current === 'vertical') {
-          cbs.current.onDragDownRelease?.(g.dy, g.vy);
-        } else {
-          Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 20, stiffness: 260, mass: 1 }).start();
-        }
+        if (dragMode.current === 'vertical') cbs.current.onDragDownRelease?.(g.dy, g.vy);
+        else Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 22, stiffness: 260, mass: 1 }).start();
         dragMode.current = 'none';
       },
     })
@@ -144,9 +134,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
 
   return (
     <Animated.View style={{ width: size, height: size, transform: [{ scale: playScale }] }} {...responder.panHandlers}>
-      <Animated.View
-        style={[StyleSheet.absoluteFill, { transform: [{ translateX: Animated.multiply(pos, -STEP) }] }]}
-      >
+      <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateX: Animated.multiply(pos, -STEP) }] }]}>
         {slots.map((s) => {
           const track = queue[mod(index + (s - slot), n)];
           const dist = Animated.subtract(pos, s);
@@ -158,7 +146,8 @@ export const ArtworkCarousel: React.FC<Props> = ({
                 {
                   width: size,
                   height: size,
-                  opacity: dist.interpolate({ inputRange: [-1, 0, 1], outputRange: [0.35, 1, 0.35], extrapolate: 'clamp' }),
+                  // в покое соседи полностью прозрачны (раньше на паузе из-за масштаба 0.9 по бокам были видны их края)
+                  opacity: dist.interpolate({ inputRange: [-1, -0.55, 0, 0.55, 1], outputRange: [0, 0.5, 1, 0.5, 0], extrapolate: 'clamp' }),
                   transform: [
                     { translateX: s * STEP },
                     { scale: dist.interpolate({ inputRange: [-1, 0, 1], outputRange: [0.86, 1, 0.86], extrapolate: 'clamp' }) },
@@ -167,14 +156,11 @@ export const ArtworkCarousel: React.FC<Props> = ({
               ]}
             >
               <CoverArt uri={track?.artworkUri} size={size} radius={COVER_RADIUS} />
+              {showWaveform && <WaveOverlay bars={bars} size={size} radius={COVER_RADIUS} />}
             </Animated.View>
           );
         })}
       </Animated.View>
-
-      {showWaveform && (
-        <WaveformVisualizer player={player} isPlaying={isPlaying} size={size} radius={COVER_RADIUS} />
-      )}
     </Animated.View>
   );
 };

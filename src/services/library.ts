@@ -1,9 +1,12 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { DJSettings, RepeatMode, TrackFile } from '../types';
+import { DJSettings, FxSettings, RepeatMode, TrackFile } from '../types';
 
 /**
- * Небольшое JSON-хранилище в Documents/.woufy/state.json
- * (скрытая папка: Files её не показывает, сканер её пропускает).
+ * Небольшое JSON-хранилище состояния приложения.
+ *
+ * Служебные данные (состояние, кэш библиотеки, кэш текстов) лежат В ОТДЕЛЬНОЙ папке
+ * Library/Application Support/WouFY — вне Documents, поэтому в «Файлах» и в папке Music
+ * не появляется никакого мусора. Если системная папка недоступна, используется скрытая `.woufy`.
  */
 /** Сетка битов трека: биты стоят в моменты phase + k·60/bpm (секунды от начала файла) */
 export interface BeatGridRecord {
@@ -16,10 +19,14 @@ export interface BpmRecord {
   source: 'auto' | 'manual';
   /** точная сетка битов (для наложения битов друг на друга при DJ-склейке) */
   grid?: BeatGridRecord;
+  /** версия алгоритма анализа: при обновлении алгоритма старые результаты пересчитываются */
+  algo?: number;
 }
 
 export interface PersistedState {
   dj?: DJSettings;
+  fx?: FxSettings;
+  musicHaptics?: boolean;
   bpm?: Record<string, BpmRecord>;
   order?: string[];
   shuffle?: boolean;
@@ -27,27 +34,63 @@ export interface PersistedState {
   volume?: number;
   lastTrackId?: string;
   samplesSeeded?: boolean;
+  /** смещение синхро-текста для конкретного трека, сек */
+  lyricsOffset?: Record<string, number>;
 }
 
-const DIR = `${FileSystem.documentDirectory ?? ''}.woufy/`;
-const FILE = `${DIR}state.json`;
-const TRACKS_CACHE_FILE = `${DIR}library_cache.json`;
+const docRoot = FileSystem.documentDirectory ?? '';
+
+function resolveDataDir(): string {
+  if (/\/Documents\/$/.test(docRoot)) return docRoot.replace(/\/Documents\/$/, '/Library/Application Support/WouFY/');
+  return `${docRoot}.woufy/`;
+}
+
+export const DATA_DIR = resolveDataDir();
+export const LEGACY_DIR = `${docRoot}.woufy/`;
+const FILE = `${DATA_DIR}state.json`;
+const TRACKS_CACHE_FILE = `${DATA_DIR}library_cache.json`;
+/** версия формата кэша треков: при смене старый кэш игнорируется и библиотека перечитывается */
+const TRACKS_CACHE_VERSION = 3;
 
 let cache: PersistedState = {};
 let loaded = false;
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 
+export async function ensureDataDir(): Promise<void> {
+  try {
+    const info = await FileSystem.getInfoAsync(DATA_DIR);
+    if (!info.exists) await FileSystem.makeDirectoryAsync(DATA_DIR, { intermediates: true });
+  } catch (e) {
+    console.warn('[library] ensureDataDir failed', e);
+  }
+}
+
+async function readJson<T>(path: string): Promise<T | undefined> {
+  try {
+    const info = await FileSystem.getInfoAsync(path);
+    if (!info.exists) return undefined;
+    return JSON.parse(await FileSystem.readAsStringAsync(path)) as T;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function loadState(): Promise<PersistedState> {
   if (loaded) return cache;
-  try {
-    const info = await FileSystem.getInfoAsync(FILE);
-    if (info.exists) {
-      const raw = await FileSystem.readAsStringAsync(FILE);
-      cache = JSON.parse(raw) as PersistedState;
+  await ensureDataDir();
+  // новая папка → старая скрытая `.woufy` (миграция)
+  const fresh = await readJson<PersistedState>(FILE);
+  if (fresh) cache = fresh;
+  else {
+    const legacy = await readJson<PersistedState>(`${LEGACY_DIR}state.json`);
+    cache = legacy ?? {};
+    if (legacy) {
+      try {
+        await FileSystem.writeAsStringAsync(FILE, JSON.stringify(cache));
+      } catch {
+        /* необязательно */
+      }
     }
-  } catch (e) {
-    console.warn('[library] state load failed', e);
-    cache = {};
   }
   loaded = true;
   return cache;
@@ -69,8 +112,7 @@ export async function flushState() {
     writeTimer = null;
   }
   try {
-    const info = await FileSystem.getInfoAsync(DIR);
-    if (!info.exists) await FileSystem.makeDirectoryAsync(DIR, { intermediates: true });
+    await ensureDataDir();
     await FileSystem.writeAsStringAsync(FILE, JSON.stringify(cache));
   } catch (e) {
     console.warn('[library] state save failed', e);
@@ -80,17 +122,18 @@ export async function flushState() {
 /** Загрузка закэшированного списка треков с метаданными (мгновенно при старте) */
 export async function loadCachedTracks(): Promise<TrackFile[]> {
   try {
-    const info = await FileSystem.getInfoAsync(TRACKS_CACHE_FILE);
-    if (info.exists) {
-      const raw = await FileSystem.readAsStringAsync(TRACKS_CACHE_FILE);
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        const root = FileSystem.documentDirectory ?? '';
-        return parsed.map((t: TrackFile) => ({
+    const parsed = (await readJson<{ v: number; tracks: TrackFile[] }>(TRACKS_CACHE_FILE)) ?? undefined;
+    if (parsed && parsed.v === TRACKS_CACHE_VERSION && Array.isArray(parsed.tracks)) {
+      // абсолютные пути (контейнер приложения может смениться при обновлении) пересобираем от текущих корней
+      return parsed.tracks.map((t) => {
+        const uri = `${docRoot}${t.id}`;
+        return {
           ...t,
-          uri: t.id.startsWith('file://') ? t.id : `${root}${t.id}`,
-        }));
-      }
+          uri,
+          artworkUri: t.artworkUri ? `${DATA_DIR}covers/${t.artworkUri.split('/').pop()}` : undefined,
+          lrcUri: t.lrcUri ? uri.replace(/\.[^/.]+$/, '.lrc') : undefined,
+        };
+      });
     }
   } catch (e) {
     console.warn('[library] failed to load cached tracks:', e);
@@ -101,9 +144,8 @@ export async function loadCachedTracks(): Promise<TrackFile[]> {
 /** Сохранение списка треков в постоянный кэш */
 export async function saveCachedTracks(tracks: TrackFile[]): Promise<void> {
   try {
-    const info = await FileSystem.getInfoAsync(DIR);
-    if (!info.exists) await FileSystem.makeDirectoryAsync(DIR, { intermediates: true });
-    await FileSystem.writeAsStringAsync(TRACKS_CACHE_FILE, JSON.stringify(tracks));
+    await ensureDataDir();
+    await FileSystem.writeAsStringAsync(TRACKS_CACHE_FILE, JSON.stringify({ v: TRACKS_CACHE_VERSION, tracks }));
   } catch (e) {
     console.warn('[library] failed to save cached tracks:', e);
   }

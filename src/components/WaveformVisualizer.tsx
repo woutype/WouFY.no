@@ -1,15 +1,14 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, View } from 'react-native';
-import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import type { AudioPlayer } from 'expo-audio';
+import { sampleBus } from '../services/sampleBus';
 
-const BARS = 20;
-const FLOOR = 0.06;
-const FRAME_MS = 33; // ~30 кадров/с — достаточно плавно и вдвое легче для JS
-const N = 1024; // размер окна FFT
-const MIN_HZ = 50;
-const MAX_HZ = 12000;
+export const WAVE_BARS = 28;
+const FLOOR = 0.07;
+const N = 1024; // окно FFT
+const MIN_HZ = 45;
+const MAX_HZ = 14000;
+const SR = 44100;
 
 /** Радикс-2 FFT на месте */
 function fft(re: Float64Array, im: Float64Array) {
@@ -47,178 +46,159 @@ function fft(re: Float64Array, im: Float64Array) {
   }
 }
 
-interface Props {
-  player: AudioPlayer | null;
-  isPlaying: boolean;
-  size: number;
-  radius: number;
-}
-
-/** Настоящий спектр (FFT) поверх обложки. Семплирование включается только пока визуализатор на экране. */
-export const WaveformVisualizer: React.FC<Props> = ({ player, isPlaying, size, radius }) => {
-  const bars = useRef(Array.from({ length: BARS }, () => new Animated.Value(FLOOR))).current;
-  const targetLevels = useRef(new Float32Array(BARS).fill(FLOOR)).current;
-  const currentLevels = useRef(new Float32Array(BARS).fill(FLOOR)).current;
+/**
+ * Уровни полос спектра (Animated.Value 0…1), обновляются каждый кадр (60 fps).
+ * Спектр считается из семплов плеера; сглаживание — по реальному времени кадра (атака быстрая, спад мягкий),
+ * поэтому анимация одинаково плавная и на 60, и на 120 Гц и не «ступенчатая» между пакетами семплов.
+ * Анализ работает только пока `enabled` — иначе нулевая нагрузка.
+ */
+export function useWaveLevels(enabled: boolean, isPlaying: boolean): Animated.Value[] {
+  const bars = useRef(Array.from({ length: WAVE_BARS }, () => new Animated.Value(FLOOR))).current;
+  const target = useRef(new Float32Array(WAVE_BARS).fill(FLOOR)).current;
   const playing = useRef(isPlaying);
   playing.current = isPlaying;
+  const lastSample = useRef(0);
 
-  // Рендер-луп: быстрая атака на ударах, плавный спад; соседние полосы слегка сглаживаются между собой
+  // анализ спектра
   useEffect(() => {
-    let rafId: number;
-    let active = true;
-    let lastFrame = 0;
-    const tmp = new Float32Array(BARS);
+    if (!enabled) return;
+    const ring = new Float64Array(N);
+    const win = new Float64Array(N);
+    for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+    const re = new Float64Array(N);
+    const im = new Float64Array(N);
+    const edges: number[] = [];
+    for (let i = 0; i <= WAVE_BARS; i++) edges.push(MIN_HZ * Math.pow(MAX_HZ / MIN_HZ, i / WAVE_BARS));
+    let filled = 0;
+    let last = 0;
 
+    const unsub = sampleBus.subscribe((frames) => {
+      lastSample.current = Date.now();
+      if (!playing.current) return;
+      const take = Math.min(frames.length, N);
+      ring.copyWithin(0, take);
+      for (let i = 0; i < take; i++) ring[N - take + i] = frames[frames.length - take + i];
+      filled = Math.min(N, filled + take);
+      const now = Date.now();
+      if (filled < N || now - last < 10) return;
+      last = now;
+      for (let i = 0; i < N; i++) {
+        re[i] = ring[i] * win[i];
+        im[i] = 0;
+      }
+      fft(re, im);
+      for (let b = 0; b < WAVE_BARS; b++) {
+        const k0 = Math.max(1, Math.floor((edges[b] * N) / SR));
+        const k1 = Math.max(k0 + 1, Math.ceil((edges[b + 1] * N) / SR));
+        let peak = 0;
+        for (let k = k0; k < k1 && k < N / 2; k++) {
+          const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]) / (N / 4);
+          if (mag > peak) peak = mag;
+        }
+        // наклон +3 дБ/окт: у музыки спектр падает к высоким — без него правая часть почти не двигалась бы
+        const tilt = 3 * Math.log2(Math.sqrt(edges[b] * edges[b + 1]) / 200);
+        const db = 20 * Math.log10(peak + 1e-6) + tilt;
+        target[b] = Math.min(1, Math.max(FLOOR, (db + 62) / 52));
+      }
+    });
+    return unsub;
+  }, [enabled, target]);
+
+  // отрисовка: каждый кадр, сглаживание по времени
+  useEffect(() => {
+    if (!enabled) return;
+    let raf = 0;
+    let active = true;
+    let prevTs = 0;
+    const cur = new Float32Array(WAVE_BARS).fill(FLOOR);
     const loop = (ts: number) => {
       if (!active) return;
-      rafId = requestAnimationFrame(loop);
-      if (ts - lastFrame < FRAME_MS) return;
-      lastFrame = ts;
+      raf = requestAnimationFrame(loop);
+      const dt = prevTs ? Math.min(0.05, (ts - prevTs) / 1000) : 1 / 60;
+      prevTs = ts;
+      const atk = 1 - Math.exp(-dt / 0.03);
+      const rel = 1 - Math.exp(-dt / 0.14);
       const isPlay = playing.current;
-      for (let b = 0; b < BARS; b++) {
-        const l = targetLevels[Math.max(0, b - 1)];
-        const r = targetLevels[Math.min(BARS - 1, b + 1)];
-        tmp[b] = isPlay ? targetLevels[b] * 0.6 + (l + r) * 0.2 : FLOOR;
-      }
-      for (let b = 0; b < BARS; b++) {
-        const cur = currentLevels[b];
-        const target = tmp[b];
-        const factor = target > cur ? 0.5 : 0.16;
-        const next = cur + (target - cur) * factor;
-        if (Math.abs(next - cur) > 0.002) {
-          currentLevels[b] = next;
+      // если плеер временно не отдаёт семплы (смена трека, загрузка), волна не замирает, а продолжает «дышать»
+      const synthetic = isPlay && Date.now() - lastSample.current > 700;
+      const tt = ts / 1000;
+      for (let b = 0; b < WAVE_BARS; b++) {
+        const l = target[Math.max(0, b - 1)];
+        const r = target[Math.min(WAVE_BARS - 1, b + 1)];
+        let goal = isPlay ? target[b] * 0.62 + (l + r) * 0.19 : FLOOR;
+        if (synthetic) {
+          const w = 1 - (b / WAVE_BARS) * 0.55; // слева (низкие) выше, справа (высокие) ниже — как у реального спектра
+          goal = FLOOR + w * (0.22 + 0.2 * Math.sin(tt * 2.4 + b * 0.55) * Math.sin(tt * 1.3 + b * 0.21)) + 0.12 * w;
+        }
+        const f = goal > cur[b] ? atk : rel;
+        const next = cur[b] + (goal - cur[b]) * f;
+        if (Math.abs(next - cur[b]) > 0.0015) {
+          cur[b] = next;
           bars[b].setValue(next);
         }
       }
     };
-
-    rafId = requestAnimationFrame(loop);
+    raf = requestAnimationFrame(loop);
     return () => {
       active = false;
-      cancelAnimationFrame(rafId);
+      cancelAnimationFrame(raf);
     };
-  }, [bars, currentLevels, targetLevels]);
+  }, [enabled, bars, target]);
 
+  // на паузе уровни плавно опускаются
   useEffect(() => {
-    if (!player) return;
-    let sub: { remove: () => void } | null = null;
-    const ring = new Float64Array(N);
-    const win = new Float64Array(N);
-    for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); // окно Хэннинга
-    const re = new Float64Array(N);
-    const im = new Float64Array(N);
-    let filled = 0;
-    let last = 0;
-    const sr = 44100;
-    const edges: number[] = [];
-    for (let i = 0; i <= BARS; i++) edges.push(MIN_HZ * Math.pow(MAX_HZ / MIN_HZ, i / BARS));
+    if (!isPlaying) for (let i = 0; i < WAVE_BARS; i++) target[i] = FLOOR;
+  }, [isPlaying, target]);
 
-    try {
-      if (!player.isAudioSamplingSupported) return;
-      player.setAudioSamplingEnabled(true);
-      sub = player.addListener('audioSampleUpdate', (s) => {
-        const frames = s.channels?.[0]?.frames;
-        if (!frames || frames.length === 0 || !playing.current) return;
-        // сдвигаем кольцо и дописываем новые фреймы
-        const take = Math.min(frames.length, N);
-        ring.copyWithin(0, take);
-        for (let i = 0; i < take; i++) ring[N - take + i] = frames[frames.length - take + i];
-        filled = Math.min(N, filled + take);
-        const now = Date.now();
-        if (filled < N || now - last < 16) return;
-        last = now;
+  return bars;
+}
 
-        for (let i = 0; i < N; i++) {
-          re[i] = ring[i] * win[i];
-          im[i] = 0;
-        }
-        fft(re, im);
+interface WaveProps {
+  bars: Animated.Value[];
+  size: number;
+  radius: number;
+}
 
-        for (let b = 0; b < BARS; b++) {
-          const k0 = Math.max(1, Math.floor((edges[b] * N) / sr));
-          const k1 = Math.max(k0 + 1, Math.ceil((edges[b + 1] * N) / sr));
-          let peak = 0;
-          for (let k = k0; k < k1 && k < N / 2; k++) {
-            const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]) / (N / 4);
-            if (mag > peak) peak = mag;
-          }
-          // наклон +3 дБ/окт: у музыки спектр падает к высоким — без него правая часть почти не двигалась бы
-          const tilt = 3 * Math.log2(Math.sqrt(edges[b] * edges[b + 1]) / 200);
-          const db = 20 * Math.log10(peak + 1e-6) + tilt;
-          const target = Math.min(1, Math.max(FLOOR, (db + 60) / 50));
-          targetLevels[b] = target;
-        }
-      });
-    } catch {
-      /* семплирование недоступно на этой платформе */
-    }
-    return () => {
-      sub?.remove();
-      try {
-        player.setAudioSamplingEnabled(false);
-      } catch {
-        /* ignore */
-      }
-    };
-  }, [player, targetLevels]);
-
-  // при паузе сбрасываем целевые уровни
-  useEffect(() => {
-    if (isPlaying) return;
-    for (let i = 0; i < BARS; i++) targetLevels[i] = FLOOR;
-  }, [isPlaying, targetLevels]);
-
-  const barH = size * 0.52;
+/**
+ * Оформление волны: обложка лишь слегка затемнена (без размытия), снизу мягкий градиент,
+ * тонкие закруглённые полосы растут от нижней линии. Рисуется ВНУТРИ слота обложки — при листании треков едет вместе с ней.
+ */
+export const WaveOverlay: React.FC<WaveProps> = React.memo(({ bars, size, radius }) => {
+  const pad = Math.round(size * 0.07);
+  const maxH = size * 0.46;
+  const gap = Math.max(2, Math.round(size * 0.008));
+  const barW = (size - pad * 2 - gap * (WAVE_BARS - 1)) / WAVE_BARS;
   return (
     <View style={[styles.wrap, { borderRadius: radius }]} pointerEvents="none">
-      {/* матовая подложка: лёгкое размытие обложки + тёмная полупрозрачная заливка, без бликов */}
-      <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
-      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(10,10,11,0.5)' }]} />
-      <View style={[styles.row, { height: barH }]}>
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.16)' }]} />
+      <LinearGradient
+        colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.42)', 'rgba(0,0,0,0.66)']}
+        locations={[0, 0.55, 1]}
+        style={[styles.bottomShade, { height: size * 0.62 }]}
+      />
+      <View style={[styles.row, { left: pad, right: pad, bottom: pad, height: maxH }]}>
         {bars.map((v, i) => (
           <Animated.View
             key={i}
-            style={[
-              styles.bar,
-              {
-                height: barH,
-                // полоса растёт от центра вверх и вниз; громче — ярче, всегда полупрозрачная
-                opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.25, 0.82], extrapolate: 'clamp' }),
-                transform: [{ scaleY: v }],
-              },
-            ]}
-          >
-            <LinearGradient
-              colors={['rgba(165, 172, 185, 0.35)', 'rgba(255, 255, 255, 0.92)', 'rgba(165, 172, 185, 0.35)']}
-              locations={[0, 0.5, 1]}
-              style={StyleSheet.absoluteFill}
-            />
-          </Animated.View>
+            style={{
+              width: barW,
+              height: maxH,
+              marginRight: i === WAVE_BARS - 1 ? 0 : gap,
+              borderRadius: barW / 2,
+              backgroundColor: 'rgba(255,255,255,0.9)',
+              opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.95], extrapolate: 'clamp' }),
+              // растём от нижней линии вверх: масштаб вокруг нижней кромки
+              transform: [{ translateY: maxH / 2 }, { scaleY: v }, { translateY: -maxH / 2 }],
+            }}
+          />
         ))}
       </View>
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
-  wrap: {
-    ...StyleSheet.absoluteFill,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    overflow: 'hidden',
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-  },
-  bar: {
-    flex: 1,
-    marginHorizontal: 3,
-    borderRadius: 999,
-    overflow: 'hidden',
-    backgroundColor: 'transparent',
-  },
+  wrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
+  bottomShade: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+  row: { position: 'absolute', flexDirection: 'row', alignItems: 'flex-end' },
 });

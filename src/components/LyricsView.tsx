@@ -10,6 +10,7 @@ import {
   LyricsData,
   activeLineIndex,
   fetchOnlineLrc,
+  calibrateEstimate,
   isSectionLine,
   loadLyrics,
   parseLrc,
@@ -18,6 +19,7 @@ import {
 } from '../services/lyrics';
 import { usePosition } from '../hooks/useAudioController';
 import { colors, formatTime, type } from '../theme';
+import { alignBySpeech, speechAlignAvailable } from '../services/lyricsAlign';
 import { Glass, PressableScale } from './ui';
 
 const savedCache = new Map<string, LyricsData>();
@@ -32,6 +34,7 @@ const LyricRow = React.memo(function LyricRow(p: {
   /** расстояние до активной строки (0…5) */
   dist: number;
   onPress: (index: number) => void;
+  onLongPress?: (index: number) => void;
   onLayoutY: (index: number, y: number) => void;
 }) {
   const a = useRef(new Animated.Value(p.active ? 1 : 0)).current;
@@ -40,7 +43,7 @@ const LyricRow = React.memo(function LyricRow(p: {
   }, [p.active, a]);
   const rest = DIST_OPACITY[Math.min(5, p.dist)];
   return (
-    <Pressable onPress={() => p.onPress(p.index)} onLayout={(e) => p.onLayoutY(p.index, e.nativeEvent.layout.y)}>
+    <Pressable onPress={() => p.onPress(p.index)} onLongPress={() => p.onLongPress?.(p.index)} delayLongPress={450} onLayout={(e) => p.onLayoutY(p.index, e.nativeEvent.layout.y)}>
       <Animated.Text
         style={[
           p.line.section ? styles.section : styles.line,
@@ -114,6 +117,8 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
   const [data, setData] = useState<LyricsData | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [aligning, setAligning] = useState(false);
+  const alignTried = useRef<Set<string>>(new Set());
   const [showOffset, setShowOffset] = useState(false);
   const [stamps, setStamps] = useState<number[]>([]);
   const [following, setFollowing] = useState(true);
@@ -193,7 +198,8 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
       }
       if (cancelled) return;
       if (local) setData(local);
-      if (local?.synced) {
+      // сохранённый/свой .lrc — окончательный; всё остальное (SYLT, текст из файла) сначала сверяем с онлайн-базой
+      if (local?.source === 'lrc-file') {
         savedCache.set(track.id, local);
         setSearching(false);
         return;
@@ -201,15 +207,45 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
       // 2) сеть (LRCLIB): ждём, пока плеер узнает длительность — по ней выбирается нужная версия
       for (let i = 0; i < 12 && durationRef.current <= 0 && !cancelled; i++) await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
+      let result: LyricsData | null = local;
       try {
         const online = await loadLyrics(track, durationRef.current, true);
         if (cancelled) return;
-        if (online.synced || !local || local.source === 'none') setData(online);
-        if (online.synced) savedCache.set(track.id, online);
+        if (online.source === 'lrclib' || online.source === 'lrc-file') {
+          setData(online);
+          ys.current = {};
+          savedCache.set(track.id, online);
+          result = online;
+        } else if (!local || local.source === 'none') {
+          setData(online);
+          result = online;
+        } else if (local.synced) savedCache.set(track.id, local);
       } catch (e) {
         console.warn('[lyrics] online load error:', e);
       } finally {
         if (!cancelled) setSearching(false);
+      }
+
+      // 3) тайминги так и не нашлись (в базе нет) — подгоняем ТЕКСТ ИЗ ФАЙЛА по голосу в самом треке
+      if (!cancelled && result && !result.synced && result.plain.length >= 4 && speechAlignAvailable() && !alignTried.current.has(track.id)) {
+        alignTried.current.add(track.id);
+        setAligning(true);
+        try {
+          const dur = durationRef.current || engine.getDuration();
+          const lines = await alignBySpeech(track.uri, result.plain, dur);
+          if (!cancelled && lines) {
+            const d: LyricsData = { lines, synced: true, source: 'aligned', plain: result.plain };
+            ys.current = {};
+            setData(d);
+            savedCache.set(track.id, d);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            saveLrc(track, lines).catch(() => {});
+          }
+        } catch (e) {
+          console.warn('[lyrics] align error:', e);
+        } finally {
+          if (!cancelled) setAligning(false);
+        }
       }
     })();
 
@@ -299,6 +335,23 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     }
   };
 
+  /** Долгое нажатие на строку приблизительного текста: «вот здесь её поют» — тайминги подстраиваются и сохраняются */
+  const calibrateLine = useCallback(
+    (i: number) => {
+      if (!track || !data || data.synced) return;
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      const dur = durationRef.current || engine.getDuration();
+      const fixed = calibrateEstimate(data.lines, i, engine.getPosition(), dur);
+      const updated: LyricsData = { ...data, lines: fixed, synced: true, source: 'lrc-file' };
+      setData(updated);
+      savedCache.set(track.id, updated);
+      saveLrc(track, fixed)
+        .then(() => onSaved())
+        .catch(() => {});
+    },
+    [track, data, engine, onSaved]
+  );
+
   /** Нажатие на строку: перемотка к ней, строка сразу становится активной, и текст снова следует за песней */
   const linesRef = useRef(lines);
   linesRef.current = lines;
@@ -351,6 +404,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
           active={i === active}
           dist={active < 0 ? 3 : Math.abs(i - active)}
           onPress={onPressLine}
+          onLongPress={data && !data.synced ? calibrateLine : undefined}
           onLayoutY={onLayoutY}
         />
       )),
@@ -365,7 +419,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         <Ionicons name="text" size={40} color={colors.text3} />
         <Text style={styles.emptyTitle}>Текст не найден</Text>
         <Text style={styles.emptyText}>
-          В файле нет встроенного текста. Можно найти синхронизированный текст в онлайн-каталоге или положить рядом с треком файл .lrc с тем же именем.
+          В базе и в файле текст не найден. Можно повторить поиск или положить рядом с треком файл .lrc с тем же именем.
         </Text>
         <PressableScale onPress={fetchOnline} scaleTo={0.96} style={{ marginTop: 12 }}>
           <View style={styles.findBtn}>
@@ -381,9 +435,13 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     ? 'Разметка'
     : searching
     ? 'Поиск текста…'
+    : aligning
+    ? 'Подгоняю по голосу…'
     : data?.synced
     ? data.source === 'lrclib'
-      ? 'Синхронизирован (LRCLIB)'
+      ? 'Синхронизирован (база)'
+      : data.source === 'aligned'
+      ? 'Подогнан по голосу'
       : 'Синхронизирован'
     : 'Приблизительно';
 
@@ -393,7 +451,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         <View style={styles.statusRow}>
           <Glass radius={12} style={{ height: 26 }}>
             <View style={styles.chip}>
-              {searching ? (
+              {searching || aligning ? (
                 <ActivityIndicator size="small" color={colors.text} style={{ transform: [{ scale: 0.6 }] }} />
               ) : (
                 <View style={[styles.dot, { backgroundColor: data.synced ? '#30d158' : colors.text3 }]} />
@@ -418,6 +476,10 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
             </View>
           )}
         </View>
+      )}
+
+      {data && !data.synced && data.lines.length > 0 && !syncing && (
+        <Text style={styles.hint}>Тайминги приблизительные. Удерживайте строку, когда её поют, — текст подстроится.</Text>
       )}
 
       {/* Быстрая калибровка смещения (+/- 0.5с / 0.1с) */}
@@ -526,6 +588,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
 };
 
 const styles = StyleSheet.create({
+  hint: { color: colors.text3, fontSize: 12, lineHeight: 16, paddingHorizontal: 24, marginTop: 6, marginBottom: 2, textAlign: 'center' },
   line: { fontSize: 27, fontWeight: '700', letterSpacing: -0.5, color: colors.text, paddingVertical: 8, transformOrigin: 'left center' },
   section: {
     fontSize: 13,

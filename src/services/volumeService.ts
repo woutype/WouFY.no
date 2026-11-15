@@ -67,7 +67,7 @@ function getVM(): NativeVolumeManager | null {
       try {
         // Устанавливаем режим Playback (чтобы звук играл при аппаратном беззвучном переключателе)
         Promise.resolve(vm.enableInSilenceMode?.(true)).catch(() => {});
-        Promise.resolve(vm.setCategory?.('Playback', true)).catch(() => {});
+        // категорию сессии задаёт только audioService (doNotMix) — иначе пропадает экран блокировки/Dynamic Island
         configureAudioSession(true);
       } catch {
         /* необязательно */
@@ -105,8 +105,10 @@ function setupNativeListener() {
     // addVolumeListener в нативном коде iOS переопределяет категорию на Ambient;
     // сразу возвращаем категорию Playback и активную сессию
     Promise.resolve(VM.enableInSilenceMode?.(true)).catch(() => {});
-    Promise.resolve(VM.setCategory?.('Playback', true)).catch(() => {});
+    // addVolumeListener на iOS переключает категорию на Ambient — возвращаем «Playback / doNotMix».
+    // Делаем это дважды (сразу и чуть позже), чтобы гарантированно перебить нативный вызов библиотеки.
     configureAudioSession(true);
+    setTimeout(() => configureAudioSession(true), 400);
 
     removeNativeListener = () => {
       try {

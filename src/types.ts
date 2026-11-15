@@ -24,7 +24,11 @@ export interface TrackFile {
   size?: number;
   mtime?: number;
   trackNumber?: number;
+  /** номер диска (для многодисковых альбомов) */
+  discNumber?: number;
   extension: AudioExtension;
+  /** теги уже прочитаны из файла (false — трек показан по имени файла, теги дочитываются в фоне) */
+  tagged?: boolean;
 }
 
 export interface DJSettings {
@@ -45,3 +49,33 @@ export const DEFAULT_DJ: DJSettings = {
   bpmTransitionEnabled: true,
   fadeVolumeEnabled: true,
 };
+
+/** Звуковые эффекты (реверберация, 8D, Slowed, Speed Up) */
+export interface FxSettings {
+  /** общий тумблер «Включить звуковые эффекты» */
+  enabled: boolean;
+  reverb: boolean;
+  /** 0–100: доля обработанного сигнала */
+  reverbAmount: number;
+  spatial8d: boolean;
+  slowed: boolean;
+  /** реверберация, привязанная к Slowed */
+  slowedReverb: boolean;
+  slowedReverbAmount: number;
+  speedUp: boolean;
+}
+
+export const DEFAULT_FX: FxSettings = {
+  enabled: false,
+  reverb: false,
+  reverbAmount: 35,
+  spatial8d: false,
+  slowed: false,
+  slowedReverb: true,
+  slowedReverbAmount: 40,
+  speedUp: false,
+};
+
+/** Скорость/высота тона для Slowed и Speed Up (как в «slowed + reverb» и nightcore: темп и тон меняются вместе) */
+export const SLOWED_RATE = 0.85;
+export const SPEEDUP_RATE = 1.25;

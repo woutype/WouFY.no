@@ -16,7 +16,10 @@
         "UIBackgroundModes": [
           "audio"
         ],
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleDisplayName": "WouFY.no",
+        "UISupportsDocumentBrowser": false,
+        "NSSpeechRecognitionUsageDescription": "WouFY.no распознаёт вокал в треке (встроенным распознаванием речи iOS), чтобы точно подогнать текст песни под звучание."
       }
     },
     "android": {

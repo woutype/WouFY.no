@@ -2,13 +2,15 @@ import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore }
 import { ActivityIndicator, Alert, Animated, AppState, Platform, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { scanLibrary } from './src/services/fileScanner';
+import { enrichTracks, scanLibrary } from './src/services/fileScanner';
+import { sampleBus } from './src/services/sampleBus';
+import { musicHaptics } from './src/services/musicHaptics';
 import { bpmService } from './src/services/bpm';
 import { volumeService } from './src/services/volumeService';
 import { flushState, getState, loadCachedTracks, loadState, patchState } from './src/services/library';
 import { useAudioEngine, useEngineState } from './src/hooks/useAudioController';
 import { useMetrics } from './src/layout';
-import { DEFAULT_DJ, DJSettings, TrackFile } from './src/types';
+import { DEFAULT_DJ, DEFAULT_FX, DJSettings, FxSettings, TrackFile } from './src/types';
 import { colors } from './src/theme';
 import { AmbientBackground } from './src/components/ui';
 import { NowPlayingCard } from './src/components/NowPlayingCard';
@@ -29,22 +31,37 @@ function Root() {
   const [search, setSearch] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [dj, setDj] = useState<DJSettings>(DEFAULT_DJ);
+  const [fx, setFxState] = useState<FxSettings>(DEFAULT_FX);
+  const [hapticsOn, setHapticsOn] = useState(false);
+  const libRef = useRef<Map<string, TrackFile>>(new Map());
   const progress = useRef(new Animated.Value(1)).current;
 
   // перерисовка при появлении нового BPM
   useSyncExternalStore(bpmService.subscribe.bind(bpmService), () => bpmService.version);
 
   /* ───────── загрузка библиотеки ───────── */
-  const rescan = useCallback(async () => {
-    try {
-      const found: TrackFile[] = await scanLibrary();
-      bpmService.registerTags(found);
-      setLibCount(found.length);
-      const st = getState();
-      engine.setLibrary(found, st.order, st.lastTrackId);
-    } catch (e) {
-      console.error('Scan error:', e);
-    }
+  // Список файлов показывается МГНОВЕННО (по именам файлов); теги и обложки дочитываются в фоне пачками.
+  const rescan = useCallback(async (): Promise<string> => {
+    const res = await scanLibrary();
+    // не откатываем уже прочитанные теги, если кэш на диске ещё не успели обновить
+    const merged = res.tracks.map((t) => {
+      const known = libRef.current.get(t.id);
+      return known && known.tagged && t.tagged === false ? { ...known, uri: t.uri, lrcUri: t.lrcUri } : t;
+    });
+    libRef.current = new Map(merged.map((t) => [t.id, t]));
+    bpmService.registerTags(merged);
+    setLibCount(merged.length);
+    const st = getState();
+    engine.setLibrary(merged, st.order, st.lastTrackId);
+    enrichTracks(merged, (upd) => {
+      for (const u of upd) libRef.current.set(u.id, u);
+      bpmService.registerTags([...libRef.current.values()]);
+      engine.patchTracks(upd);
+    });
+    const parts = [`Найдено: ${merged.length}`];
+    if (res.added) parts.push(`новых: ${res.added}`);
+    if (res.removed) parts.push(`удалено: ${res.removed}`);
+    return parts.join(' · ');
   }, [engine]);
 
   useEffect(() => {
@@ -64,6 +81,10 @@ function Root() {
       const settings = { ...DEFAULT_DJ, ...(st.dj ?? {}) };
       setDj(settings);
       engine.setDJ(settings);
+      const fxSettings = { ...DEFAULT_FX, ...(st.fx ?? {}) };
+      setFxState(fxSettings);
+      engine.setFx(fxSettings);
+      setHapticsOn(Boolean(st.musicHaptics));
       try {
         const curVol = await volumeService.getVolume();
         engine.setVolume(curVol, false);
@@ -72,9 +93,10 @@ function Root() {
       }
       if (st.repeat) engine.setRepeat(st.repeat);
 
-      // Мгновенная инициализация из дискового кэша (0.05 сек)
+      // Мгновенная инициализация из дискового кэша
       const cached = await loadCachedTracks();
       if (cached.length > 0) {
+        libRef.current = new Map(cached.map((t) => [t.id, t]));
         bpmService.registerTags(cached);
         setLibCount(cached.length);
         engine.setLibrary(cached, st.order, st.lastTrackId);
@@ -82,8 +104,12 @@ function Root() {
         setReady(true);
       }
 
-      // Быстрая фоновая проверка изменений в файловой системе
-      await rescan();
+      // Сверка со списком файлов: на 1300 треков занимает доли секунды, интерфейс не блокируется
+      try {
+        await rescan();
+      } catch (e) {
+        console.error('Scan error:', e);
+      }
       if (cached.length === 0) {
         if (st.shuffle) engine.setShuffle(true);
         setReady(true);
@@ -91,7 +117,8 @@ function Root() {
     })();
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') {
-        rescan(); // подхватываем файлы, добавленные через «Файлы»
+        engine.resyncSession(); // возвращаем аудио-сессию (экран блокировки / Dynamic Island) после фона
+        rescan().catch(() => {}); // подхватываем файлы, добавленные через «Файлы»
         volumeService.getVolume().then((vol) => engine.setVolume(vol, false));
       } else {
         flushState();
@@ -101,13 +128,43 @@ function Root() {
   }, [engine, rescan]);
 
   useEffect(() => {
-    bpmService.setActivePlayback(state.isPlaying);
+    bpmService.setActivePlayback(state.isPlaying); // запасной режим анализа (без нативного модуля) работает только при остановленной музыке
   }, [state.isPlaying]);
+  // шина семплов следует за главным плеером; тактильный отклик работает только во время воспроизведения
+  useEffect(() => {
+    sampleBus.setPlayer(state.player);
+  }, [state.player]);
+  const curTrackId = state.queue[state.index]?.id;
+  useEffect(() => {
+    // после смены трека/старта у expo-audio слетает семплирование — переустанавливаем (волна и тактильный отклик)
+    sampleBus.refresh();
+  }, [curTrackId, state.isPlaying, state.player]);
+  useEffect(() => {
+    musicHaptics.configure({
+      getPosition: () => engine.getPosition(),
+      getGrid: () => {
+        const t = engine.currentTrack;
+        return t ? bpmService.gridOf(t.id) : undefined;
+      },
+    });
+  }, [engine]);
+  useEffect(() => {
+    musicHaptics.setEnabled(hapticsOn && state.isPlaying);
+  }, [hapticsOn, state.isPlaying]);
 
   const updateDj = (s: DJSettings) => {
     setDj(s);
     engine.setDJ(s);
     patchState({ dj: s });
+  };
+  const updateFx = (s: FxSettings) => {
+    setFxState(s);
+    engine.setFx(s);
+    patchState({ fx: s });
+  };
+  const toggleHaptics = (on: boolean) => {
+    setHapticsOn(on);
+    patchState({ musicHaptics: on });
   };
 
   /* ───────── карточка плеера ↔ вторичный экран ───────── */
@@ -176,7 +233,7 @@ function Root() {
       <View style={styles.loading}>
         <StatusBar style="light" />
         <ActivityIndicator color={colors.text2} />
-        <Text style={styles.loadingText}>Загрузка библиотеки…</Text>
+        <Text style={styles.loadingText}>Загрузка…</Text>
       </View>
     );
   }
@@ -213,7 +270,9 @@ function Root() {
             onPlay={(i, track) => (track ? engine.playTrack(track) : engine.playIndex(i))}
             onMove={(a, b) => engine.moveQueueItem(a, b)}
             onReorder={(q) => engine.reorderQueue(q)}
-            onRefresh={rescan}
+            onRefresh={async () => {
+              await rescan();
+            }}
             bottomPad={bottomPad}
           />
           <LyricsView
@@ -246,11 +305,15 @@ function Root() {
         visible={showSettings}
         settings={dj}
         onUpdateSettings={updateDj}
+        fx={fx}
+        onUpdateFx={updateFx}
+        fxNativeReady={engine.fxNativeReady}
+        fxActive={engine.fxActive}
+        musicHaptics={hapticsOn}
+        onToggleHaptics={toggleHaptics}
         onClose={() => setShowSettings(false)}
         trackCount={libCount}
         onRescan={rescan}
-        bpmInfo={track ? { title: track.title, bpm, source: bpmSource } : undefined}
-        onEditBpm={editBpm}
       />
     </View>
   );
