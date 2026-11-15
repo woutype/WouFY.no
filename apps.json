@@ -13,7 +13,7 @@
       "version": "1.0.0",
       "versionDate": "2026-11-16",
       "versionDescription": "Архитектура Spotify Local Files: мгновенное обнаружение треков и оригинальные обложки.",
-      "downloadURL": "https://github.com/woutype/WouFY.no/raw/main/woufy.ipa",
+      "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/latest/woufy.ipa",
       "localizedDescription": "Офлайн-плеер с нативным аудиодвижком, поддержкой кнопок экрана блокировки и мгновенным чтением треков.",
       "iconURL": "https://raw.githubusercontent.com/woutype/WouFY.no/main/assets/icon.png",
       "tintColor": "1ED760",
