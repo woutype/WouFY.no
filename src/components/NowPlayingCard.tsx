@@ -6,7 +6,7 @@ import { AudioEngine, EngineState } from '../services/audioEngine';
 import { TrackFile } from '../types';
 import { Metrics } from '../layout';
 import { colors, radius, type } from '../theme';
-import { AmbientBackground, CoverArt, Glass, IconButton, PressableScale } from './ui';
+import { CoverArt, Glass, IconButton, PressableScale } from './ui';
 import { ArtworkCarousel } from './ArtworkCarousel';
 import { PlayerControls } from './PlayerControls';
 import { usePosition } from '../hooks/useAudioController';
@@ -42,8 +42,9 @@ const MiniTrackCenter: React.FC<{
   track?: TrackFile;
   engine: AudioEngine;
   duration: number;
-}> = ({ track, engine, duration }) => {
-  const pos = usePosition(engine, 250);
+  active: boolean;
+}> = ({ track, engine, duration, active }) => {
+  const pos = usePosition(engine, 500, active);
   const ratio = duration > 0 ? clamp(pos / duration, 0, 1) : 0;
   return (
     <View style={styles.miniCenterCol}>
@@ -114,7 +115,8 @@ export const NowPlayingCard: React.FC<Props> = ({
     let anim: Animated.CompositeAnimation | null = null;
     let active = true;
 
-    if (state.isPlaying) {
+    // вращение винила видно только в мини-плеере; в раскрытом плеере оно раньше крутилось невидимо и каждый кадр перерисовывало слой
+    if (state.isPlaying && !expanded) {
       const step = () => {
         if (!active) return;
         const start = currentAngle.current % 1;
@@ -146,7 +148,7 @@ export const NowPlayingCard: React.FC<Props> = ({
       active = false;
       rotAnim.stopAnimation();
     };
-  }, [state.isPlaying, rotAnim]);
+  }, [state.isPlaying, expanded, rotAnim]);
 
   const makePan = (condition: (dx: number, dy: number) => boolean) =>
     PanResponder.create({
@@ -203,10 +205,8 @@ export const NowPlayingCard: React.FC<Props> = ({
       pointerEvents="box-none"
       style={[styles.card, { width: m.W, height: m.H, transform: [{ translateY: cardY }] }]}
     >
-      {/* Фон полного плеера: размытая обложка */}
-      <Animated.View style={[StyleSheet.absoluteFill, styles.bgFull, { opacity: bgOpacity }]} pointerEvents="none">
-        <AmbientBackground uri={track?.artworkUri} />
-      </Animated.View>
+      {/* Фон полного плеера: размытая обложка лежит один раз в корне приложения; здесь только подложка, которая плавно появляется */}
+      <Animated.View style={[StyleSheet.absoluteFill, styles.bgFull, { opacity: bgOpacity }]} pointerEvents="none" />
 
       {/* Полный плеер */}
       <Animated.View
@@ -236,6 +236,7 @@ export const NowPlayingCard: React.FC<Props> = ({
           onEditBpm={onEditBpm}
           onOpenQueue={() => onOpenSheet('queue')}
           onOpenLyrics={() => onOpenSheet('lyrics')}
+          active={expanded}
         />
         <View style={{ height: m.bottom }} />
       </Animated.View>
@@ -250,7 +251,7 @@ export const NowPlayingCard: React.FC<Props> = ({
           index={state.index}
           size={m.cover}
           isPlaying={state.isPlaying}
-          showWaveform={showWave}
+          showWaveform={showWave && expanded}
           onNext={() => engine.next()}
           onPrevious={() => engine.previous()}
           onDragDownGrant={() => {
@@ -285,7 +286,7 @@ export const NowPlayingCard: React.FC<Props> = ({
             <View style={{ width: m.thumb, height: m.thumb, marginLeft: 2, marginRight: 8 }} />
             
             {/* Текст + таймлайн ПОД текстом (между обложкой и кнопками) */}
-            <MiniTrackCenter track={track} engine={engine} duration={state.duration} />
+            <MiniTrackCenter track={track} engine={engine} duration={state.duration} active={!expanded} />
 
             {/* Блок из трёх кнопок справа */}
             <View style={styles.miniBtnGroup}>
@@ -343,7 +344,7 @@ const styles = StyleSheet.create({
   abs: { position: 'absolute' },
   bgFull: {
     overflow: 'hidden',
-    backgroundColor: colors.bg,
+    backgroundColor: 'rgba(8,8,8,0.0)',
   },
   topBar: {
     flexDirection: 'row',

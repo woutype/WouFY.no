@@ -18,6 +18,7 @@ export interface WoufyFXNative {
   setPitchCents(id: string, c: number): void;
   setReverb(id: string, amount: number): void;
   setSpatial(id: string, on: boolean): void;
+  setTempoProcessing(id: string, on: boolean): void;
   setSampling(id: string, on: boolean): void;
   analyzeWindow(uri: string, start: number, len: number): Promise<{ energies: number[]; lows: number[]; sr: number; c: number; duration: number }>;
   recognizeSpeech(uri: string, locale: string): Promise<{ text: string; start: number; dur: number }[]>;

@@ -5,6 +5,7 @@ import { configureAudioSession } from './audioService';
 import { volumeService } from './volumeService';
 import type { PlayerLike, PlayerStatus } from './playerLike';
 import { createFxPlayer, fxNativeAvailable, fxRemote } from './fxPlayer';
+import { SortOption, applySort, matchesQuery, normQuery } from './queueOrder';
 
 type AudioPlayer = PlayerLike;
 type AudioStatus = PlayerStatus;
@@ -22,6 +23,12 @@ export interface EngineState {
   mixing: boolean;
   /** плеер, который сейчас «владеет» UI (для визуализатора) */
   player: AudioPlayer | null;
+  /** сортировка очереди (применяется к самой очереди) */
+  sort: SortOption;
+  /** активен поиск: очередь = только найденные треки */
+  filtered: boolean;
+  /** играющий сейчас трек не подходит под фильтр: он закреплён первым в очереди и в списке не показывается */
+  pinned: boolean;
 }
 
 interface Transition {
@@ -48,6 +55,10 @@ interface Transition {
   /** запасной режим: 0 — темп не менялся, 1 — сменён у A, 2 — сменён и у B */
   swapStage: 0 | 1 | 2;
   swapAt: number;
+  /** нативный режим: сколько грубых фазовых перемоток B уже сделано (≤2), когда последняя, идёт ли сейчас */
+  seeks: number;
+  lastSeekAt: number;
+  seeking: boolean;
 }
 
 /** Подготовка трека B: загружен и стоит на своём бите, ждёт момента старта */
@@ -65,6 +76,8 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  * 40 мс = 25 Гц обновлений громкости — идеально плавный fade без лишней нагрузки на bridge.
  */
 const TICK_MS = 40;
+/** Вдали от склейки таймеру нечего делать часто: просыпаемся редко (меньше работы для процессора → меньше нагрев) */
+const TICK_IDLE_MS = 400;
 /**
  * Два режима подгона темпа при склейке:
  *  • нативный движок (AVAudioEngine, FxPlayer): темп меняется непрерывно и бесшовно (шаг 45 мс) + фазовая автоподстройка (PLL);
@@ -84,8 +97,8 @@ const PITCH_Q = 'high' as const;
 /** Опережение старта B, сек (задержка команды play) */
 const START_LEAD_SEC = 0.05;
 /** Усиление и предел фазовой автоподстройки B к битам A (нативный движок) */
-const PLL_GAIN = 0.35;
-const PLL_MAX = 0.02;
+const PLL_GAIN = 0.8;
+const PLL_MAX = 0.03;
 /** За сколько секунд до конца трека начинаем предзагрузку следующего (буферизация). */
 const PRELOAD_AHEAD_SEC = 30;
 
@@ -157,6 +170,17 @@ export class AudioEngine {
   private onPersist: (s: { order: string[]; shuffle: boolean; repeat: RepeatMode; volume: number; lastTrackId?: string }) => void =
     () => {};
   private lastUserVolumeChangeAt = 0;
+  /** текущий период таймера (адаптивный: редко вдали от склейки, часто во время неё) */
+  private tickMs = TICK_IDLE_MS;
+  /** после смены режима плееров (эффекты вкл/выкл) статус «пауза» от плеера не считается внешней паузой */
+  private syncGuardUntil = 0;
+  /** эффекты больше не нужны, но режим AVAudioEngine оставлен до паузы/смены трека — чтобы не рвать воспроизведение */
+  private pendingNative = false;
+  /** фильтры очереди */
+  private query = '';
+  private sortMode: SortOption = 'default';
+  /** порядок перемешивания ВСЕЙ библиотеки (очередь = он же, отфильтрованный) */
+  private shufflePerm: string[] = [];
 
   constructor() {
     configureAudioSession(true);
@@ -171,9 +195,12 @@ export class AudioEngine {
       repeat: 'off',
       mixing: false,
       player: this.players[0],
+      sort: 'default',
+      filtered: false,
+      pinned: false,
     };
     this.attachPlayers();
-    this.timer = setInterval(this.tick, TICK_MS);
+    this.timer = setInterval(this.tick, this.tickMs);
 
     fxRemote.handler = (cmd, pos) => this.handleRemote(cmd, pos);
 
@@ -192,7 +219,7 @@ export class AudioEngine {
   private makePlayers(mode: 'native' | 'fx'): AudioPlayer[] {
     if (mode === 'fx') return [createFxPlayer(), createFxPlayer()];
     return [0, 1].map(
-      () => createAudioPlayer(null, { updateInterval: 100, keepAudioSessionActive: true }) as unknown as AudioPlayer
+      () => createAudioPlayer(null, { updateInterval: 250, keepAudioSessionActive: true }) as unknown as AudioPlayer
     );
   }
 
@@ -205,6 +232,8 @@ export class AudioEngine {
   }
 
   private handleRemote(cmd: string, pos?: number) {
+    // сразу после переключения режима плееров iOS может прислать «прерывание» сессии — это не нажатие пользователя
+    if ((cmd === 'pause' || cmd === 'play') && Date.now() < this.syncGuardUntil) return;
     if (cmd === 'play') {
       if (!this.playIntent) this.togglePlay();
     } else if (cmd === 'pause') {
@@ -226,10 +255,17 @@ export class AudioEngine {
       p.setReverb?.(f.reverb);
       p.setSpatial?.(f.spatial);
       p.setPitchCents?.(f.cents);
+      // time-pitch (самый тяжёлый узел цепочки) включаем только когда нужен темп/тон: Slowed, Speed Up или подгон BPM
+      p.setTempoProcessing?.(this.needTempo());
       // Без нативного движка: Slowed / Speed Up работают «по-кассетному» (темп и тон вместе — так и задумано);
       // подгон BPM при склейке — с сохранением высоты тона (темп меняется всего 1–2 раза, см. STEP_SWAP_P), тон не «прыгает».
       if (!p.isFx) p.shouldCorrectPitch = !f.tape;
     });
+  }
+
+  /** Нужна ли обработка темпа/тона (иначе нативный time-pitch отключается — заметно меньше нагрузка на процессор) */
+  private needTempo(): boolean {
+    return this.fxd.speed !== 1 || (this.dj.crossfadeEnabled && this.dj.bpmTransitionEnabled);
   }
 
   /** Кэш последней выставленной скорости: повторная установка того же значения у AVPlayer = лишний провал звука */
@@ -264,9 +300,25 @@ export class AudioEngine {
   private updateMode() {
     const needFx = this.fxd.reverb > 0 || this.fxd.spatial || (this.dj.crossfadeEnabled && this.dj.bpmTransitionEnabled);
     const want: 'native' | 'fx' = needFx && fxNativeAvailable() ? 'fx' : 'native';
-    if (want !== this.mode) {
+    if (want === 'native' && this.mode === 'fx') {
+      // Эффекты выключили, пока музыка играет: пересоздавать плееры посреди трека — значит прервать звук.
+      // Остаёмся на AVAudioEngine без эффектов (реверберация 0 — узел в обходе) и меняем режим на паузе / при смене трека.
+      if (!this.playIntent && !this.trans) {
+        this.switchMode('native');
+        this.pendingNative = false;
+      } else {
+        this.pendingNative = true;
+        this.players.forEach((p) => this.applyFx(p));
+        if (!this.trans) {
+          this.setRate(this.A, 1);
+          this.setRate(this.B, 1);
+        }
+      }
+    } else if (want !== this.mode) {
+      this.pendingNative = false;
       this.switchMode(want);
     } else {
+      this.pendingNative = false;
       this.players.forEach((p) => this.applyFx(p));
       if (!this.trans) {
         this.setRate(this.A, 1);
@@ -276,18 +328,31 @@ export class AudioEngine {
     this.prep = null;
   }
 
+  /** Если эффекты уже не нужны — возвращаем обычные плееры (вызывается на паузе или при смене трека, где разрыв звука не слышен) */
+  private applyPendingMode(restore: boolean) {
+    if (!this.pendingNative || this.mode !== 'fx') return;
+    this.pendingNative = false;
+    const needFx = this.fxd.reverb > 0 || this.fxd.spatial || (this.dj.crossfadeEnabled && this.dj.bpmTransitionEnabled);
+    if (needFx && fxNativeAvailable()) return;
+    this.switchMode('native', restore);
+  }
+
   /** Активен ли нативный движок (для диагностики в настройках) */
   get fxActive() {
     return this.mode === 'fx';
   }
 
   /** Переключает «обычные» плееры ↔ плееры эффектов, сохраняя трек, позицию и состояние воспроизведения */
-  private switchMode(mode: 'native' | 'fx') {
+  private switchMode(mode: 'native' | 'fx', restore = true) {
     if (mode === this.mode) return;
-    const cur = this.currentTrack;
+    const cur = restore ? this.currentTrack : undefined;
     const pos = this.getPosition();
     const was = this.playIntent;
     if (this.trans) this.cancelTransition();
+    // Именно здесь раньше «ставилась на паузу» музыка: новый плеер ещё грузился и отдавал статус «пауза», а движок
+    // принимал это за внешнюю паузу (звонок / наушники) и выключал воспроизведение. Теперь окно защиты + FX-плеер не синхронизируется по статусу.
+    this.lastCommandAt = Date.now();
+    this.syncGuardUntil = Date.now() + 3000;
 
     this.subs.forEach((s) => safe(() => s.remove()));
     this.subs = [];
@@ -318,9 +383,14 @@ export class AudioEngine {
       if (pos > 0.5) safe(() => a.seekTo(pos));
       this.updateLockScreen(a, cur);
       if (was) {
-        configureAudioSession(true).then(() => {
-          if (token === this.playToken && this.playIntent) safe(() => a.play());
-        });
+        if (a.isFx) {
+          // цепочка команд плеера эффектов сама выстраивает порядок «загрузка → перемотка → play», сессию активирует replace()
+          safe(() => a.play());
+        } else {
+          configureAudioSession(true).then(() => {
+            if (token === this.playToken && this.playIntent) safe(() => a.play());
+          });
+        }
       }
     }
   }
@@ -337,9 +407,14 @@ export class AudioEngine {
     if (updated.length === 0) return;
     const map = new Map(updated.map((t) => [t.id, t]));
     this.library = this.library.map((t) => map.get(t.id) ?? t);
-    const queue = this.state.queue.map((t) => map.get(t.id) ?? t);
-    this.state = { ...this.state, queue };
-    this.listeners.forEach((l) => l());
+    if (this.query || this.sortMode !== 'default') {
+      // сортировка/поиск зависят от тегов: пока они дочитываются, очередь пересобирается
+      const d = this.deriveQueue();
+      this.set({ queue: d.queue, index: d.index, pinned: d.pinned });
+    } else {
+      const queue = this.state.queue.map((t) => map.get(t.id) ?? t);
+      this.set({ queue });
+    }
     const cur = this.currentTrack;
     if (cur && map.has(cur.id)) this.updateLockScreen(this.uiPlayer(), cur);
   }
@@ -405,6 +480,46 @@ export class AudioEngine {
 
   /* ───────────── библиотека и очередь ───────────── */
 
+  /**
+   * Очередь = (порядок библиотеки | перемешанный порядок) → сортировка → поиск.
+   * Играющий трек всегда присутствует в очереди: если он не подходит под фильтр, он ставится первым (pinned) —
+   * доиграет, а дальше плеер пойдёт строго по найденным трекам.
+   */
+  private deriveQueue(curId: string | undefined = this.currentTrack?.id, shuffle: boolean = this.state.shuffle) {
+    const byId = new Map(this.library.map((t) => [t.id, t]));
+    const ids = shuffle ? this.shufflePerm : this.baseOrder;
+    let list: TrackFile[] = [];
+    for (const id of ids) {
+      const t = byId.get(id);
+      if (t) list.push(t);
+    }
+    if (!shuffle) list = applySort(list, this.sortMode); // при перемешивании порядок случайный, но поиск действует
+    const q = this.query;
+    if (q) list = list.filter((t) => matchesQuery(t, q));
+    let index = -1;
+    let pinned = false;
+    const cur = curId ? byId.get(curId) : undefined;
+    if (cur) {
+      index = list.findIndex((t) => t.id === cur.id);
+      if (index < 0) {
+        list = [cur, ...list];
+        index = 0;
+        pinned = true;
+      }
+    }
+    return { queue: list, index, pinned };
+  }
+
+  /** Перемешивание всей библиотеки; играющий трек — первым (то, что уже играло, «позади» не появляется) */
+  private makeShufflePerm(curId?: string): string[] {
+    const rest = this.library.map((t) => t.id).filter((id) => id !== curId);
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rest[i], rest[j]] = [rest[j], rest[i]];
+    }
+    return curId ? [curId, ...rest] : rest;
+  }
+
   setLibrary(tracks: TrackFile[], savedOrder?: string[], savedLastId?: string) {
     const prevCurrentId = this.currentTrack?.id;
     this.library = tracks;
@@ -421,28 +536,27 @@ export class AudioEngine {
     for (const t of tracks) if (!seen.has(t.id)) ordered.push(t.id);
     this.baseOrder = ordered;
 
-    let queueIds: string[];
-    if (this.state.shuffle && this.state.queue.length > 0) {
-      const inQueue = new Set<string>();
-      queueIds = [];
-      for (const t of this.state.queue) {
-        if (byId.has(t.id)) {
-          queueIds.push(t.id);
-          inQueue.add(t.id);
+    if (this.state.shuffle) {
+      // перемешанный порядок сохраняется; новые файлы дописываются в конец
+      const inPerm = new Set<string>();
+      const perm: string[] = [];
+      for (const id of this.shufflePerm) {
+        if (byId.has(id) && !inPerm.has(id)) {
+          perm.push(id);
+          inPerm.add(id);
         }
       }
-      for (const id of ordered) if (!inQueue.has(id)) queueIds.push(id);
-    } else {
-      queueIds = ordered;
+      for (const id of ordered) if (!inPerm.has(id)) perm.push(id);
+      this.shufflePerm = perm;
     }
-    const queue = queueIds.map((id) => byId.get(id)!);
 
     const wantedId = prevCurrentId ?? savedLastId;
-    let index = wantedId ? queue.findIndex((t) => t.id === wantedId) : -1;
-    if (index < 0 && queue.length > 0 && !this.playIntent) index = 0;
+    const d = this.deriveQueue(wantedId);
+    let index = d.index;
+    if (index < 0 && d.queue.length > 0 && !this.playIntent) index = 0;
 
-    const changed = queue[index]?.id !== prevCurrentId;
-    this.set({ queue, index });
+    const changed = d.queue[index]?.id !== prevCurrentId;
+    this.set({ queue: d.queue, index, pinned: d.pinned });
     if (changed && index >= 0) this.prepare(index);
     else this.notifyTrackChange();
   }
@@ -487,7 +601,16 @@ export class AudioEngine {
     return [...this.library];
   }
 
+  /** Склейка, идущая в момент изменения очереди, завершается/отменяется — следующий трек мог измениться */
+  private settleTransition() {
+    if (!this.trans) return;
+    if (this.trans.uiSwitched) this.commitTransition();
+    else this.cancelTransition();
+  }
+
   moveQueueItem(from: number, to: number) {
+    // ручная перестановка имеет смысл только в «чистой» очереди: при поиске/сортировке порядок задаёт фильтр
+    if (this.query || this.sortMode !== 'default') return;
     const q = [...this.state.queue];
     if (from < 0 || from >= q.length || to < 0 || to >= q.length || from === to) return;
     const [item] = q.splice(from, 1);
@@ -496,42 +619,41 @@ export class AudioEngine {
     if (from === index) index = to;
     else if (from < index && to >= index) index -= 1;
     else if (from > index && to <= index) index += 1;
-    if (!this.state.shuffle) this.baseOrder = q.map((t) => t.id);
+    const ids = q.map((t) => t.id);
+    if (this.state.shuffle) this.shufflePerm = ids;
+    else this.baseOrder = ids;
     this.prep = null;
     this.set({ queue: q, index });
     setTimeout(() => this.persist(), 50);
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
 
-  reorderQueue(newQueue: TrackFile[]) {
+  setShuffle(on: boolean) {
+    if (on === this.state.shuffle) return;
+    this.settleTransition();
     const cur = this.currentTrack;
-    const index = cur ? newQueue.findIndex((t) => t.id === cur.id) : -1;
-    if (!this.state.shuffle) this.baseOrder = newQueue.map((t) => t.id);
+    if (on) this.shufflePerm = this.makeShufflePerm(cur?.id);
+    const d = this.deriveQueue(cur?.id, on);
     this.prep = null;
-    this.set({ queue: newQueue, index });
-    setTimeout(() => this.persist(), 50);
+    this.set({ shuffle: on, queue: d.queue, index: d.index, pinned: d.pinned });
+    this.persist();
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
 
-  setShuffle(on: boolean) {
-    if (on === this.state.shuffle) return;
-    const cur = this.currentTrack;
-    if (on) {
-      const rest = this.state.queue.filter((t) => t.id !== cur?.id);
-      for (let i = rest.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [rest[i], rest[j]] = [rest[j], rest[i]];
-      }
-      const queue = cur ? [cur, ...rest] : rest;
-      this.set({ shuffle: true, queue, index: cur ? 0 : -1 });
-    } else {
-      const byId = new Map(this.library.map((t) => [t.id, t]));
-      const queue = this.baseOrder.map((id) => byId.get(id)).filter(Boolean) as TrackFile[];
-      const index = cur ? queue.findIndex((t) => t.id === cur.id) : -1;
-      this.set({ shuffle: false, queue, index });
-    }
+  /**
+   * Поиск и сортировка очереди. Очередь пересобирается целиком: «следующий трек» — всегда следующий в том списке,
+   * который показан на экране. С включённым перемешиванием перемешиваются только найденные треки.
+   */
+  setFilter(patch: { query?: string; sort?: SortOption }) {
+    const nq = patch.query !== undefined ? normQuery(patch.query) : this.query;
+    const ns = patch.sort ?? this.sortMode;
+    if (nq === this.query && ns === this.sortMode) return;
+    this.settleTransition();
+    this.query = nq;
+    this.sortMode = ns;
+    const d = this.deriveQueue();
     this.prep = null;
-    this.persist();
+    this.set({ queue: d.queue, index: d.index, pinned: d.pinned, sort: ns, filtered: nq.length > 0 });
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
 
@@ -574,6 +696,7 @@ export class AudioEngine {
     const t = this.state.queue[index];
     if (!t) return;
     if (this.trans) this.cancelTransition();
+    this.applyPendingMode(false); // эффекты отключены, а плееры ещё на AVAudioEngine — меняем их сейчас, звук всё равно переключается на новый трек
     this.mixBlockedFor = null;
     this.errorSkips = 0;
     this.playIntent = true;
@@ -613,6 +736,7 @@ export class AudioEngine {
         if (this.trans) this.trans.to.pause();
       });
       this.set({ isPlaying: false });
+      if (this.pendingNative && !this.trans) this.applyPendingMode(true);
     } else {
       this.playIntent = true;
       const token = ++this.playToken;
@@ -676,8 +800,10 @@ export class AudioEngine {
     if (s.duration > 0 && s.duration !== this.state.duration) patch.duration = s.duration;
 
     // Синхронизация с внешними событиями (звонок, наушники, экран блокировки)
-    const settled = Date.now() - this.lastCommandAt > 800;
-    if (settled && !this.trans) {
+    // У плеера эффектов статус «играет/пауза» — лишь отражение наших же команд (внешние паузы приходят отдельным событием onRemote),
+    // поэтому сверять с ним нечего: именно такая сверка и «выключала» музыку при включении эффектов.
+    const settled = Date.now() - this.lastCommandAt > 800 && Date.now() > this.syncGuardUntil;
+    if (settled && !this.trans && !player.isFx) {
       if (s.timeControlStatus === 'paused' && this.playIntent && s.isLoaded && !s.didJustFinish && !s.isBuffering) {
         this.playIntent = false;
         patch.isPlaying = false;
@@ -809,22 +935,40 @@ export class AudioEngine {
     this.onMixingChange(b);
   }
 
+  private setTickRate(ms: number) {
+    if (ms === this.tickMs) return;
+    this.tickMs = ms;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = setInterval(this.tick, ms);
+  }
+
   private tick = () => {
-    if (!this.playIntent) return;
+    if (!this.playIntent) {
+      this.setTickRate(TICK_IDLE_MS);
+      return;
+    }
     const a = this.A;
     const pos = safe(() => a.currentTime) ?? 0;
     const dur = safe(() => a.duration) ?? 0;
-    if (dur <= 0) return;
+    if (dur <= 0) {
+      this.setTickRate(TICK_IDLE_MS);
+      return;
+    }
 
     if (this.trans) {
+      this.setTickRate(TICK_MS);
       this.setBusy(true);
       this.driveTransition(pos, dur);
       return;
     }
 
     const X = this.dj.crossfadeDuration;
+    const remaining0 = dur - pos;
     // фоновый анализ BPM не мешает только вдали от склейки: перед ней и во время неё он приостанавливается
-    this.setBusy(this.dj.crossfadeEnabled && dur - pos <= PRELOAD_AHEAD_SEC + X * 1.5 + 10);
+    this.setBusy(this.dj.crossfadeEnabled && remaining0 <= PRELOAD_AHEAD_SEC + X * 1.5 + 10);
+    // таймер частый только рядом со склейкой; во всё остальное время — редкий (раньше 25 раз в секунду круглые сутки)
+    const nearMix = this.dj.crossfadeEnabled && remaining0 <= PRELOAD_AHEAD_SEC + X * 1.5 + 14;
+    this.setTickRate(nearMix ? TICK_MS : TICK_IDLE_MS);
     if (!this.dj.crossfadeEnabled || this.state.repeat === 'one' || !this.currentTrack) return;
     if (this.mixBlockedFor === this.currentTrack.id) return;
     const nextIdx = this.nextIndexAuto();
@@ -884,7 +1028,11 @@ export class AudioEngine {
       lastPhaseFixAt: 0,
       swapStage: 0,
       swapAt: 0,
+      seeks: 0,
+      lastSeekAt: now,
+      seeking: false,
     };
+    this.setTickRate(TICK_MS);
     this.set({ mixing: true });
     this.setBusy(true);
   };
@@ -922,21 +1070,43 @@ export class AudioEngine {
     if (p >= 1 || pos >= dur - 0.06) this.commitTransition();
   }
 
-  /** Нативный движок: непрерывная смена темпа (шаг 45 мс) + мягкая фазовая автоподстройка (PLL) — без единого разрыва */
+  /**
+   * Нативный движок: непрерывная смена темпа (шаг 45 мс) + фазовая автоподстройка (PLL), чтобы удары легли ДРУГ НА ДРУГА, а не рядом.
+   * Раньше B стартовал с разбросом в десятки миллисекунд (задержка команды play), а петля была слишком медленной и включалась
+   * только через 0.6 с — удары «двоились». Теперь: (1) позиция нативного плеера считается по реально отрендеренным семплам,
+   * (2) в первые доли склейки, пока B почти не слышен, он одной короткой перемоткой встаёт на бит, (3) дальше фазу доводит быстрый PLL.
+   */
   private driveSmoothTempo(t: Transition, p: number, pos: number, now: number) {
     if (now - t.lastRateAt < FX_RATE_STEP_MS) return;
     const base = ratesAt(t.plan, p);
     let rateB = base.rateB;
 
-    // Мягкая фазовая автоподстройка: чуть подруливаем скорость B, чтобы удары легли друг на друга (без перемоток)
-    if (t.plan.beatSync && t.elapsedMs > 600) {
+    if (t.plan.beatSync && t.elapsedMs > 140 && !t.seeking) {
       const tb = safe(() => t.to.currentTime);
       if (tb !== undefined && Number.isFinite(tb)) {
         const phiA = beatPhase(pos, t.plan.phaseA, t.plan.periodA);
         const phiB = beatPhase(tb, t.plan.phaseB, t.plan.periodB);
         const err = wrapHalf(phiA - phiB); // >0 — B отстаёт от бита
+        const errSec = err * t.plan.periodB; // то же в секундах файла B
+
+        // грубая подгонка: одна короткая перемотка, пока B тихий (громкость B при p<0.16 ниже −20 дБ)
+        if (t.seeks < 2 && p < 0.16 && now - t.lastSeekAt > 380 && Math.abs(errSec) > 0.012 && Math.abs(errSec) < 0.3) {
+          t.seeks++;
+          t.seeking = true;
+          t.lastSeekAt = now;
+          const rb = Math.max(0.5, t.lastRateB / Math.max(this.fxd.speed, 0.01));
+          Promise.resolve(safe(() => t.to.seekTo(Math.max(0, tb + errSec + 0.02 * rb))))
+            .catch(() => {})
+            .finally(() => {
+              t.seeking = false;
+              t.lastSeekAt = Date.now();
+              t.corr = 0;
+            });
+          return;
+        }
+        // тонкая подгонка: чуть подруливаем скорость B (без перемоток)
         const target = clamp(err * PLL_GAIN, -PLL_MAX, PLL_MAX);
-        t.corr += (target - t.corr) * 0.2;
+        t.corr += (target - t.corr) * 0.3;
       }
     }
     // поправка гасится к концу склейки, чтобы B пришёл ровно в родной темп (1.0) без последнего «ступенчатого» изменения

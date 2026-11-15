@@ -112,14 +112,19 @@ interface Props {
   isPlaying: boolean;
   bottomPad: number;
   onSaved: () => void;
+  /** вкладка «Текст» сейчас на экране: пока она скрыта, строка не отслеживается и голос не распознаётся (экономия процессора) */
+  visible: boolean;
 }
 
-export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying, bottomPad, onSaved }) => {
+export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying, bottomPad, onSaved, visible }) => {
   const [data, setData] = useState<LyricsData | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [searching, setSearching] = useState(false);
   const [aligning, setAligning] = useState(false);
   const alignTried = useRef<Set<string>>(new Set());
+  /** трек, для которого сейчас идёт подгонка по голосу (если пользователь переключил трек — статус сбрасывается) */
+  const aligningFor = useRef<string | null>(null);
+  const verRef = useRef(0);
   const [showOffset, setShowOffset] = useState(false);
   const [stamps, setStamps] = useState<number[]>([]);
   const [following, setFollowing] = useState(true);
@@ -134,7 +139,9 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
   durationRef.current = duration;
 
   const lines = data?.lines ?? [];
-  const { active, pin } = useActiveLine(engine, lines, !syncing && lines.length > 0);
+  const { active, pin } = useActiveLine(engine, lines, visible && !syncing && lines.length > 0);
+  // версия набора строк: при замене текста строки пересоздаются и заново измеряются (раньше после замены измерения терялись — текст переставал листаться)
+  const ver = useMemo(() => ++verRef.current, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setFollow = (v: boolean) => {
     follow.current = v;
@@ -161,7 +168,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
       pendingScroll.current = null;
       scrollRef.current?.scrollTo({ y: 0, animated: true });
     }
-  }, [active, scrollToLine]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, ver, visible, scrollToLine]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Приблизительные тайминги считались, пока плеер ещё не знал длительность (или для другой версии файла) —
   // пересчитываем под настоящую, чтобы текст шёл от первого слова и ровно до конца трека
@@ -170,7 +177,6 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     if (data.forDuration !== undefined && Math.abs(duration - data.forDuration) <= 1) return;
     const fixed: LyricsData = { ...data, lines: buildEstimate(data.plain, duration), forDuration: duration };
     setData(fixed);
-    ys.current = {};
   }, [data, duration]);
 
   const onLayoutY = useCallback(
@@ -185,6 +191,8 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
 
   useEffect(() => {
     let cancelled = false;
+    aligningFor.current = null;
+    setAligning(false);
     setSyncing(false);
     setShowOffset(false);
     setStamps([]);
@@ -242,33 +250,49 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         if (!cancelled) setSearching(false);
       }
 
-      // 3) тайминги так и не нашлись (в базе нет) — подгоняем ТЕКСТ ИЗ ФАЙЛА по голосу в самом треке
-      if (!cancelled && result && !result.synced && result.plain.length >= 4 && speechAlignAvailable() && !alignTried.current.has(track.id)) {
-        alignTried.current.add(track.id);
-        setAligning(true);
-        try {
-          const dur = durationRef.current || engine.getDuration();
-          const lines = await alignBySpeech(track.uri, result.plain, dur);
-          if (!cancelled && lines) {
-            const d: LyricsData = { lines, synced: true, source: 'aligned', plain: result.plain };
-            ys.current = {};
-            setData(d);
-            savedCache.set(track.id, d);
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-            saveLrc(track, lines).catch(() => {});
-          }
-        } catch (e) {
-          console.warn('[lyrics] align error:', e);
-        } finally {
-          if (!cancelled) setAligning(false);
-        }
-      }
     })();
 
     return () => {
       cancelled = true;
     };
   }, [track?.id, track?.lrcUri]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Тайминги в базе не нашлись — подгоняем текст из файла по голосу в самом треке. Только когда вкладка «Текст» открыта
+   * (раньше распознавание запускалось для каждого трека подряд и сильно грело телефон), результат сохраняется в кэш.
+   */
+  useEffect(() => {
+    if (!visible || !track || !data || data.synced || searching || syncing) return;
+    if (data.plain.length < 4 || !speechAlignAvailable() || alignTried.current.has(track.id)) return;
+    alignTried.current.add(track.id);
+    const tr = track;
+    const plain = data.plain;
+    aligningFor.current = tr.id;
+    setAligning(true);
+    (async () => {
+      try {
+        const dur = durationRef.current || engine.getDuration();
+        const lines = await alignBySpeech(tr.uri, plain, dur);
+        if (lines) {
+          saveLrc(tr, lines).catch(() => {});
+          const d: LyricsData = { lines, synced: true, source: 'aligned', plain };
+          savedCache.set(tr.id, d);
+          if (aligningFor.current === tr.id) {
+            setData(d);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          }
+        }
+      } catch (e) {
+        console.warn('[lyrics] align error:', e);
+      } finally {
+        // статус «Подгоняю по голосу» снимается всегда — и после успеха, и после ошибки
+        if (aligningFor.current === tr.id) {
+          aligningFor.current = null;
+          setAligning(false);
+        }
+      }
+    })();
+  }, [visible, track?.id, data, searching, syncing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Принудительный поиск в онлайн-каталоге (кнопки «обновить» / «искать») */
   const fetchOnline = useCallback(async () => {
@@ -414,7 +438,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     () =>
       lines.map((l, i) => (
         <LyricRow
-          key={i}
+          key={`${ver}-${i}`}
           index={i}
           line={l}
           active={i === active}
@@ -424,7 +448,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
           onLayoutY={onLayoutY}
         />
       )),
-    [lines, active, onPressLine, onLayoutY]
+    [lines, active, ver, onPressLine, onLayoutY]
   );
 
   if (!track) return <View style={{ flex: 1 }} />;
@@ -451,7 +475,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     ? 'Разметка'
     : searching
     ? 'Поиск текста…'
-    : aligning
+    : aligning && !data?.synced
     ? 'Подгоняю по голосу…'
     : data?.synced
     ? data.source === 'lrclib'
@@ -467,7 +491,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         <View style={styles.statusRow}>
           <Glass radius={12} style={{ height: 26 }}>
             <View style={styles.chip}>
-              {searching || aligning ? (
+              {searching || (aligning && !data.synced) ? (
                 <ActivityIndicator size="small" color={colors.text} style={{ transform: [{ scale: 0.6 }] }} />
               ) : (
                 <View style={[styles.dot, { backgroundColor: data.synced ? '#30d158' : colors.text3 }]} />

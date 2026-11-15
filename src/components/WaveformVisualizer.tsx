@@ -114,6 +114,8 @@ export function useWaveLevels(enabled: boolean, isPlaying: boolean): Animated.Va
     const loop = (ts: number) => {
       if (!active) return;
       raf = requestAnimationFrame(loop);
+      // обновление полос ~30 раз в секунду: каждая полоса — отдельный вид на каждой из трёх обложек, 60 к/с означало ~5000 обновлений в секунду
+      if (prevTs && ts - prevTs < 30) return;
       const dt = prevTs ? Math.min(0.05, (ts - prevTs) / 1000) : 1 / 60;
       prevTs = ts;
       const atk = 1 - Math.exp(-dt / 0.03);

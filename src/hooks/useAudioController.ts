@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { AudioEngine } from '../services/audioEngine';
+import { useAppActive } from '../services/appActive';
 
 /** Один движок на всё приложение */
 export function useAudioEngine(): AudioEngine {
@@ -17,11 +18,18 @@ export function useEngineState(engine: AudioEngine) {
  * Изолирована в отдельный хук, чтобы по 10 раз в секунду перерисовывался
  * только компонент, которому позиция действительно нужна.
  */
-export function usePosition(engine: AudioEngine, intervalMs = 100): number {
+export function usePosition(engine: AudioEngine, intervalMs = 100, enabled = true): number {
   const [pos, setPos] = useState(() => engine.getPosition());
+  const appActive = useAppActive();
   useEffect(() => {
-    const id = setInterval(() => setPos(engine.getPosition()), intervalMs);
+    if (!enabled || !appActive) return;
+    setPos(engine.getPosition());
+    const id = setInterval(() => {
+      const p = engine.getPosition();
+      // перерисовка только при заметном изменении (раньше — 10 раз в секунду безусловно)
+      setPos((prev) => (Math.abs(prev - p) < 0.04 ? prev : p));
+    }, intervalMs);
     return () => clearInterval(id);
-  }, [engine, intervalMs]);
+  }, [engine, intervalMs, enabled, appActive]);
   return pos;
 }

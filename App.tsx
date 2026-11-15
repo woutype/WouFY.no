@@ -34,6 +34,7 @@ function Root() {
   const [fx, setFxState] = useState<FxSettings>(DEFAULT_FX);
   const [hapticsOn, setHapticsOn] = useState(false);
   const libRef = useRef<Map<string, TrackFile>>(new Map());
+  const lastScanAt = useRef(0);
   const progress = useRef(new Animated.Value(1)).current;
 
   // перерисовка при появлении нового BPM
@@ -48,16 +49,25 @@ function Root() {
       const known = libRef.current.get(t.id);
       return known && known.tagged && t.tagged === false ? { ...known, uri: t.uri, lrcUri: t.lrcUri } : t;
     });
+    const prev = libRef.current;
+    const same = prev.size === merged.length && merged.every((t) => prev.has(t.id));
+    const lrcChanged = same ? merged.filter((t) => prev.get(t.id)?.lrcUri !== t.lrcUri) : [];
     libRef.current = new Map(merged.map((t) => [t.id, t]));
     bpmService.registerTags(merged);
     setLibCount(merged.length);
     const st = getState();
-    engine.setLibrary(merged, st.order, st.lastTrackId);
+    // состав библиотеки не изменился (обычный возврат в приложение) — очередь не пересобираем и не перерисовываем
+    if (!same) engine.setLibrary(merged, st.order, st.lastTrackId);
+    else if (lrcChanged.length) engine.patchTracks(lrcChanged);
+    lastScanAt.current = Date.now();
     enrichTracks(merged, (upd) => {
       for (const u of upd) libRef.current.set(u.id, u);
       bpmService.registerTags([...libRef.current.values()]);
       engine.patchTracks(upd);
-    });
+    }, undefined, (() => {
+      const s = engine.getState();
+      return s.queue.slice(Math.max(0, s.index), Math.max(0, s.index) + 60).map((t) => t.id);
+    })());
     const parts = [`Найдено: ${merged.length}`];
     if (res.added) parts.push(`новых: ${res.added}`);
     if (res.removed) parts.push(`удалено: ${res.removed}`);
@@ -118,7 +128,8 @@ function Root() {
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') {
         engine.resyncSession(); // возвращаем аудио-сессию (экран блокировки / Dynamic Island) после фона
-        rescan().catch(() => {}); // подхватываем файлы, добавленные через «Файлы»
+        // подхватываем файлы, добавленные через «Файлы» (не чаще раза в 20 секунд — сканирование читает диск)
+        if (Date.now() - lastScanAt.current > 20000) rescan().catch(() => {});
         volumeService.getVolume().then((vol) => engine.setVolume(vol, false));
       } else {
         flushState();
@@ -151,6 +162,12 @@ function Root() {
   useEffect(() => {
     musicHaptics.setEnabled(hapticsOn && state.isPlaying);
   }, [hapticsOn, state.isPlaying]);
+
+  // поиск применяется к самой очереди (с небольшой задержкой, чтобы не пересобирать её на каждую букву)
+  useEffect(() => {
+    const t = setTimeout(() => engine.setFilter({ query: search }), search ? 160 : 0);
+    return () => clearTimeout(t);
+  }, [engine, search]);
 
   const updateDj = (s: DJSettings) => {
     setDj(s);
@@ -239,19 +256,21 @@ function Root() {
   }
 
   const sheetScale = progress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.95] });
-  const sheetOpacity = progress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.25] });
+  const sheetOpacity = progress.interpolate({ inputRange: [0, 1], outputRange: [1, 0] });
   const bottomPad = m.miniArea + 12;
 
   return (
     <View style={styles.root}>
       <StatusBar style="light" />
 
+      {/* Размытый фон из обложки — один на всё приложение (раньше было два, и каждый размывался при смене трека) */}
+      <AmbientBackground uri={track?.artworkUri} />
+
       {/* Вторичный экран (под карточкой плеера) */}
       <Animated.View
         style={[StyleSheet.absoluteFill, { opacity: sheetOpacity, transform: [{ scale: sheetScale }] }]}
         pointerEvents={expanded ? 'none' : 'auto'}
       >
-        <AmbientBackground uri={track?.artworkUri} />
         <SheetPanel
           mode={sheet}
           onModeChange={setSheet}
@@ -267,9 +286,11 @@ function Root() {
             isPlaying={state.isPlaying}
             searchQuery={search}
             onSearchChange={setSearch}
+            sortMode={state.sort}
+            onSortChange={(m) => engine.setFilter({ sort: m })}
+            pinned={state.pinned}
             onPlay={(i, track) => (track ? engine.playTrack(track) : engine.playIndex(i))}
             onMove={(a, b) => engine.moveQueueItem(a, b)}
-            onReorder={(q) => engine.reorderQueue(q)}
             onRefresh={async () => {
               await rescan();
             }}
@@ -282,6 +303,7 @@ function Root() {
             isPlaying={state.isPlaying}
             bottomPad={bottomPad}
             onSaved={rescan}
+            visible={!expanded && sheet === 'lyrics'}
           />
         </SheetPanel>
       </Animated.View>

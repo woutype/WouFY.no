@@ -76,7 +76,8 @@ export class FxPlayer implements PlayerLike {
     ensureSubscriptions();
     registry.set(this.id, this);
     WoufyFX?.create(this.id);
-    this.timer = setInterval(() => this.emitStatus(), 100);
+    // статус нужен лишь для «загрузился / доиграл / ошибка»: 4 раза в секунду достаточно (раньше 10 на каждый из двух плееров)
+    this.timer = setInterval(() => this.emitStatus(), 250);
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -157,6 +158,15 @@ export class FxPlayer implements PlayerLike {
 
   setSpatial(on: boolean) {
     WoufyFX?.setSpatial(this.id, on);
+  }
+
+  /** Включает/выключает time-pitch (нужен только для Slowed / Speed Up / подгона BPM) */
+  setTempoProcessing(on: boolean) {
+    try {
+      WoufyFX?.setTempoProcessing?.(this.id, on);
+    } catch {
+      /* старая сборка модуля без этой функции */
+    }
   }
 
   get volume() {

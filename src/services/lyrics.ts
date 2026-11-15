@@ -421,21 +421,18 @@ export async function fetchOnlineLyrics(track: TrackFile, duration: number): Pro
 
   const pool: LrcCandidate[] = [];
 
-  // 1. Точный запрос (теги + альбом + длительность)
+  // Все запросы уходят ОДНОВРЕМЕННО (раньше точный запрос ждал до 4.5 с, и только потом начинался поиск — текст находился вдвое дольше)
   let getUrl = `https://lrclib.net/api/get?track_name=${encodeURIComponent(cleanTitle)}`;
   if (cleanArtist) getUrl += `&artist_name=${encodeURIComponent(cleanArtist)}`;
   if (track.album && track.album !== 'Сингл') getUrl += `&album_name=${encodeURIComponent(track.album)}`;
   if (dur > 0) getUrl += `&duration=${Math.round(dur)}`;
-  const exact = await lrcFetch(getUrl, 4500);
-  if (exact && !Array.isArray(exact) && (exact.syncedLyrics || exact.plainLyrics)) pool.push(exact);
-
-  // 2–4. Поиск (запросы идут параллельно)
   const searches = [
     `https://lrclib.net/api/search?q=${encodeURIComponent(cleanArtist ? `${cleanArtist} ${cleanTitle}` : cleanTitle)}`,
     `https://lrclib.net/api/search?track_name=${encodeURIComponent(cleanTitle)}${cleanArtist ? `&artist_name=${encodeURIComponent(cleanArtist)}` : ''}`,
   ];
   if (cleanArtist) searches.push(`https://lrclib.net/api/search?q=${encodeURIComponent(cleanTitle)}`);
-  const results = await Promise.all(searches.map((u) => lrcFetch(u, 6000)));
+  const [exact, ...results] = await Promise.all([lrcFetch(getUrl, 4500), ...searches.map((u) => lrcFetch(u, 6000))]);
+  if (exact && !Array.isArray(exact) && (exact.syncedLyrics || exact.plainLyrics)) pool.push(exact);
   for (const r of results) if (Array.isArray(r)) pool.push(...r.slice(0, 25));
 
   let best: LrcCandidate | null = null;

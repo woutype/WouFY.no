@@ -16,10 +16,12 @@ interface Props {
   onEditBpm: () => void;
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
+  /** плеер раскрыт (иначе таймлайн не опрашивается) */
+  active?: boolean;
 }
 
-const Timeline: React.FC<{ engine: AudioEngine; duration: number }> = ({ engine, duration }) => {
-  const pos = usePosition(engine, 100);
+const Timeline: React.FC<{ engine: AudioEngine; duration: number; active: boolean }> = ({ engine, duration, active }) => {
+  const pos = usePosition(engine, 125, active);
   const [scrub, setScrub] = useState<number | null>(null);
   const pending = useRef<{ v: number; t: number } | null>(null);
 
@@ -62,6 +64,7 @@ export const PlayerControls: React.FC<Props> = ({
   onEditBpm,
   onOpenQueue,
   onOpenLyrics,
+  active = true,
 }) => {
   const track = state.queue[state.index];
   const playPop = useRef(new Animated.Value(1)).current;
@@ -106,7 +109,7 @@ export const PlayerControls: React.FC<Props> = ({
         )}
       </View>
 
-      <Timeline engine={engine} duration={state.duration} />
+      <Timeline engine={engine} duration={state.duration} active={active} />
 
       {/* Кнопки */}
       <View style={styles.controls}>

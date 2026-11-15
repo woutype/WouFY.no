@@ -9,6 +9,7 @@ import {
   StyleSheet,
   View,
   ViewStyle,
+  useWindowDimensions,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
@@ -192,13 +193,27 @@ export const AmbientBackground: React.FC<{ uri?: string }> = ({ uri }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uri]);
 
+  // Размытие считается на КРОШЕЧНОМ изображении (1/{K} размера экрана), а на весь экран оно растягивается масштабом на GPU.
+  // Раньше размывалась картинка размером с экран при радиусе 80 — на каждую смену трека это были сотни миллисекунд работы процессора и нагрев.
+  const { width: W, height: H } = useWindowDimensions();
+  const K = 6;
+  const iw = Math.ceil((W + 120) / K);
+  const ih = Math.ceil((H + 120) / K);
   const layer = (u: string | undefined, opacity: Animated.AnimatedInterpolation<number> | Animated.Value) =>
     u ? (
       <Animated.Image
         source={{ uri: u }}
-        blurRadius={80}
+        blurRadius={14}
         resizeMode="cover"
-        style={[styles.ambientImg, { opacity }]}
+        style={{
+          position: 'absolute',
+          width: iw,
+          height: ih,
+          left: (W - iw) / 2,
+          top: (H - ih) / 2,
+          opacity,
+          transform: [{ scale: K }],
+        }}
       />
     ) : null;
 
@@ -341,12 +356,5 @@ const styles = StyleSheet.create({
     height: 4,
     borderRadius: 2,
     backgroundColor: colors.text,
-  },
-  ambientImg: {
-    position: 'absolute',
-    top: -60,
-    left: -60,
-    right: -60,
-    bottom: -60,
   },
 });

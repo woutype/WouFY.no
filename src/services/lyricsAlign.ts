@@ -167,7 +167,7 @@ export async function alignBySpeech(uri: string, plain: string[], duration: numb
       const words = await WoufyFX!.recognizeSpeech(uri, locale);
       const res = alignWords(plain, words, duration);
       if (res && (!best || res.coverage > best.coverage)) best = res;
-      if (best && best.coverage >= 0.35) break; // достаточно якорей — второй язык не нужен
+      if (best && best.coverage >= 0.25) break; // достаточно якорей — второй язык не нужен
     } catch {
       /* язык недоступен / нет разрешения — пробуем следующий */
     }

@@ -35,6 +35,12 @@ final class FXPlayer {
   private var wantsPlay = false
   private var graphReady = false
   private var tapInstalled = false
+  /// позиция файла (сек), с которой начался текущий scheduleSegment — от неё отсчитывается точное «отрендеренное» время
+  private var schedStartPos: Double = 0
+  /// после паузы/простоя очередь воспроизведения пересобирается с запомненной позиции (не полагаемся на семантику node.pause)
+  private var needsReschedule = false
+  private var engineIdlePaused = false
+  private var idleWork: DispatchWorkItem?
 
   private var spatialOn = false
   private var spatialTimer: DispatchSourceTimer?
@@ -79,6 +85,7 @@ final class FXPlayer {
 
     reverb.loadFactoryPreset(.cathedral)
     reverb.wetDryMix = 0
+    reverb.bypass = true // реверберация выключена — узел не считает ничего
 
     panMix.pan = 0
     panMix.outputVolume = 1
@@ -109,6 +116,7 @@ final class FXPlayer {
     guard file != nil else { return }
     let pos = currentTime()
     let was = wantsPlay
+    engineIdlePaused = false
     startEngineIfNeeded()
     schedule(from: pos)
     if was { beginPlayback() }
@@ -118,7 +126,10 @@ final class FXPlayer {
 
   /// Загружает файл, возвращает длительность (сек)
   func load(url: URL) throws -> Double {
+    cancelIdlePause()
     wantsPlay = false
+    needsReschedule = false
+    engineIdlePaused = false
     generation += 1
     node.stop()
     stopSpatialTimer()
@@ -133,6 +144,9 @@ final class FXPlayer {
     anchorPos = 0
     schedule(from: 0)
     applyTapState()
+    // загруженный, но так и не запущенный плеер не должен вечно держать аудио-движок включённым
+    // (45 с — с запасом больше, чем предзагрузка следующего трека к склейке)
+    scheduleIdlePause(after: 45)
     return duration
   }
 
@@ -146,6 +160,7 @@ final class FXPlayer {
     let remaining = f.length - startFrame
     anchorPos = Double(startFrame) / max(fileRate, 1)
     anchorWall = CACurrentMediaTime()
+    schedStartPos = anchorPos
     guard remaining > 1 else {
       anchorPos = duration
       return
@@ -177,7 +192,14 @@ final class FXPlayer {
   func play() {
     guard file != nil else { return }
     if wantsPlay && node.isPlaying { return }
+    cancelIdlePause()
     wantsPlay = true
+    if needsReschedule || engineIdlePaused || !engine.isRunning {
+      engineIdlePaused = false
+      needsReschedule = false
+      startEngineIfNeeded()
+      schedule(from: anchorPos)
+    }
     beginPlayback()
   }
 
@@ -185,13 +207,16 @@ final class FXPlayer {
     anchorPos = currentTime()
     anchorWall = CACurrentMediaTime()
     wantsPlay = false
+    needsReschedule = true
     node.pause()
     stopSpatialTimer()
+    scheduleIdlePause(after: 4)
   }
 
   func seek(to seconds: Double) {
     guard file != nil else { return }
     let was = wantsPlay
+    needsReschedule = false
     schedule(from: seconds)
     if was {
       wantsPlay = true
@@ -199,12 +224,49 @@ final class FXPlayer {
     }
   }
 
+  /// Позиция в файле. Пока играет — по реально отрендеренным семплам узла (точность до долей миллисекунды и не зависит от того,
+  /// насколько поздно пришла команда play): именно по ней DJ-движок выравнивает удары двух треков. Иначе — запасной расчёт по часам.
   func currentTime() -> Double {
     if wantsPlay && node.isPlaying {
+      if let t = renderedPosition() { return max(0, min(duration, t)) }
       let t = anchorPos + (CACurrentMediaTime() - anchorWall) * rate
       return max(0, min(duration, t))
     }
     return max(0, min(duration, anchorPos))
+  }
+
+  private func renderedPosition() -> Double? {
+    guard let nt = node.lastRenderTime, nt.isSampleTimeValid, nt.isHostTimeValid,
+          let pt = node.playerTime(forNodeTime: nt), pt.isSampleTimeValid else { return nil }
+    let sr = pt.sampleRate > 0 ? pt.sampleRate : fileRate
+    if sr <= 0 { return nil }
+    let rendered = Double(pt.sampleTime) / sr
+    let nowHost = AVAudioTime.seconds(forHostTime: mach_absolute_time())
+    let renderHost = AVAudioTime.seconds(forHostTime: nt.hostTime)
+    let ahead = max(0.0, min(0.06, nowHost - renderHost))
+    return schedStartPos + rendered + ahead * rate
+  }
+
+  // MARK: - Простой
+
+  private func cancelIdlePause() {
+    idleWork?.cancel()
+    idleWork = nil
+  }
+
+  /// Если плеер молчит, аудио-движок (а с ним реверберация и time-pitch) останавливается: пустая «пауза» не греет телефон
+  private func scheduleIdlePause(after seconds: Double) {
+    cancelIdlePause()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self else { return }
+      if self.wantsPlay || self.file == nil { return }
+      if self.engine.isRunning {
+        self.engine.pause()
+        self.engineIdlePaused = true
+      }
+    }
+    idleWork = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
   }
 
   func getDuration() -> Double { duration }
@@ -229,11 +291,17 @@ final class FXPlayer {
     timePitch.pitch = Float(max(-2400, min(2400, c)))
   }
 
+  /// time-pitch — самый «дорогой» узел цепочки. Когда темп/тон не меняются (нет Slowed / Speed Up / подгона BPM) — обходим его.
+  func setTempoProcessing(_ on: Bool) {
+    timePitch.bypass = !on
+  }
+
   /// amount: 0…100 (0 — без реверберации, 100 — почти полностью «в зале»)
   func setReverb(_ amount: Double) {
     let a = max(0, min(100, amount)) / 100.0
     // быстро набирает слышимость уже на малых значениях; на максимуме ≈ 92% обработанного сигнала
     reverb.wetDryMix = Float(100.0 * (1.0 - pow(1.0 - a, 1.6)) * 0.92)
+    reverb.bypass = a <= 0.001
     // реверберация «съедает» громкость — компенсируем
     panMix.outputVolume = Float(1.0 + 0.25 * a)
   }
@@ -254,7 +322,8 @@ final class FXPlayer {
     if spatialTimer != nil { return }
     let t = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
     lastSpatialWall = CACurrentMediaTime()
-    t.schedule(deadline: .now(), repeating: .milliseconds(16))
+    // 30 обновлений в секунду достаточно для плавной панорамы (период оборота 8 с); раньше было 60 пробуждений в секунду
+    t.schedule(deadline: .now(), repeating: .milliseconds(33), leeway: .milliseconds(6))
     t.setEventHandler { [weak self] in
       guard let self = self else { return }
       let now = CACurrentMediaTime()

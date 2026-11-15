@@ -39,5 +39,6 @@ export interface PlayerLike {
   setReverb?(amount: number): void;
   setSpatial?(on: boolean): void;
   setPitchCents?(cents: number): void;
+  setTempoProcessing?(on: boolean): void;
   readonly isFx?: boolean;
 }

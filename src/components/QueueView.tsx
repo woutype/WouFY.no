@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, FlatList, LayoutAnimation, PanResponder, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -6,10 +6,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { TrackFile } from '../types';
 import { colors, type } from '../theme';
 import { CoverArt, Glass, PressableScale } from './ui';
+import { SortOption } from '../services/queueOrder';
+
+export type { SortOption };
 
 export const ROW_H = 68;
-
-export type SortOption = 'default' | 'title' | 'artist' | 'album';
 
 const SORT_LABELS: Record<SortOption, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
   default: { label: 'По умолчанию', icon: 'reorder-two-outline' },
@@ -17,49 +18,6 @@ const SORT_LABELS: Record<SortOption, { label: string; icon: keyof typeof Ionico
   artist: { label: 'По артисту', icon: 'person-outline' },
   album: { label: 'По альбому', icon: 'disc-outline' },
 };
-
-/* ───────── сортировка ───────── */
-
-// «натуральное» сравнение: 2 < 10, регистр и ё/е не важны, кириллица и латиница сортируются каждая по алфавиту
-const collator = new Intl.Collator(['ru', 'en'], { numeric: true, sensitivity: 'base' });
-/** убираем ведущие кавычки/скобки/символы, чтобы «(Intro)» и «"Name"» вставали по первой букве */
-const sortKey = (s: string) => (s || '').trim().replace(/^[^\p{L}\p{N}]+/u, '');
-const cmp = (a: string, b: string) => collator.compare(sortKey(a), sortKey(b));
-
-const UNKNOWN_ARTIST = 'Неизвестный исполнитель';
-
-function trackNo(t: TrackFile): number {
-  if (t.trackNumber && !isNaN(t.trackNumber)) return t.trackNumber;
-  const m = t.filename.match(/^(\d{1,3})[\s.\-_)]+\D/);
-  return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
-}
-
-export function applySort(list: TrackFile[], mode: SortOption): TrackFile[] {
-  const copy = [...list];
-  if (mode === 'title') return copy.sort((a, b) => cmp(a.title, b.title) || cmp(a.artist, b.artist));
-  if (mode === 'artist') {
-    return copy.sort((a, b) => {
-      const ua = a.artist === UNKNOWN_ARTIST ? 1 : 0;
-      const ub = b.artist === UNKNOWN_ARTIST ? 1 : 0;
-      if (ua !== ub) return ua - ub; // «неизвестные» — в конец
-      return cmp(a.artist, b.artist) || cmp(a.album || '', b.album || '') || trackNo(a) - trackNo(b) || cmp(a.title, b.title);
-    });
-  }
-  if (mode === 'album') {
-    return copy.sort((a, b) => {
-      const c = cmp(a.album || 'Сингл', b.album || 'Сингл');
-      if (c !== 0) return c;
-      const da = a.discNumber ?? 1;
-      const db = b.discNumber ?? 1;
-      if (da !== db) return da - db; // диски по порядку
-      const na = trackNo(a);
-      const nb = trackNo(b);
-      if (na !== nb) return na - nb; // от 1-го трека до последнего
-      return cmp(a.title, b.title);
-    });
-  }
-  return copy;
-}
 
 /* ───────── мини-эквалайзер на обложке играющего трека ───────── */
 
@@ -251,6 +209,37 @@ const SortMenu: React.FC<{
   );
 };
 
+/* ───────── ползунок быстрой прокрутки ───────── */
+
+const THUMB_H = 52;
+const THUMB_TOP = 6;
+const STRIP_W = 22;
+
+interface BubbleHandle {
+  show: (text: string, sub: string) => void;
+  hide: () => void;
+}
+
+/** Плашка у ползунка: «N / всего» и название. Свой state — при перетаскивании не перерисовывается весь список */
+const ScrollBubble = forwardRef<BubbleHandle, { y: Animated.Value }>(function ScrollBubble({ y }, ref) {
+  const [txt, setTxt] = useState<{ a: string; b: string } | null>(null);
+  useImperativeHandle(ref, () => ({
+    show: (a, b) => setTxt({ a, b }),
+    hide: () => setTxt(null),
+  }));
+  if (!txt) return null;
+  return (
+    <Animated.View pointerEvents="none" style={[styles.bubble, { transform: [{ translateY: y }] }]}>
+      <Text style={styles.bubbleMain}>{txt.a}</Text>
+      {txt.b ? (
+        <Text style={styles.bubbleSub} numberOfLines={1}>
+          {txt.b}
+        </Text>
+      ) : null}
+    </Animated.View>
+  );
+});
+
 /* ───────── экран очереди ───────── */
 
 interface Props {
@@ -260,9 +249,13 @@ interface Props {
   isPlaying: boolean;
   searchQuery: string;
   onSearchChange: (q: string) => void;
+  /** сортировка и поиск применяются к самой очереди (в движке), здесь только органы управления */
+  sortMode: SortOption;
+  onSortChange: (m: SortOption) => void;
+  /** играющий трек не подходит под фильтр: он первый в очереди, но в списке не показывается */
+  pinned: boolean;
   onPlay: (index: number, track?: TrackFile) => void;
   onMove: (from: number, to: number) => void;
-  onReorder?: (newTracks: TrackFile[]) => void;
   onRefresh: () => Promise<void>;
   bottomPad: number;
 }
@@ -278,20 +271,26 @@ export const QueueView: React.FC<Props> = ({
   isPlaying,
   searchQuery,
   onSearchChange,
+  sortMode,
+  onSortChange,
+  pinned,
   onPlay,
   onMove,
-  onReorder,
   onRefresh,
   bottomPad,
 }) => {
   const listRef = useRef<FlatList<{ track: TrackFile; qi: number }>>(null);
+  const [listH, setListH] = useState(600);
+  const thumbY = useRef(new Animated.Value(THUMB_TOP)).current;
+  const thumbOpacity = useRef(new Animated.Value(0)).current;
+  const thumbShown = useRef(false);
+  const thumbHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollerDrag = useRef(false);
+  const bubbleRef = useRef<BubbleHandle>(null);
   const guardUntil = useRef(0);
   const [refreshing, setRefreshing] = useState(false);
   const [drag, setDrag] = useState<DragState | null>(null);
-  const [sortMode, setSortMode] = useState<SortOption>('default');
   const [showFilterMenu, setShowFilterMenu] = useState(false);
-  /** порядок очереди до первой сортировки — к нему возвращает «По умолчанию» */
-  const savedOrder = useRef<TrackFile[] | null>(null);
 
   // Локальная копия очереди: перестановка и сброс сдвигов применяются одним обновлением
   const [localTracks, setLocalTracks] = useState(tracks);
@@ -308,64 +307,28 @@ export const QueueView: React.FC<Props> = ({
   const sortActive = sortMode !== 'default';
   const filtering = searchQuery.trim().length > 0 || sortActive;
 
-  const restoreDefault = useCallback(() => {
-    const base = savedOrder.current;
-    savedOrder.current = null;
-    if (!base) return;
-    const byId = new Map(tracks.map((t) => [t.id, t]));
-    const restored: TrackFile[] = [];
-    const seen = new Set<string>();
-    for (const t of base) {
-      const cur = byId.get(t.id);
-      if (cur) {
-        restored.push(cur);
-        seen.add(t.id);
-      }
-    }
-    for (const t of tracks) if (!seen.has(t.id)) restored.push(t);
-    setLocalTracks(restored);
-    onReorder?.(restored);
-  }, [tracks, onReorder]);
-
   const handleSelectSort = (mode: SortOption) => {
     setShowFilterMenu(false);
     if (mode === sortMode) return;
-    setSortMode(mode);
-    if (mode === 'default') {
-      restoreDefault();
-      return;
-    }
-    if (!savedOrder.current) savedOrder.current = tracks;
-    // сортируем от исходного порядка — результат не зависит от предыдущей сортировки
-    const sorted = applySort(savedOrder.current, mode);
-    setLocalTracks(sorted);
-    onReorder?.(sorted);
+    onSortChange(mode);
   };
 
   const handleReset = useCallback(() => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     onSearchChange('');
     setShowFilterMenu(false);
-    if (sortMode !== 'default') {
-      setSortMode('default');
-      restoreDefault();
-    }
-  }, [onSearchChange, sortMode, restoreDefault]);
+    if (sortMode !== 'default') onSortChange('default');
+  }, [onSearchChange, onSortChange, sortMode]);
 
+  // очередь уже отфильтрована и отсортирована движком; закреплённый (не подходящий под фильтр) играющий трек не показываем
   const data = useMemo(() => {
-    let list = localTracks;
-    const q = searchQuery.trim().toLowerCase();
-    if (q.length > 0) {
-      list = list.filter(
-        (t) =>
-          t.title.toLowerCase().includes(q) ||
-          t.artist.toLowerCase().includes(q) ||
-          (t.album && t.album.toLowerCase().includes(q)) ||
-          t.filename.toLowerCase().includes(q)
-      );
-    }
-    return list.map((track, qi) => ({ track, qi }));
-  }, [localTracks, searchQuery]);
+    const out: { track: TrackFile; qi: number }[] = [];
+    localTracks.forEach((track, qi) => {
+      if (pinned && qi === 0) return;
+      out.push({ track, qi });
+    });
+    return out;
+  }, [localTracks, pinned]);
 
   /* ───────── перетаскивание ─────────
    * Схема без рассинхрона «нативная анимация ↔ перестановка списка» (из-за него трек на секунду «телепортировался» назад):
@@ -532,6 +495,97 @@ export const QueueView: React.FC<Props> = ({
 
   const dragTrack = useMemo(() => (drag ? localTracks.find((t) => t.id === drag.id) : undefined), [drag, localTracks]);
 
+  /* ───────── ползунок: потянул вниз — пролистал до самого последнего трека ───────── */
+  const contentH = LIST_TOP + data.length * ROW_H + bottomPad;
+  const maxScroll = Math.max(0, contentH - listH);
+  const travel = Math.max(1, listH - bottomPad - THUMB_H - THUMB_TOP * 2);
+  const scrollable = data.length * ROW_H > listH * 1.5;
+  const geo = useRef({ maxScroll, travel, n: data.length });
+  geo.current = { maxScroll, travel, n: data.length };
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const sortRef = useRef(sortMode);
+  sortRef.current = sortMode;
+
+  const showThumb = useCallback(() => {
+    if (!thumbShown.current) {
+      thumbShown.current = true;
+      Animated.timing(thumbOpacity, { toValue: 1, duration: 120, useNativeDriver: true }).start();
+    }
+    if (thumbHideTimer.current) clearTimeout(thumbHideTimer.current);
+    thumbHideTimer.current = setTimeout(() => {
+      if (scrollerDrag.current) return;
+      thumbShown.current = false;
+      Animated.timing(thumbOpacity, { toValue: 0, duration: 260, useNativeDriver: true }).start();
+    }, 1300);
+  }, [thumbOpacity]);
+
+  const syncThumb = useCallback(
+    (y: number) => {
+      const g = geo.current;
+      const ratio = g.maxScroll > 0 ? Math.min(1, Math.max(0, y / g.maxScroll)) : 0;
+      thumbY.setValue(THUMB_TOP + ratio * g.travel);
+    },
+    [thumbY]
+  );
+
+  const scrollerPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: (e) => {
+        scrollerDrag.current = true;
+        scrollerStart.current = e.nativeEvent.locationY;
+        Haptics.selectionAsync();
+        showThumb();
+        moveScroller(0);
+      },
+      onPanResponderMove: (_, g) => moveScroller(g.dy),
+      onPanResponderRelease: () => endScroller(),
+      onPanResponderTerminate: () => endScroller(),
+    })
+  ).current;
+  const scrollerStart = useRef(0);
+  const lastBubbleIdx = useRef(-1);
+
+  function moveScroller(dy: number) {
+    const g = geo.current;
+    const y = scrollerStart.current + dy;
+    const ratio = Math.min(1, Math.max(0, (y - THUMB_TOP - THUMB_H / 2) / g.travel));
+    const offset = ratio * g.maxScroll;
+    scrollY.current = offset;
+    thumbY.setValue(THUMB_TOP + ratio * g.travel);
+    listRef.current?.scrollToOffset({ offset, animated: false });
+    const idx = Math.min(g.n - 1, Math.max(0, Math.round(ratio * (g.n - 1))));
+    if (idx !== lastBubbleIdx.current) {
+      lastBubbleIdx.current = idx;
+      const t = dataRef.current[idx]?.track;
+      const mode = sortRef.current;
+      const sub = t ? (mode === 'artist' ? t.artist : mode === 'album' ? t.album || 'Сингл' : t.title) : '';
+      bubbleRef.current?.show(`${idx + 1} / ${g.n}`, sub);
+    }
+  }
+
+  function endScroller() {
+    scrollerDrag.current = false;
+    lastBubbleIdx.current = -1;
+    bubbleRef.current?.hide();
+    showThumb(); // запускает таймер скрытия
+  }
+
+  // поиск изменился — список с начала; сортировка — к играющему треку
+  useEffect(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+  useEffect(() => {
+    if (sortMode === 'default') return;
+    const i = data.findIndex((d) => d.track.id === currentTrackId);
+    listRef.current?.scrollToOffset({ offset: Math.max(0, (i < 0 ? 0 : i - 1) * ROW_H), animated: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortMode]);
+
   const currentTrackIndex = useMemo(
     () => (currentTrackId ? localTracks.findIndex((t) => t.id === currentTrackId) : currentIndex),
     [localTracks, currentTrackId, currentIndex]
@@ -655,9 +709,16 @@ export const QueueView: React.FC<Props> = ({
             onScroll={(e) => {
               scrollY.current = e.nativeEvent.contentOffset.y;
               if (dragInfo.current.from >= 0) updateHover();
+              if (!scrollerDrag.current && scrollable) {
+                syncThumb(scrollY.current);
+                showThumb();
+              }
             }}
             scrollEventThrottle={16}
-            onLayout={(e) => (dragInfo.current.listH = e.nativeEvent.layout.height)}
+            onLayout={(e) => {
+              dragInfo.current.listH = e.nativeEvent.layout.height;
+              setListH(e.nativeEvent.layout.height);
+            }}
             contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 4, paddingBottom: bottomPad }}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
@@ -711,6 +772,14 @@ export const QueueView: React.FC<Props> = ({
           colors={['rgba(8,8,8,0)', 'rgba(8,8,8,0.85)']}
           style={[styles.fadeBottom, { height: Math.min(bottomPad, 96) }]}
         />
+        {/* ползунок быстрой прокрутки: тянем вдоль правого края — список едет до самого последнего трека */}
+        {scrollable && !drag && (
+          <>
+            <Animated.View pointerEvents="none" style={[styles.thumb, { opacity: thumbOpacity, transform: [{ translateY: thumbY }] }]} />
+            <View style={[styles.scrollStrip, { height: Math.max(0, listH - bottomPad + 8) }]} {...scrollerPan.panHandlers} />
+            <ScrollBubble ref={bubbleRef} y={thumbY} />
+          </>
+        )}
         {/* меню сортировки поверх списка: появляется плавно и не сдвигает список */}
         <SortMenu visible={showFilterMenu} sortMode={sortMode} onSelect={handleSelectSort} onClose={() => setShowFilterMenu(false)} />
       </View>
@@ -805,6 +874,24 @@ const styles = StyleSheet.create({
     elevation: 14,
     zIndex: 50,
   },
+  thumb: { position: 'absolute', top: 0, right: 5, width: 5, height: THUMB_H, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.55)', zIndex: 15 },
+  scrollStrip: { position: 'absolute', top: 0, right: 0, width: STRIP_W, zIndex: 16 },
+  bubble: {
+    position: 'absolute',
+    top: 0,
+    right: 30,
+    minWidth: 90,
+    maxWidth: 220,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 14,
+    backgroundColor: 'rgba(40,40,44,0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    zIndex: 17,
+  },
+  bubbleMain: { ...type.mono, color: colors.text, fontSize: 13, fontWeight: '700' },
+  bubbleSub: { ...type.caption, color: colors.text2, fontSize: 11, marginTop: 2 },
   eqRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', height: EQ_H },
   dividerWrap: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4 },
   divider: { height: 1, width: '100%' },

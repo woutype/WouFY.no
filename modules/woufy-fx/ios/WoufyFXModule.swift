@@ -99,6 +99,10 @@ public class WoufyFXModule: Module {
       self.players[id]?.setSpatial(on)
     }
 
+    Function("setTempoProcessing") { (id: String, on: Bool) -> Void in
+      self.players[id]?.setTempoProcessing(on)
+    }
+
     Function("setSampling") { (id: String, on: Bool) -> Void in
       self.players[id]?.setSampling(on)
     }

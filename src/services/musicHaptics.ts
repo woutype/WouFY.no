@@ -93,6 +93,9 @@ class MusicHaptics {
   private recent: number[] = [];
   private lvl0 = 0;
   private lvl1 = 0;
+  /** последние отправленные уровни каналов: одинаковые значения в нативный модуль повторно не шлём */
+  private sent0 = -1;
+  private sent1 = -1;
 
   configure(opts: { getPosition?: () => number; getGrid?: () => Grid | undefined }) {
     if (opts.getPosition) this.getPos = opts.getPosition;
@@ -138,6 +141,7 @@ class MusicHaptics {
     this.fl1 = this.fl2 = 0;
     this.recent = [];
     this.lvl0 = this.lvl1 = 0;
+    this.sent0 = this.sent1 = -1;
   }
 
   private feed(frames: ArrayLike<number>) {
@@ -250,7 +254,7 @@ class MusicHaptics {
     // ── непрерывные «моторы»: бас (канал 0) и текстура верхов/вокала (канал 1) ──
     this.envLow += (relLow - this.envLow) * (relLow > this.envLow ? 0.5 : 0.1);
     this.envMid += (relMid - this.envMid) * (relMid > this.envMid ? 0.25 : 0.05);
-    if (this.native && now - this.lastChan > 40) {
+    if (this.native && now - this.lastChan > 24) {
       this.lastChan = now;
       const duck = now - this.lastKick < 80 ? 0.45 : 1; // под толчком гул тише — удар читается чище
       let l0 = quiet ? 0 : Math.pow(Math.max(0, this.envLow - 0.3) / 0.7, 1.35) * 0.62 * Math.min(1.2, dyn) * duck;
@@ -258,8 +262,14 @@ class MusicHaptics {
       this.lvl0 += (l0 - this.lvl0) * 0.55;
       this.lvl1 += (l1 - this.lvl1) * 0.35;
       try {
-        WoufyFX!.hapticChannel(0, this.lvl0, 0.08 + 0.22 * (1 - Math.min(1, this.envLow)));
-        WoufyFX!.hapticChannel(1, this.lvl1, 0.75);
+        if (Math.abs(this.lvl0 - this.sent0) >= 0.02 || (this.lvl0 < 0.03) !== (this.sent0 < 0.03)) {
+          this.sent0 = this.lvl0;
+          WoufyFX!.hapticChannel(0, this.lvl0, 0.08 + 0.22 * (1 - Math.min(1, this.envLow)));
+        }
+        if (Math.abs(this.lvl1 - this.sent1) >= 0.02 || (this.lvl1 < 0.03) !== (this.sent1 < 0.03)) {
+          this.sent1 = this.lvl1;
+          WoufyFX!.hapticChannel(1, this.lvl1, 0.75);
+        }
       } catch {
         /* ignore */
       }

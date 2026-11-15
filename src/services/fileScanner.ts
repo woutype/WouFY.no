@@ -228,10 +228,15 @@ let enriching = false;
 export async function enrichTracks(
   tracks: TrackFile[],
   onBatch: (updated: TrackFile[]) => void,
-  isCancelled: () => boolean = () => false
+  isCancelled: () => boolean = () => false,
+  /** id треков, чьи теги и обложки нужны в первую очередь (играющий и ближайшие в очереди) */
+  priority: string[] = []
 ): Promise<boolean> {
   if (enriching) return false;
-  const todo = tracks.filter((t) => t.tagged === false);
+  const rank = new Map(priority.map((id, i) => [id, i]));
+  const todo = tracks
+    .filter((t) => t.tagged === false)
+    .sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9));
   if (todo.length === 0) return true;
   enriching = true;
   try {
@@ -239,7 +244,7 @@ export async function enrichTracks(
     let pending: TrackFile[] = [];
     let lastFlush = Date.now();
     let sinceSave = 0;
-    const BATCH = 6;
+    const BATCH = 8;
     for (let i = 0; i < todo.length; i += BATCH) {
       if (isCancelled()) break;
       const batch = todo.slice(i, i + BATCH);
@@ -267,12 +272,13 @@ export async function enrichTracks(
       for (const u of done) all.set(u.id, u);
       pending.push(...done);
       sinceSave += done.length;
-      if (Date.now() - lastFlush > 1200) {
+      // первая пачка (текущий трек и ближайшие) отдаётся сразу — обложки в плеере появляются без ожидания остальной библиотеки
+      if (Date.now() - lastFlush > 1200 || i === 0) {
         onBatch(pending);
         pending = [];
         lastFlush = Date.now();
       }
-      if (sinceSave >= 150) {
+      if (sinceSave >= 400) {
         sinceSave = 0;
         saveCachedTracks([...all.values()]);
       }
