@@ -1,5 +1,5 @@
 import { WoufyFX } from '../../modules/woufy-fx';
-import { LyricLine, isSectionLine, syllables } from './lyrics';
+import { LyricLine, TimeAnchor, fitTimeline, isSectionLine } from './lyrics';
 
 /**
  * Подгон текста без таймингов по ГОЛОСУ в самом файле.
@@ -67,11 +67,6 @@ function pickLocales(plain: string[]): string[] {
   if (r > 0.85) return ['ru-RU'];
   if (r < 0.15) return ['en-US'];
   return r >= 0.5 ? ['ru-RU', 'en-US'] : ['en-US', 'ru-RU'];
-}
-
-interface Anchor {
-  line: number;
-  t: number;
 }
 
 /** Выравнивание и сборка таймингов. Возвращает null, если надёжных якорей слишком мало. */
@@ -146,79 +141,22 @@ export function alignWords(
   }
   pairs.reverse();
 
-  // оценка начала строки по каждому совпавшему слову
-  const perLine = new Map<number, number[]>();
+  // оценка начала строки по каждому совпавшему слову (слово №pos в строке начинается примерно через 0.4 с · pos после начала строки)
+  const anchorsRaw: TimeAnchor[] = [];
   for (const p of pairs) {
     const lw = L[p.i];
-    const est = R[p.j].t - lw.pos * 0.4;
-    const arr = perLine.get(lw.line) ?? [];
-    arr.push(est);
-    perLine.set(lw.line, arr);
+    anchorsRaw.push({ line: lw.line, t: Math.max(0, R[p.j].t - lw.pos * 0.4) });
   }
-  let anchors: Anchor[] = [];
-  [...perLine.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .forEach(([line, arr]) => {
-      arr.sort((a, b) => a - b);
-      anchors.push({ line, t: arr[Math.floor(arr.length / 2)] });
-    });
-  if (anchors.length < 4) return null;
+  if (anchorsRaw.length < 4) return null;
 
-  // наибольшая неубывающая цепочка по времени (отсев выбросов)
-  const k = anchors.length;
-  const len = new Array(k).fill(1);
-  const prev = new Array(k).fill(-1);
-  for (let a = 0; a < k; a++) {
-    for (let b = 0; b < a; b++) {
-      if (anchors[b].t <= anchors[a].t - 0.2 && len[b] + 1 > len[a]) {
-        len[a] = len[b] + 1;
-        prev[a] = b;
-      }
-    }
-  }
-  let end = 0;
-  for (let a = 1; a < k; a++) if (len[a] > len[end]) end = a;
-  const chain: Anchor[] = [];
-  for (let a = end; a >= 0; a = prev[a]) chain.push(anchors[a]);
-  chain.reverse();
-  anchors = chain;
-
+  // Якоря проверяются и «сшиваются» в тайминги в fitTimeline: ложные совпадения отсеиваются, строки до первого
+  // и после последнего якоря растягиваются по свободному отрезку (раньше они схлопывались в 0 → текст «начинался с середины»)
+  const fitted = fitTimeline(plain, anchorsRaw, duration);
+  if (!fitted) return null;
   const lineCount = plain.filter((l) => !isSectionLine(l)).length || 1;
-  const coverage = anchors.length / lineCount;
-  if (anchors.length < 4 || coverage < 0.1) return null;
-
-  // веса строк (слоги) для интерполяции
-  const weights = plain.map((line, idx) => (isSectionLine(line) ? (idx === 0 ? 0.2 : 1.4) : 1.1 + syllables(line) * 0.62));
-  const cum: number[] = [0];
-  weights.forEach((w, idx) => cum.push(cum[idx] + w));
-
-  const times = new Array<number>(plain.length).fill(0);
-  const A = anchors;
-  // между якорями
-  for (let a = 0; a < A.length - 1; a++) {
-    const l0 = A[a].line;
-    const l1 = A[a + 1].line;
-    const span = cum[l1] - cum[l0] || 1;
-    for (let li = l0; li <= l1; li++) {
-      times[li] = A[a].t + ((cum[li] - cum[l0]) / span) * (A[a + 1].t - A[a].t);
-    }
-  }
-  // средняя скорость «секунд на единицу веса» по якорному участку
-  const rate = (A[A.length - 1].t - A[0].t) / Math.max(1, cum[A[A.length - 1].line] - cum[A[0].line]);
-  const safeRate = isFinite(rate) && rate > 0.05 && rate < 2 ? rate : 0.45;
-  for (let li = A[0].line - 1; li >= 0; li--) times[li] = Math.max(0, A[0].t - (cum[A[0].line] - cum[li]) * safeRate);
-  const lastA = A[A.length - 1];
-  for (let li = lastA.line + 1; li < plain.length; li++) {
-    times[li] = Math.min(duration > 0 ? duration - 0.5 : 1e9, lastA.t + (cum[li] - cum[lastA.line]) * safeRate);
-  }
-  // монотонность
-  for (let li = 1; li < times.length; li++) if (times[li] < times[li - 1]) times[li] = times[li - 1] + 0.05;
-
-  return {
-    lines: plain.map((text, idx) => ({ time: Math.max(0, times[idx]), text, section: isSectionLine(text) })),
-    anchors: anchors.length,
-    coverage,
-  };
+  const coverage = fitted.used / lineCount;
+  if (fitted.used < 4 || coverage < 0.1) return null;
+  return { lines: fitted.lines, anchors: fitted.used, coverage };
 }
 
 export async function alignBySpeech(uri: string, plain: string[], duration: number): Promise<LyricLine[] | null> {

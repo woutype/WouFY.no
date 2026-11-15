@@ -22,6 +22,15 @@ B заранее загружается и встаёт на свой бит, с
 ## Тексты: источники
 SYLT → .lrc рядом → кэш → LRC в USLT → онлайн LRCLIB (по названию/артисту/длительности; сохраняется в кэш и .lrc) → обычный текст.
 
+## Реверберация, 8D, бесшовный BPM, Core Haptics — только в собственной сборке (НЕ в Expo Go)
+Эти функции работают через нативный модуль `modules/woufy-fx` (AVAudioEngine, Core Haptics). **Expo Go не умеет загружать
+собственные нативные модули** — в нём в настройках будет «модуль НЕ найден», а реверберация и 8D недоступны. Это ограничение
+Expo Go, а не ошибка проекта. Варианты:
+1. **.ipa через GitHub Actions** (уже настроено): Actions → *Build iOS IPA* → Run workflow → скачать `woufy-ipa` → установить (AltStore / Sideloadly / TrollStore).
+   Шаг «Verify native module WoufyFX is linked» остановит сборку с понятным сообщением, если модуль не подключился.
+2. **Dev-сборка на Mac**: `npx expo prebuild --platform ios --clean && npx expo run:ios --device`.
+3. **EAS**: `npx eas-cli build --profile development --platform ios`.
+
 ## Запуск
 ```bash
 npm install

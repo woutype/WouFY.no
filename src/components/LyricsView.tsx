@@ -9,6 +9,7 @@ import {
   LyricLine,
   LyricsData,
   activeLineIndex,
+  buildEstimate,
   fetchOnlineLrc,
   calibrateEstimate,
   isSectionLine,
@@ -152,10 +153,25 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     scrollRef.current?.scrollTo({ y: Math.max(0, y - viewH.current * 0.3), animated });
   }, []);
 
-  // автоследование за текстом
+  // автоследование за текстом; пока вокал ещё не начался (или трек перемотали в начало) — показываем текст С САМОГО НАЧАЛА
   useEffect(() => {
-    if (active >= 0 && follow.current) scrollToLine(active, true);
-  }, [active, scrollToLine]);
+    if (!follow.current) return;
+    if (active >= 0) scrollToLine(active, true);
+    else if (lines.length > 0) {
+      pendingScroll.current = null;
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+    }
+  }, [active, scrollToLine]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Приблизительные тайминги считались, пока плеер ещё не знал длительность (или для другой версии файла) —
+  // пересчитываем под настоящую, чтобы текст шёл от первого слова и ровно до конца трека
+  useEffect(() => {
+    if (!data || data.source !== 'estimate' || !(duration > 0)) return;
+    if (data.forDuration !== undefined && Math.abs(duration - data.forDuration) <= 1) return;
+    const fixed: LyricsData = { ...data, lines: buildEstimate(data.plain, duration), forDuration: duration };
+    setData(fixed);
+    ys.current = {};
+  }, [data, duration]);
 
   const onLayoutY = useCallback(
     (i: number, y: number) => {

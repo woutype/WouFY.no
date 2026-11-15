@@ -381,9 +381,10 @@ export const QueueView: React.FC<Props> = ({
     hover: number;
     startTop: number;
     dy: number;
+    top: number;
     listH: number;
     base: TrackFile[];
-  }>({ active: false, from: -1, hover: -1, startTop: 0, dy: 0, listH: 600, base: [] });
+  }>({ active: false, from: -1, hover: -1, startTop: 0, dy: 0, top: 0, listH: 600, base: [] });
   const overlayY = useRef(new Animated.Value(0)).current;
   const overlayScale = useRef(new Animated.Value(1)).current;
   const autoRaf = useRef<number | null>(null);
@@ -403,6 +404,7 @@ export const QueueView: React.FC<Props> = ({
     const minTop = LIST_TOP - ROW_H * 0.4;
     const maxTop = d.listH - ROW_H * 0.6;
     const top = Math.max(minTop, Math.min(maxTop, d.startTop + d.dy));
+    d.top = top;
     overlayY.setValue(top);
 
     const contentY = top + scrollY.current;
@@ -459,7 +461,7 @@ export const QueueView: React.FC<Props> = ({
       if (from < 0 || from >= list.length) return;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       const startTop = LIST_TOP + from * ROW_H - scrollY.current;
-      dragInfo.current = { ...dragInfo.current, active: true, from, hover: from, startTop, dy: 0, base: list };
+      dragInfo.current = { ...dragInfo.current, active: true, from, hover: from, startTop, dy: 0, top: startTop, base: list };
       overlayY.stopAnimation();
       overlayY.setValue(startTop);
       overlayScale.setValue(1);
@@ -490,6 +492,13 @@ export const QueueView: React.FC<Props> = ({
     const { from, hover } = d;
     const finalTop = LIST_TOP + hover * ROW_H - scrollY.current;
 
+    // Раньше оверлей убирался по окончании пружины (spring) — она «доезжает» до порога покоя 1–2 секунды,
+    // поэтому рамка активного трека висела после отпускания. Теперь анимация посадки — короткая, с фиксированной
+    // длительностью, а оверлей убирается строго по таймеру, независимо от того, как закончилась анимация.
+    const currentTop = d.top; // положение оверлея под пальцем (обновляется в updateHover)
+    const dist = Math.abs(finalTop - currentTop);
+    const SETTLE_MS = dist < 2 ? 0 : Math.round(Math.min(150, 70 + dist * 0.45));
+
     let finished = false;
     const finalize = () => {
       if (finished) return;
@@ -498,9 +507,17 @@ export const QueueView: React.FC<Props> = ({
       if (hover !== from) cbs.current.onMove(from, hover);
       setDrag(null); // оверлей исчезает, строка в списке на месте — один кадр, без прыжков
     };
-    Animated.spring(overlayScale, { toValue: 1, damping: 24, stiffness: 340, mass: 0.5, useNativeDriver: true }).start();
-    Animated.spring(overlayY, { toValue: finalTop, damping: 30, stiffness: 360, mass: 0.6, overshootClamping: true, useNativeDriver: true }).start(finalize);
-    setTimeout(finalize, 650);
+
+    overlayScale.stopAnimation();
+    overlayY.stopAnimation();
+    if (SETTLE_MS === 0) {
+      overlayScale.setValue(1);
+      finalize();
+      return;
+    }
+    Animated.timing(overlayScale, { toValue: 1, duration: SETTLE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+    Animated.timing(overlayY, { toValue: finalTop, duration: SETTLE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+    setTimeout(finalize, SETTLE_MS + 16);
   }, [overlayY, overlayScale]);
 
   useEffect(() => stopAuto, []);

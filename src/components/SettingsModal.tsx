@@ -351,7 +351,8 @@ export const SettingsModal: React.FC<Props> = ({
               <Text style={styles.note}>
                 {(() => {
                   const d = fxDiagnostics();
-                  return `Диагностика: модуль ${d.moduleFound ? 'найден' : 'НЕ найден'} · движок ${fxActive ? 'включён' : 'не включён'} · загрузок ${d.loads}${d.lastError ? ' · ошибка: ' + d.lastError : ''}`;
+                  const env = d.expoGo ? 'Expo Go' : 'собственная сборка';
+                  return `Диагностика: ${env} · модуль ${d.moduleFound ? 'найден' : 'НЕ найден'} · движок ${fxActive ? 'включён' : 'не включён'} · загрузок ${d.loads}${d.lastError ? ' · ошибка: ' + d.lastError : ''}`;
                 })()}
               </Text>
             )}
@@ -361,7 +362,9 @@ export const SettingsModal: React.FC<Props> = ({
                   ? fxActive
                     ? 'Нативный движок эффектов: работает.'
                     : 'Нативный движок эффектов: готов (включится вместе с реверберацией или 8D).'
-                  : 'Нативный движок эффектов не найден в этой сборке — реверберация и 8D недоступны, работают только Slowed и Speed Up. Проверьте, что папка modules/woufy-fx попала в проект.'}
+                  : fxDiagnostics().expoGo
+                  ? 'Вы открыли приложение в Expo Go. Expo Go не умеет загружать собственные нативные модули, поэтому реверберация, 8D, бесшовный подгон BPM и Core Haptics там недоступны (работают только Slowed и Speed Up). Установите сборку .ipa (GitHub → Actions → Build iOS IPA) или dev-сборку: npx expo run:ios.'
+                  : 'Нативный движок не вошёл в эту сборку. Пересоберите проект с нуля: npx expo prebuild --platform ios --clean (папка modules/woufy-fx должна лежать в корне проекта).'}
               </Text>
             )}
 

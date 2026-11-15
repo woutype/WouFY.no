@@ -18,6 +18,8 @@ export interface LyricsData {
   source: LyricsSource;
   /** «чистый» текст без таймингов — нужен для режима ручной разметки */
   plain: string[];
+  /** для source='estimate': длительность трека, под которую рассчитаны тайминги (пересчитываем, когда плеер узнал настоящую) */
+  forDuration?: number;
 }
 
 export const isSectionLine = (t: string) => /^\(.*\)$/.test(t) || /^\[[^\]\d][^\]]*\]$/.test(t);
@@ -78,28 +80,203 @@ export function syllables(line: string): number {
   return Math.max(1, m ? m.length : 1);
 }
 
+/** Вес строки при распределении времени: пауза на заголовок секции + число слогов */
+export const lineWeight = (line: string, idx: number): number =>
+  isSectionLine(line) ? (idx === 0 ? 0.2 : 1.4) : 1.1 + syllables(line) * 0.62;
+
+/** Минимальный зазор между началами соседних строк, сек */
+const MIN_GAP = 0.3;
+
+/** Монотонность + зазор: строки идут строго друг за другом от первой до последней и не выходят за пределы трека */
+export function normalizeTimes(times: number[], duration: number): number[] {
+  const n = times.length;
+  if (n === 0) return times;
+  const limit = duration > 0 ? duration - 0.4 : Infinity;
+  const out = times.map((t) => (isFinite(t) ? Math.max(0.2, t) : 0.2));
+  for (let i = 1; i < n; i++) if (out[i] < out[i - 1] + MIN_GAP) out[i] = out[i - 1] + MIN_GAP;
+  // если упёрлись в конец трека — сжимаем хвост назад, а не обрезаем строки в одну точку
+  if (out[n - 1] > limit) {
+    out[n - 1] = limit;
+    for (let i = n - 2; i >= 0; i--) if (out[i] > out[i + 1] - MIN_GAP) out[i] = out[i + 1] - MIN_GAP;
+    if (out[0] < 0.2) {
+      // совсем мало места: равномерно по всему доступному отрезку
+      const span = Math.max(0, limit - 0.2);
+      for (let i = 0; i < n; i++) out[i] = 0.2 + (span * i) / Math.max(1, n - 1);
+    }
+  }
+  return out;
+}
+
 /**
- * Запасной вариант для текста без таймингов (когда нет ни базы, ни SYLT/LRC).
- * Вокал не начинается с 0:00 и не тянется до самого конца: оставляем вступление и аутро, а длительность строк
- * распределяем пропорционально числу слогов + пауза на секции/повторы. Точных таймингов без анализа голоса получить нельзя —
- * для идеальной синхронизации есть режим «Разметить точно».
+ * Приблизительные тайминги для текста без таймингов (когда нет ни базы, ни SYLT/LRC и нет нативного распознавания голоса).
+ * Первая строка получает время после вступления, последняя — до аутро; длительность строк распределяется пропорционально
+ * числу слогов + паузы на секции. Весь текст всегда «растянут» от первого слова до конца вокала, а не сжат или обрезан.
  */
 export function buildEstimate(plain: string[], duration: number): LyricLine[] {
   const total = duration > 0 ? duration : 200;
-  const intro = Math.min(10, Math.max(2, total * 0.04));
-  const outro = Math.min(8, total * 0.03);
-  const span = Math.max(10, total - intro - outro);
-  const weights = plain.map((line, idx) => {
-    if (isSectionLine(line)) return idx === 0 ? 0.2 : 1.6; // заголовок секции: короткая пауза перед следующей строкой
-    return 1.1 + syllables(line) * 0.62;
-  });
+  const intro = Math.min(14, Math.max(4, total * 0.05));
+  const outro = Math.min(12, Math.max(3, total * 0.04));
+  const span = Math.max(8, total - intro - outro);
+  const weights = plain.map(lineWeight);
   const sum = weights.reduce((x, y) => x + y, 0) || 1;
   let acc = intro;
-  return plain.map((text, i) => {
+  const raw = plain.map((_, i) => {
     const start = acc;
     acc += (weights[i] / sum) * span;
-    return { time: start, text, section: isSectionLine(text) };
+    return start;
   });
+  const times = normalizeTimes(raw, duration > 0 ? duration : 0);
+  return plain.map((text, i) => ({ time: times[i], text, section: isSectionLine(text) }));
+}
+
+export interface TimeAnchor {
+  /** индекс строки в plain */
+  line: number;
+  /** время начала строки, сек */
+  t: number;
+}
+
+const median = (a: number[]): number => {
+  if (a.length === 0) return 0;
+  const b = [...a].sort((x, y) => x - y);
+  const m = b.length >> 1;
+  return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2;
+};
+
+/**
+ * Сборка таймингов по якорям («строка N звучит в момент T»), полученным распознаванием голоса или калибровкой.
+ * Гарантии (из-за их отсутствия раньше текст «начинался с середины»):
+ *  • якоря проходят проверку: монотонность, робастная линейная модель «время ≈ a + b · вес», физическая осуществимость
+ *    (до первого якоря должно хватать времени на все предшествующие строки, после последнего — на все следующие);
+ *    ложные совпадения (припев, узнанный не в том месте) отбрасываются;
+ *  • строки ДО первого якоря и ПОСЛЕ последнего не «схлопываются» в 0 / в конец: они растягиваются по свободному отрезку;
+ *  • итог строго возрастает: первая строка ≥ 0.2 с, последняя ≤ конца трека.
+ * Если надёжных якорей меньше трёх — возвращает null (вызывающий использует buildEstimate).
+ */
+export function fitTimeline(plain: string[], anchorsIn: TimeAnchor[], duration: number): { lines: LyricLine[]; used: number } | null {
+  const n = plain.length;
+  if (n === 0) return null;
+  const total = duration > 0 ? duration : 200;
+  const weights = plain.map(lineWeight);
+  const cum: number[] = [0];
+  weights.forEach((w, i) => cum.push(cum[i] + w));
+  const priorRate = Math.max(0.15, (total * 0.88) / cum[n]); // сек на единицу веса при равномерном распределении
+  const minRate = 0.14;
+
+  // 1. одна запись на строку, в пределах трека, по возрастанию строк
+  const byLine = new Map<number, number[]>();
+  for (const a of anchorsIn) {
+    if (a.line < 0 || a.line >= n || !isFinite(a.t) || a.t < 0 || a.t > total) continue;
+    const arr = byLine.get(a.line) ?? [];
+    arr.push(a.t);
+    byLine.set(a.line, arr);
+  }
+  let A: TimeAnchor[] = [...byLine.entries()].sort((x, y) => x[0] - y[0]).map(([line, ts]) => ({ line, t: median(ts) }));
+
+  // 2. наибольшая возрастающая по времени цепочка (выбросы отпадают)
+  const chain = (list: TimeAnchor[]): TimeAnchor[] => {
+    const k = list.length;
+    if (k < 2) return list;
+    const len = new Array(k).fill(1);
+    const prev = new Array(k).fill(-1);
+    for (let a = 0; a < k; a++) {
+      for (let b = 0; b < a; b++) {
+        if (list[b].t <= list[a].t - 0.2 && len[b] + 1 > len[a]) {
+          len[a] = len[b] + 1;
+          prev[a] = b;
+        }
+      }
+    }
+    let end = 0;
+    for (let a = 1; a < k; a++) if (len[a] > len[end]) end = a;
+    const out: TimeAnchor[] = [];
+    for (let a = end; a >= 0; a = prev[a]) out.push(list[a]);
+    return out.reverse();
+  };
+  A = chain(A);
+
+  // 3. робастная линейная модель t = a + b·cum (Тейл–Сен) и отсев по невязке
+  const fit = (list: TimeAnchor[]): { a: number; b: number } => {
+    const slopes: number[] = [];
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const dx = cum[list[j].line] - cum[list[i].line];
+        if (dx > 0.5) slopes.push((list[j].t - list[i].t) / dx);
+      }
+    }
+    const b0 = slopes.length ? median(slopes) : priorRate;
+    const b = isFinite(b0) && b0 > minRate * 0.8 && b0 < 1.6 ? b0 : priorRate;
+    const a = median(list.map((x) => x.t - b * cum[x.line]));
+    return { a, b };
+  };
+  const tol = Math.max(6, total * 0.08);
+  for (let pass = 0; pass < 3 && A.length >= 3; pass++) {
+    const m = fit(A);
+    const kept = A.filter((x) => Math.abs(x.t - (m.a + m.b * cum[x.line])) <= tol);
+    if (kept.length === A.length) break;
+    A = kept;
+  }
+
+  // 4. физическая осуществимость: хватает ли времени на строки до первого / после последнего якоря и между соседними
+  let changed = true;
+  while (changed && A.length >= 3) {
+    changed = false;
+    const first = A[0];
+    if (first.t - 0.4 < cum[first.line] * minRate) {
+      A.shift();
+      changed = true;
+      continue;
+    }
+    const last = A[A.length - 1];
+    if (total - 0.6 - last.t < (cum[n] - cum[last.line]) * minRate * 0.8) {
+      A.pop();
+      changed = true;
+      continue;
+    }
+    for (let i = 0; i < A.length - 1; i++) {
+      if (A[i + 1].t - A[i].t < (cum[A[i + 1].line] - cum[A[i].line]) * minRate) {
+        const m = fit(A);
+        const ri = Math.abs(A[i].t - (m.a + m.b * cum[A[i].line]));
+        const rj = Math.abs(A[i + 1].t - (m.a + m.b * cum[A[i + 1].line]));
+        A.splice(ri > rj ? i : i + 1, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (A.length < 3) return null;
+
+  // 5. сборка
+  const model = fit(A);
+  const rate = model.b;
+  const times = new Array<number>(n).fill(0);
+  const first = A[0];
+  const last = A[A.length - 1];
+
+  // между якорями — линейно по весам
+  for (let k = 0; k < A.length - 1; k++) {
+    const l0 = A[k].line;
+    const l1 = A[k + 1].line;
+    const span = cum[l1] - cum[l0] || 1;
+    for (let li = l0; li <= l1; li++) times[li] = A[k].t + ((cum[li] - cum[l0]) / span) * (A[k + 1].t - A[k].t);
+  }
+  // до первого якоря: свободный отрезок [0.4 … first.t]; если экстраполяция уходит в минус — сжимаем пропорционально (не схлопываем в 0)
+  if (first.line > 0) {
+    const want = cum[first.line] * rate;
+    const room = first.t - 0.4;
+    const f = want > room ? Math.max(minRate / rate, room / want) : 1;
+    for (let li = 0; li < first.line; li++) times[li] = first.t - (cum[first.line] - cum[li]) * rate * f;
+  }
+  // после последнего якоря: до конца вокала (не позже total − 1.5)
+  if (last.line < n - 1) {
+    const need = (cum[n - 1] - cum[last.line] + weights[n - 1]) * rate;
+    const room = Math.max(0.5, total - 1.5 - last.t);
+    const f = need > room ? room / need : 1;
+    for (let li = last.line + 1; li < n; li++) times[li] = last.t + (cum[li] - cum[last.line]) * rate * f;
+  }
+
+  const norm = normalizeTimes(times, duration > 0 ? duration : 0);
+  return { lines: plain.map((text, i) => ({ time: norm[i], text, section: isSectionLine(text) })), used: A.length };
 }
 
 /** Тексты хранятся ВНЕ папки Music: Library/Application Support/WouFY/lyrics_cache */
@@ -310,12 +487,20 @@ export function calibrateEstimate(lines: LyricLine[], anchorIndex: number, posit
   const delta = position - anchor.time;
   const last = lines[lines.length - 1].time;
   const span = Math.max(1, last - anchor.time);
-  return lines.map((l, i) => {
+  const shifted = lines.map((l, i) => {
     let d = delta;
     if (i > anchorIndex) d = delta * (1 - 0.6 * Math.min(1, (l.time - anchor.time) / span));
-    const t = Math.max(0, duration > 0 ? Math.min(duration - 0.5, l.time + d) : l.time + d);
-    return { ...l, time: t };
+    else if (i < anchorIndex && anchor.time > 0.5) {
+      // строки до якоря сжимаются/растягиваются пропорционально (а не сдвигаются целиком — иначе упрутся в 0 и «схлопнутся»)
+      return { ...l, time: (l.time / anchor.time) * Math.max(0.4, position) };
+    }
+    return { ...l, time: l.time + d };
   });
+  const times = normalizeTimes(
+    shifted.map((l) => l.time),
+    duration
+  );
+  return shifted.map((l, i) => ({ ...l, time: times[i] }));
 }
 
 /** Совместимость: только синхронизированный LRC */
@@ -389,7 +574,7 @@ export async function loadLyrics(track: TrackFile, duration: number, allowOnline
   const plainText = track.lyrics || onlinePlain;
   if (plainText) {
     const plain = plainLinesOf(plainText);
-    if (plain.length) return { lines: buildEstimate(plain, duration), synced: false, source: 'estimate', plain };
+    if (plain.length) return { lines: buildEstimate(plain, duration), synced: false, source: 'estimate', plain, forDuration: duration };
   }
 
   return { lines: [], synced: false, source: 'none', plain: [] };

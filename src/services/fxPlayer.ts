@@ -1,3 +1,4 @@
+import { isRunningInExpoGo } from 'expo';
 import { WoufyFX } from '../../modules/woufy-fx';
 import { PlayerLike, PlayerStatus } from './playerLike';
 
@@ -10,11 +11,21 @@ export const fxNativeAvailable = (): boolean => {
   }
 };
 
+/** Запущено ли приложение внутри Expo Go (там нельзя подключать собственные нативные модули — это ограничение самого Expo Go) */
+export const runningInExpoGo = (): boolean => {
+  try {
+    return typeof isRunningInExpoGo === 'function' && isRunningInExpoGo();
+  } catch {
+    return false;
+  }
+};
+
 /** Диагностика нативного движка — отображается в настройках, чтобы было видно, что именно не так */
 export const fxDiag: { loads: number; lastError?: string } = { loads: 0 };
 export const fxDiagnostics = () => ({
   moduleFound: WoufyFX !== null && WoufyFX !== undefined,
   available: fxNativeAvailable(),
+  expoGo: runningInExpoGo(),
   loads: fxDiag.loads,
   lastError: fxDiag.lastError,
 });

@@ -42,6 +42,12 @@ interface Transition {
   corr: number;
   lastVolA: number;
   lastVolB: number;
+  /** запасной режим: сколько фазовых перемоток B уже сделано (≤2) и когда была последняя */
+  phaseFixes: number;
+  lastPhaseFixAt: number;
+  /** запасной режим: 0 — темп не менялся, 1 — сменён у A, 2 — сменён и у B */
+  swapStage: 0 | 1 | 2;
+  swapAt: number;
 }
 
 /** Подготовка трека B: загружен и стоит на своём бите, ждёт момента старта */
@@ -60,18 +66,24 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  */
 const TICK_MS = 40;
 /**
- * Как часто обновляем скорость воспроизведения во время склейки.
- * Каждая смена скорости у AVPlayer заставляет пересобрать конвейер time-pitch, поэтому шаги делаются
- * редкими (≈6 раз в секунду) и достаточно крупными; плавность дают сама кривая и качество «high» (спектральный алгоритм).
+ * Два режима подгона темпа при склейке:
+ *  • нативный движок (AVAudioEngine, FxPlayer): темп меняется непрерывно и бесшовно (шаг 45 мс) + фазовая автоподстройка (PLL);
+ *  • запасной режим (AVPlayer из expo-audio, например в Expo Go): у AVPlayer КАЖДАЯ смена скорости даёт цифровой провал ≈100 мс
+ *    (его видно в записи звука). Поэтому здесь скорость меняется всего один раз на плеер: B стартует уже в темпе A (пока он не слышен),
+ *    на середине склейки, когда оба трека звучат, A переходит к темпу B, а через ~170 мс B — к своему родному; фаза B подгоняется
+ *    одной перемоткой, пока B почти не слышен. Провал в одном треке перекрывается вторым.
  */
-const RATE_STEP_MS = 160;
-/** Минимальное изменение скорости, ради которого стоит трогать плеер */
-const RATE_EPS = 0.004;
+const FX_RATE_STEP_MS = 45;
+const FX_RATE_EPS = 0.0008;
+/** Момент ступенчатой смены темпа в запасном режиме (доля длительности склейки) */
+const STEP_SWAP_P = 0.5;
+/** Пауза между сменой темпа A и B в запасном режиме, мс */
+const STEP_GAP_MS = 170;
 /** Качество коррекции высоты тона: «high» — спектральный алгоритм, без «рваного» звука на музыке */
 const PITCH_Q = 'high' as const;
 /** Опережение старта B, сек (задержка команды play) */
 const START_LEAD_SEC = 0.05;
-/** Усиление и предел фазовой автоподстройки B к битам A */
+/** Усиление и предел фазовой автоподстройки B к битам A (нативный движок) */
 const PLL_GAIN = 0.35;
 const PLL_MAX = 0.02;
 /** За сколько секунд до конца трека начинаем предзагрузку следующего (буферизация). */
@@ -214,22 +226,28 @@ export class AudioEngine {
       p.setReverb?.(f.reverb);
       p.setSpatial?.(f.spatial);
       p.setPitchCents?.(f.cents);
-      // без нативного модуля Slowed / Speed Up работают «по-кассетному»: темп и высота тона меняются вместе
-      // Без нативного движка: при подгоне BPM / Slowed / Speed Up используем «varispeed» (смена скорости = передискретизация).
-      // У алгоритма с коррекцией тона каждая смена скорости перезапускала конвейер и давала провалы звука (≈40 мс каждые 0.8 с).
-      if (!p.isFx) p.shouldCorrectPitch = !(f.tape || this.varispeedMixing());
+      // Без нативного движка: Slowed / Speed Up работают «по-кассетному» (темп и тон вместе — так и задумано);
+      // подгон BPM при склейке — с сохранением высоты тона (темп меняется всего 1–2 раза, см. STEP_SWAP_P), тон не «прыгает».
+      if (!p.isFx) p.shouldCorrectPitch = !f.tape;
     });
   }
 
-  /** Скорость плеера = скорость склейки (подгон BPM) × скорость эффекта (Slowed / Speed Up) */
-  private varispeedMixing(): boolean {
-    return this.mode === 'native' && this.dj.crossfadeEnabled && this.dj.bpmTransitionEnabled;
+  /** Кэш последней выставленной скорости: повторная установка того же значения у AVPlayer = лишний провал звука */
+  private rateCache = new WeakMap<object, number>();
+
+  /** Загрузка файла в плеер: заодно сбрасывает кэш скорости (у нового трека скорость выставляется заново) */
+  private load(p: AudioPlayer, uri: string) {
+    this.rateCache.delete(p);
+    p.replace({ uri });
   }
 
+  /** Скорость плеера = скорость склейки (подгон BPM) × скорость эффекта (Slowed / Speed Up) */
   private setRate(p: AudioPlayer, djRate: number) {
     const r = clamp(djRate * this.fxd.speed, 0.25, 2);
-    // в режиме varispeed качество не передаём — иначе плеер может заново выставить алгоритм с коррекцией тона
-    if (!p.isFx && (this.fxd.tape || this.varispeedMixing())) safe(() => p.setPlaybackRate(r));
+    const prev = this.rateCache.get(p);
+    if (prev !== undefined && Math.abs(prev - r) < 1e-4) return;
+    this.rateCache.set(p, r);
+    if (!p.isFx && this.fxd.tape) safe(() => p.setPlaybackRate(r));
     else safe(() => p.setPlaybackRate(r, PITCH_Q));
   }
 
@@ -292,7 +310,7 @@ export class AudioEngine {
       const a = this.A;
       const token = ++this.playToken;
       safe(() => {
-        a.replace({ uri: cur.uri });
+        this.load(a, cur.uri);
         a.volume = this.master();
         a.muted = false;
       });
@@ -434,7 +452,7 @@ export class AudioEngine {
     const t = this.state.queue[index];
     if (!t) return;
     safe(() => {
-      this.A.replace({ uri: t.uri });
+      this.load(this.A, t.uri);
       this.A.volume = 1;
     });
     this.applyFx(this.A);
@@ -564,7 +582,7 @@ export class AudioEngine {
     const a = this.A;
     safe(() => {
       this.B.pause();
-      a.replace({ uri: t.uri });
+      this.load(a, t.uri);
       a.volume = Math.max(0.05, this.master());
       a.muted = false;
     });
@@ -753,7 +771,7 @@ export class AudioEngine {
     if (!this.prep || this.prep.id !== nxt.id) {
       safe(() => {
         idle.pause();
-        idle.replace({ uri: nxt.uri });
+        this.load(idle, nxt.uri);
         idle.volume = 0;
       });
       this.applyFx(idle);
@@ -862,6 +880,10 @@ export class AudioEngine {
       corr: 0,
       lastVolA: master,
       lastVolB: 0,
+      phaseFixes: 0,
+      lastPhaseFixAt: 0,
+      swapStage: 0,
+      swapAt: 0,
     };
     this.set({ mixing: true });
     this.setBusy(true);
@@ -890,40 +912,88 @@ export class AudioEngine {
     }
 
     // ── темп: оба трека идут к общему BPM; A ускоряется, B из темпа A сходится к своему ──
-    if (t.plan.tempo && p < 1 && now - t.lastRateAt >= (this.mode === 'fx' ? 45 : RATE_STEP_MS)) {
-      const base = ratesAt(t.plan, p);
-      let rateB = base.rateB;
-
-      // Мягкая фазовая автоподстройка: чуть подруливаем скорость B, чтобы удары легли друг на друга.
-      // Никаких перемоток посреди склейки — именно они давали «рваный» звук.
-      if (t.plan.beatSync && t.elapsedMs > 600) {
-        const tb = safe(() => t.to.currentTime);
-        if (tb !== undefined && Number.isFinite(tb)) {
-          const phiA = beatPhase(pos, t.plan.phaseA, t.plan.periodA);
-          const phiB = beatPhase(tb, t.plan.phaseB, t.plan.periodB);
-          const err = wrapHalf(phiA - phiB); // >0 — B отстаёт от бита
-          const target = clamp(err * PLL_GAIN, -PLL_MAX, PLL_MAX);
-          t.corr += (target - t.corr) * 0.2;
-        }
-      }
-      rateB *= 1 + t.corr;
-
-      const fa = base.rateA * this.fxd.speed;
-      const fb = rateB * this.fxd.speed;
-      if (Math.abs(fa - t.lastRateA) >= (this.mode === 'fx' ? 0.0008 : RATE_EPS)) {
-        this.setRate(t.from, base.rateA);
-        t.lastRateA = fa;
-      }
-      if (Math.abs(fb - t.lastRateB) >= (this.mode === 'fx' ? 0.0008 : RATE_EPS)) {
-        this.setRate(t.to, rateB);
-        t.lastRateB = fb;
-      }
-      t.lastRateAt = now;
+    if (t.plan.tempo && p < 1) {
+      if (this.mode === 'fx') this.driveSmoothTempo(t, p, pos, now);
+      else this.driveSteppedTempo(t, p, pos, now);
     }
 
     if (p >= 0.5 && !t.uiSwitched) this.switchUiToIncoming();
     // A дошёл до конца файла — склейка завершена
     if (p >= 1 || pos >= dur - 0.06) this.commitTransition();
+  }
+
+  /** Нативный движок: непрерывная смена темпа (шаг 45 мс) + мягкая фазовая автоподстройка (PLL) — без единого разрыва */
+  private driveSmoothTempo(t: Transition, p: number, pos: number, now: number) {
+    if (now - t.lastRateAt < FX_RATE_STEP_MS) return;
+    const base = ratesAt(t.plan, p);
+    let rateB = base.rateB;
+
+    // Мягкая фазовая автоподстройка: чуть подруливаем скорость B, чтобы удары легли друг на друга (без перемоток)
+    if (t.plan.beatSync && t.elapsedMs > 600) {
+      const tb = safe(() => t.to.currentTime);
+      if (tb !== undefined && Number.isFinite(tb)) {
+        const phiA = beatPhase(pos, t.plan.phaseA, t.plan.periodA);
+        const phiB = beatPhase(tb, t.plan.phaseB, t.plan.periodB);
+        const err = wrapHalf(phiA - phiB); // >0 — B отстаёт от бита
+        const target = clamp(err * PLL_GAIN, -PLL_MAX, PLL_MAX);
+        t.corr += (target - t.corr) * 0.2;
+      }
+    }
+    // поправка гасится к концу склейки, чтобы B пришёл ровно в родной темп (1.0) без последнего «ступенчатого» изменения
+    rateB *= 1 + t.corr * (1 - p);
+
+    const fa = base.rateA * this.fxd.speed;
+    const fb = rateB * this.fxd.speed;
+    if (Math.abs(fa - t.lastRateA) >= FX_RATE_EPS) {
+      this.setRate(t.from, base.rateA);
+      t.lastRateA = fa;
+    }
+    if (Math.abs(fb - t.lastRateB) >= FX_RATE_EPS) {
+      this.setRate(t.to, rateB);
+      t.lastRateB = fb;
+    }
+    t.lastRateAt = now;
+  }
+
+  /**
+   * Запасной режим (AVPlayer): ни одной смены скорости «по чуть-чуть». B с самого старта идёт в темпе A (скорость выставлена
+   * до запуска, пока трек не слышен), оба трека играют в одном темпе → биты совпадают. На середине склейки темп меняется
+   * ОДИН раз у каждого плеера: сначала A → к темпу B, через 170 мс B → к родному (разница темпов за эти 170 мс даёт доли
+   * миллисекунд расхождения, на слух незаметно). Короткий провал, который AVPlayer делает при смене скорости, приходится на
+   * момент, когда звучит и второй трек.
+   */
+  private driveSteppedTempo(t: Transition, p: number, pos: number, now: number) {
+    const plan = t.plan;
+
+    // 1. фазовая подгонка B перемоткой, пока B почти не слышен (при p≈0.06 его громкость ≈ −30 дБ; не более двух перемоток)
+    if (plan.beatSync && t.phaseFixes < 2 && p < 0.22 && t.elapsedMs >= Math.max(280, t.durationMs * 0.06) && now - t.lastPhaseFixAt >= 450) {
+      const tb = safe(() => t.to.currentTime);
+      if (tb !== undefined && Number.isFinite(tb)) {
+        const phiA = beatPhase(pos, plan.phaseA, plan.periodA);
+        const phiB = beatPhase(tb, plan.phaseB, plan.periodB);
+        // ошибка в «файловом» времени B: период сетки B × доля бита
+        const errSec = wrapHalf(phiA - phiB) * plan.periodB;
+        t.phaseFixes++;
+        t.lastPhaseFixAt = now;
+        if (Math.abs(errSec) > 0.012 && Math.abs(errSec) < 0.3) {
+          const rateB = plan.bpmA / plan.targetBpm;
+          safe(() => t.to.seekTo(Math.max(0, tb + errSec + 0.035 * rateB))); // 35 мс — время самой перемотки
+        }
+      }
+    }
+
+    // 2. ступенчатая смена темпа на второй половине склейки
+    if (t.swapStage === 0 && p >= STEP_SWAP_P) {
+      t.swapStage = 1;
+      t.swapAt = now;
+      const r = ratesAt(plan, 1);
+      this.setRate(t.from, r.rateA);
+      t.lastRateA = r.rateA * this.fxd.speed;
+    } else if (t.swapStage === 1 && now - t.swapAt >= STEP_GAP_MS) {
+      t.swapStage = 2;
+      this.setRate(t.to, 1);
+      t.lastRateB = this.fxd.speed;
+    }
   }
 
   /** На середине склейки обложка/название/текст переключаются на новый трек (только UI, без I/O) */
@@ -948,8 +1018,10 @@ export class AudioEngine {
       t.from.pause();
       t.from.volume = 0;
     });
-    this.setRate(t.to, 1.0);
-    this.setRate(t.from, 1.0);
+    this.setRate(t.to, 1.0); // в запасном режиме B к этому моменту уже на 1.0 — кэш скорости пропустит повторную установку
+    // бывший A остановлен: его скорость сбрасывается при следующей загрузке файла (у AVPlayer смена скорости на паузе может запустить воспроизведение)
+    if (this.mode === 'fx') this.setRate(t.from, 1.0);
+    else this.rateCache.delete(t.from);
     safe(() => {
       t.to.volume = this.master();
     });
@@ -974,7 +1046,8 @@ export class AudioEngine {
       t.to.volume = 0;
       t.from.volume = this.master();
     });
-    this.setRate(t.to, 1.0);
+    if (this.mode === 'fx') this.setRate(t.to, 1.0);
+    else this.rateCache.delete(t.to); // B на паузе: скорость сбросится при следующей загрузке
     this.setRate(t.from, 1.0);
     this.trans = null;
     this.prep = null;
