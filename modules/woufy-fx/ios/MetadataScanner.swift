@@ -188,14 +188,22 @@ public class MetadataScanner {
       }
     }
 
-    // 3. Обложка: аппаратное сжатие в JPEG thumbnail 512x512 через CGImageSource (как в Spotify)
+    // 3. Обложка: сохраняем ОРИГИНАЛЬНОЕ идеальное разрешение (без сжатия и без потери качества)
     let artworkItems = AVMetadataItem.metadataItems(from: allMetadata, filteredByIdentifier: .commonIdentifierArtwork)
     if let firstArtwork = artworkItems.first, let imgData = firstArtwork.dataValue, !imgData.isEmpty {
+      let ext = sniffImageExtension(data: imgData)
       let hash = String(format: "%08x", abs(id.hashValue))
-      let coverURL = coversDirURL.appendingPathComponent("\(hash).jpg")
+      let coverURL = coversDirURL.appendingPathComponent("\(hash).\(ext)")
 
-      if FileManager.default.fileExists(atPath: coverURL.path) || saveThumbnail(imageData: imgData, targetURL: coverURL, maxPixelSize: 512) {
+      if FileManager.default.fileExists(atPath: coverURL.path) {
         artworkUri = "file://" + coverURL.path
+      } else {
+        do {
+          try imgData.write(to: coverURL, options: .atomic)
+          artworkUri = "file://" + coverURL.path
+        } catch {
+          // fallback если запись не удалась
+        }
       }
     }
 
@@ -215,29 +223,21 @@ public class MetadataScanner {
     return dict
   }
 
-  // MARK: - ImageIO аппаратный даунсемплинг (быстро и без утечек памяти)
+  // MARK: - Определение формата изображения без декодирования
 
-  private static func saveThumbnail(imageData: Data, targetURL: URL, maxPixelSize: Int = 512) -> Bool {
-    guard let source = CGImageSourceCreateWithData(imageData as CFData, nil) else { return false }
-    let options: [CFString: Any] = [
-      kCGImageSourceCreateThumbnailFromImageAlways: true,
-      kCGImageSourceShouldCacheImmediately: true,
-      kCGImageSourceCreateThumbnailWithTransform: true,
-      kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-    ]
-    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-      return false
+  private static func sniffImageExtension(data: Data) -> String {
+    guard data.count >= 4 else { return "jpg" }
+    let bytes = [UInt8](data.prefix(4))
+    if bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+      return "jpg"
     }
-    let uiImage = UIImage(cgImage: cgImage)
-    guard let jpegData = uiImage.jpegData(compressionQuality: 0.85) else {
-      return false
+    if bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {
+      return "png"
     }
-    do {
-      try jpegData.write(to: targetURL, options: .atomic)
-      return true
-    } catch {
-      return false
+    if bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 {
+      return "webp"
     }
+    return "jpg"
   }
 }
 
