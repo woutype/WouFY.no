@@ -186,6 +186,8 @@ public class WoufyFXModule: Module {
         MPMediaItemPropertyPlaybackDuration: duration,
         MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
         MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+        MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+        MPNowPlayingInfoPropertyIsLiveStream: false,
       ]
       if let path = artworkPath {
         let clean = path.hasPrefix("file://") ? String(path.dropFirst(7)) : path
@@ -233,7 +235,23 @@ public class WoufyFXModule: Module {
     if !remoteTokens.isEmpty { return }
     let c = MPRemoteCommandCenter.shared()
 
+    // Disable 10s/15s skip interval commands so iOS Lock Screen and Control Center show Next/Previous track buttons
+    c.skipForwardCommand.removeTarget(nil)
+    c.skipForwardCommand.preferredIntervals = []
+    c.skipForwardCommand.isEnabled = false
+
+    c.skipBackwardCommand.removeTarget(nil)
+    c.skipBackwardCommand.preferredIntervals = []
+    c.skipBackwardCommand.isEnabled = false
+
+    c.seekForwardCommand.removeTarget(nil)
+    c.seekForwardCommand.isEnabled = false
+
+    c.seekBackwardCommand.removeTarget(nil)
+    c.seekBackwardCommand.isEnabled = false
+
     func add(_ cmd: MPRemoteCommand, _ name: String) {
+      cmd.removeTarget(nil)
       cmd.isEnabled = true
       let token = cmd.addTarget { [weak self] _ in
         self?.sendEvent("onRemote", ["command": name])
