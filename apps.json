@@ -1,0 +1,24 @@
+{
+  "name": "WouFY Repository",
+  "identifier": "com.woufy.source",
+  "subtitle": "Официальный источник обновлений WouFY.no",
+  "description": "Автономный музыкальный плеер для iOS с нативным аудиодвижком, эффектами и беспроводным обновлением.",
+  "iconURL": "https://raw.githubusercontent.com/woutype/WouFY.no/main/assets/icon.png",
+  "website": "https://github.com/woutype/WouFY.no",
+  "apps": [
+    {
+      "name": "WouFY.no",
+      "bundleIdentifier": "com.woufy.player",
+      "developerName": "WouFY",
+      "version": "1.0.0",
+      "versionDate": "2026-11-16",
+      "versionDescription": "Архитектура Spotify Local Files: мгновенное обнаружение треков и оригинальные обложки.",
+      "downloadURL": "https://github.com/woutype/WouFY.no/raw/main/woufy.ipa",
+      "localizedDescription": "Офлайн-плеер с нативным аудиодвижком, поддержкой кнопок экрана блокировки и мгновенным чтением треков.",
+      "iconURL": "https://raw.githubusercontent.com/woutype/WouFY.no/main/assets/icon.png",
+      "tintColor": "1ED760",
+      "size": 13000000
+    }
+  ],
+  "news": []
+}
