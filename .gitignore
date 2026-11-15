@@ -40,6 +40,9 @@ yarn-error.*
 /ios
 /android
 
-# binaries
+# binaries and device files
 *.ipa
 *.AppImage
+*.plist
+*.mobiledevicepairing
+SideStore.conf

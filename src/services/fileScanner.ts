@@ -2,24 +2,19 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { parseAudioTags } from './id3Parser';
 import { loadCachedTracks, saveCachedTracks, DATA_DIR, LEGACY_DIR, ensureDataDir } from './library';
 import { AudioExtension, TrackFile } from '../types';
+import { WoufyFX } from '../../modules/woufy-fx';
 
-/** Папка, в которую пользователь кладёт музыку (Файлы → На iPhone → WouFY.no → Music). Только треки — никаких служебных файлов. */
+/** Основная папка для музыки (пользователь может класть треки и сюда, и прямо в корень WouFY.no) */
 export const MUSIC_DIR_NAME = 'Music';
 const AUDIO_RE = /\.(mp3|m4a|aac|wav|flac|aiff?)$/i;
-const NON_DIR_RE = /\.(jpe?g|png|txt|cue|log|m3u8?|pdf|nfo|webp|gif|heic|ds_store)$/i;
+const NON_DIR_RE = /\.(jpe?g|png|txt|cue|log|m3u8?|pdf|nfo|webp|gif|heic|ds_store|plist)$/i;
 
 const docDir = () => FileSystem.documentDirectory ?? '';
 export const musicDir = () => `${docDir()}${MUSIC_DIR_NAME}/`;
 
 let cleaned = false;
 
-/**
- * Одноразовая уборка наследия старых версий:
- *  • файл-подсказка «Положи музыку в папку Music.txt» в корне Documents — удаляется;
- *  • папка lyrics_cache/ в корне Documents → переезжает в служебную папку и удаляется;
- *  • аудиофайлы, лежащие в корне Documents, переезжают в Music.
- * Служебные данные приложения теперь живут вне Documents и вне Music.
- */
+/** Одноразовая уборка старых служебных файлов из Documents */
 async function cleanupLegacy(): Promise<void> {
   if (cleaned) return;
   cleaned = true;
@@ -40,34 +35,12 @@ async function cleanupLegacy(): Promise<void> {
       }
       await FileSystem.deleteAsync(legacyLyrics, { idempotent: true }).catch(() => {});
     }
-
-    // кэш текстов в скрытой .woufy → в новую папку
-    const hiddenLyrics = `${LEGACY_DIR}lyrics_cache/`;
-    if (hiddenLyrics !== `${DATA_DIR}lyrics_cache/`) {
-      const hl = await FileSystem.getInfoAsync(hiddenLyrics);
-      if (hl.exists && hl.isDirectory) {
-        const target = `${DATA_DIR}lyrics_cache/`;
-        await FileSystem.makeDirectoryAsync(target, { intermediates: true }).catch(() => {});
-        const names = await FileSystem.readDirectoryAsync(hiddenLyrics).catch(() => [] as string[]);
-        for (const n of names) {
-          await FileSystem.moveAsync({ from: `${hiddenLyrics}${n}`, to: `${target}${n}` }).catch(() => {});
-        }
-      }
-    }
-
-    // музыка из корня → Music
-    const top = await FileSystem.readDirectoryAsync(root).catch(() => [] as string[]);
-    for (const n of top) {
-      if (AUDIO_RE.test(n)) {
-        await FileSystem.moveAsync({ from: `${root}${n}`, to: `${musicDir()}${n}` }).catch(() => {});
-      }
-    }
   } catch (e) {
     console.warn('[fileScanner] legacy cleanup failed:', e);
   }
 }
 
-/** Создаёт папку Music. Больше ничего в Documents не пишется. */
+/** Создаёт структуру папок приложения */
 export async function ensureAppFolders(): Promise<void> {
   try {
     const dir = musicDir();
@@ -80,11 +53,18 @@ export async function ensureAppFolders(): Promise<void> {
   }
 }
 
+interface RawFoundFile {
+  uri: string;
+  name: string;
+  size?: number;
+  mtime?: number;
+}
+
 /**
- * Быстрый сбор файлов: не вызывает getInfoAsync на каждый аудиофайл, а проверяет расширения по именам
- * и рекурсивно заходит только в подпапки.
+ * JS-сбор файлов (запасной вариант, если нативный модуль недоступен):
+ * проверяет расширения по именам и рекурсивно заходит в подпапки (исключая скрытые служебные папки).
  */
-async function collect(dir: string, out: { uri: string; name: string }[], lrc: Set<string>) {
+async function collectJS(dir: string, out: RawFoundFile[], lrc: Set<string>, root: string) {
   let items: string[] = [];
   try {
     items = await FileSystem.readDirectoryAsync(dir);
@@ -94,14 +74,14 @@ async function collect(dir: string, out: { uri: string; name: string }[], lrc: S
 
   const subdirs: string[] = [];
   for (const item of items) {
-    if (item.startsWith('.')) continue;
+    if (item.startsWith('.')) continue; // скрытые папки и файлы (.woufy, .Trash, .DS_Store)
     const uri = `${dir}${item}`;
     if (AUDIO_RE.test(item)) {
       out.push({ uri, name: item });
     } else if (/\.lrc$/i.test(item)) {
       lrc.add(uri);
     } else if (!NON_DIR_RE.test(item)) {
-      subdirs.push(uri); // вероятная подпапка (в том числе с точкой в имени: «Vol. 2»)
+      subdirs.push(uri);
     }
   }
 
@@ -110,7 +90,7 @@ async function collect(dir: string, out: { uri: string; name: string }[], lrc: S
       subdirs.map(async (s) => {
         try {
           const info = await FileSystem.getInfoAsync(s);
-          if (info.exists && info.isDirectory) await collect(`${s}/`, out, lrc);
+          if (info.exists && info.isDirectory) await collectJS(`${s}/`, out, lrc, root);
         } catch {
           /* ignore */
         }
@@ -141,10 +121,10 @@ const collator = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' })
 let scanning: Promise<ScanResult> | null = null;
 
 /**
- * МГНОВЕННЫЙ показ библиотеки (как скачанные файлы в Spotify).
- * Здесь только чтение списка файлов (миллисекунды на 1300 треков): новые файлы сразу попадают в список
- * с названием/артистом из имени файла. Теги и обложки читаются потом, в фоне — см. enrichTracks().
- * Параллельные вызовы объединяются в один.
+ * МГНОВЕННЫЙ показ библиотеки (архитектура Spotify Local Files).
+ * Сканирует директорию нативного файлового хранилища за миллисекунды.
+ * Новые файлы сразу появляются на экране с парсингом из имени файла,
+ * а теги и обложки дочитываются аппаратным ImageIO в фоне без фризов UI.
  */
 export function scanLibrary(): Promise<ScanResult> {
   if (scanning) return scanning;
@@ -154,7 +134,7 @@ export function scanLibrary(): Promise<ScanResult> {
   return scanning;
 }
 
-function quickTrack(f: { uri: string; name: string }, id: string, ext: AudioExtension, lrcUri?: string): TrackFile {
+function quickTrack(f: RawFoundFile, id: string, ext: AudioExtension, lrcUri?: string): TrackFile {
   const baseName = f.name.replace(/\.[^/.]+$/, '');
   const fb = parseName(baseName);
   let trackNumber: number | undefined;
@@ -169,6 +149,8 @@ function quickTrack(f: { uri: string; name: string }, id: string, ext: AudioExte
     album: 'Сингл',
     trackNumber,
     lrcUri,
+    size: f.size,
+    mtime: f.mtime,
     extension: ext,
     tagged: false,
   };
@@ -180,11 +162,37 @@ async function doScan(): Promise<ScanResult> {
   const cachedTracks = await loadCachedTracks();
   const cacheMap = new Map<string, TrackFile>(cachedTracks.map((t) => [t.id, t]));
 
-  const found: { uri: string; name: string }[] = [];
+  const found: RawFoundFile[] = [];
   const lrcSet = new Set<string>();
-  await collect(musicDir(), found, lrcSet);
-
   const root = docDir();
+
+  // 1. Быстрое сканирование (нативное через Swift или fallback через JS)
+  let nativeSuccess = false;
+  if (WoufyFX?.nativeScanDirectory) {
+    try {
+      const nativeItems = await WoufyFX.nativeScanDirectory(root);
+      if (Array.isArray(nativeItems)) {
+        for (const item of nativeItems) {
+          found.push({
+            uri: item.uri,
+            name: item.filename,
+            size: item.size,
+            mtime: item.mtime,
+          });
+          if (item.lrcUri) lrcSet.add(item.lrcUri);
+        }
+        nativeSuccess = true;
+      }
+    } catch (e) {
+      console.warn('[fileScanner] nativeScanDirectory fallback to JS:', e);
+    }
+  }
+
+  if (!nativeSuccess) {
+    // Сканируем и корень Documents, и Music, избегая дублирования
+    await collectJS(root, found, lrcSet, root);
+  }
+
   const tracks: TrackFile[] = [];
   let added = 0;
   let untagged = 0;
@@ -192,20 +200,46 @@ async function doScan(): Promise<ScanResult> {
 
   for (const f of found) {
     const id = f.uri.startsWith(root) ? f.uri.slice(root.length) : f.uri;
+    if (seen.has(id)) continue;
     seen.add(id);
+
     const lrcUri = f.uri.replace(/\.[^/.]+$/, '.lrc');
     const hasLrc = lrcSet.has(lrcUri);
 
     const cached = cacheMap.get(id);
     if (cached) {
-      tracks.push({ ...cached, uri: f.uri, lrcUri: hasLrc ? lrcUri : undefined });
-      if (cached.tagged === false) untagged++;
-      continue;
+      // Инкрементальная сверка: если размер и дата изменения не менялись, берём готовые теги из кэша
+      const changed =
+        (f.mtime && cached.mtime && f.mtime !== cached.mtime) ||
+        (f.size && cached.size && f.size !== cached.size);
+
+      if (!changed && cached.tagged) {
+        tracks.push({
+          ...cached,
+          uri: f.uri,
+          lrcUri: hasLrc ? lrcUri : undefined,
+          size: f.size ?? cached.size,
+          mtime: f.mtime ?? cached.mtime,
+        });
+        continue;
+      }
+      if (!changed && cached.tagged === false) {
+        tracks.push({
+          ...cached,
+          uri: f.uri,
+          lrcUri: hasLrc ? lrcUri : undefined,
+          size: f.size ?? cached.size,
+          mtime: f.mtime ?? cached.mtime,
+        });
+        untagged++;
+        continue;
+      }
     }
 
     const extMatch = f.name.match(/\.([a-z0-9]+)$/i);
     let ext = (extMatch ? extMatch[1].toLowerCase() : 'mp3') as string;
     if (ext === 'aif') ext = 'aiff';
+
     tracks.push(quickTrack(f, id, ext as AudioExtension, hasLrc ? lrcUri : undefined));
     added++;
     untagged++;
@@ -213,7 +247,8 @@ async function doScan(): Promise<ScanResult> {
 
   const removed = cachedTracks.filter((t) => !seen.has(t.id)).length;
   tracks.sort((a, b) => collator.compare(a.id, b.id));
-  // кэш обновляем сразу, чтобы следующий запуск был мгновенным даже если фоновое чтение тегов прервут
+
+  // Кэш обновляем сразу, чтобы мгновенный запуск работал даже при внезапном закрытии
   if (added > 0 || removed > 0) saveCachedTracks(tracks);
   return { tracks, added, removed, untagged };
 }
@@ -221,9 +256,9 @@ async function doScan(): Promise<ScanResult> {
 let enriching = false;
 
 /**
- * Фоновое чтение тегов и обложек. Небольшими пачками, с «дыханием» между ними, чтобы интерфейс не подтормаживал.
- * onBatch получает обновлённые треки (раз в ~1.2 с), полный список по завершении сохраняется в кэш.
- * Возвращает false, если чтение уже идёт.
+ * Высокоскоростное фоновое чтение тегов и обложек (как в Spotify).
+ * При наличии нативного модуля читает через AVURLAsset и сжимает обложки в 512x512 JPEG нативно (ImageIO),
+ * минуя медленный JS-bridge и base64.
  */
 export async function enrichTracks(
   tracks: TrackFile[],
@@ -237,57 +272,125 @@ export async function enrichTracks(
   const todo = tracks
     .filter((t) => t.tagged === false)
     .sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9));
+
   if (todo.length === 0) return true;
   enriching = true;
+
   try {
     const all = new Map(tracks.map((t) => [t.id, t]));
     let pending: TrackFile[] = [];
     let lastFlush = Date.now();
     let sinceSave = 0;
-    const BATCH = 8;
+
+    const coversDir = `${DATA_DIR}covers/`;
+    const useNative = Boolean(WoufyFX?.nativeExtractMetadata);
+    const BATCH = useNative ? 32 : 8;
+
     for (let i = 0; i < todo.length; i += BATCH) {
       if (isCancelled()) break;
       const batch = todo.slice(i, i + BATCH);
-      const done = await Promise.all(
-        batch.map(async (t) => {
-          const meta = await parseAudioTags(t.uri, t.id, t.extension);
-          const baseName = t.filename.replace(/\.[^/.]+$/, '');
-          const fb = parseName(baseName);
-          const upd: TrackFile = {
-            ...t,
-            title: meta.title?.trim() || fb.title,
-            artist: meta.artist?.trim() || fb.artist,
-            album: meta.album?.trim() || 'Сингл',
-            artworkUri: meta.artworkUri,
-            lyrics: meta.lyrics,
-            syncedLyrics: meta.syncedLyrics,
-            bpmTag: meta.bpm,
-            trackNumber: meta.trackNumber ?? t.trackNumber,
-            discNumber: meta.discNumber,
-            tagged: true,
-          };
-          return upd;
-        })
-      );
+
+      let done: TrackFile[] = [];
+
+      if (useNative && WoufyFX?.nativeExtractMetadata) {
+        try {
+          const rawMetas = await WoufyFX.nativeExtractMetadata(
+            batch.map((t) => ({ id: t.id, uri: t.uri })),
+            coversDir
+          );
+          const metaMap = new Map(rawMetas.map((m) => [m.id, m]));
+
+          done = batch.map((t) => {
+            const meta = metaMap.get(t.id);
+            const baseName = t.filename.replace(/\.[^/.]+$/, '');
+            const fb = parseName(baseName);
+            return {
+              ...t,
+              title: meta?.title?.trim() || fb.title,
+              artist: meta?.artist?.trim() || fb.artist,
+              album: meta?.album?.trim() || 'Сингл',
+              artworkUri: meta?.artworkUri,
+              lyrics: meta?.lyrics,
+              bpmTag: meta?.bpmTag,
+              trackNumber: meta?.trackNumber ?? t.trackNumber,
+              discNumber: meta?.discNumber,
+              tagged: true,
+            };
+          });
+        } catch (nativeErr) {
+          console.warn('[fileScanner] nativeExtractMetadata error, fallback to JS for batch:', nativeErr);
+        }
+      }
+
+      // Если нативный метод не сработал или отсутствует — JS fallback
+      if (done.length === 0) {
+        done = await Promise.all(
+          batch.map(async (t) => {
+            const meta = await parseAudioTags(t.uri, t.id, t.extension);
+            const baseName = t.filename.replace(/\.[^/.]+$/, '');
+            const fb = parseName(baseName);
+            return {
+              ...t,
+              title: meta.title?.trim() || fb.title,
+              artist: meta.artist?.trim() || fb.artist,
+              album: meta.album?.trim() || 'Сингл',
+              artworkUri: meta.artworkUri,
+              lyrics: meta.lyrics,
+              syncedLyrics: meta.syncedLyrics,
+              bpmTag: meta.bpm,
+              trackNumber: meta.trackNumber ?? t.trackNumber,
+              discNumber: meta.discNumber,
+              tagged: true,
+            };
+          })
+        );
+      }
+
       for (const u of done) all.set(u.id, u);
       pending.push(...done);
       sinceSave += done.length;
-      // первая пачка (текущий трек и ближайшие) отдаётся сразу — обложки в плеере появляются без ожидания остальной библиотеки
-      if (Date.now() - lastFlush > 1200 || i === 0) {
+
+      // Первая пачка (играющий трек) отдаётся немедленно
+      if (Date.now() - lastFlush > 600 || i === 0) {
         onBatch(pending);
         pending = [];
         lastFlush = Date.now();
       }
-      if (sinceSave >= 400) {
+
+      if (sinceSave >= 300) {
         sinceSave = 0;
         saveCachedTracks([...all.values()]);
       }
-      await new Promise((r) => setTimeout(r, 12)); // отдаём поток интерфейсу
+
+      await new Promise((r) => setTimeout(r, useNative ? 4 : 12));
     }
+
     if (pending.length) onBatch(pending);
     await saveCachedTracks([...all.values()]);
   } finally {
     enriching = false;
   }
   return true;
+}
+
+/**
+ * Наблюдатель за файловой системой на уровне ядра iOS:
+ * когда пользователь закидывает файлы через «Файлы», AirDrop или Telegram,
+ * сразу вызывается onChanged.
+ */
+export function startLibraryWatcher(onChanged: () => void): () => void {
+  const root = docDir();
+  if (WoufyFX?.startDirectoryWatcher) {
+    try {
+      WoufyFX.startDirectoryWatcher(root);
+      const sub = WoufyFX.addListener('onLibraryChanged', onChanged);
+      return () => {
+        sub.remove();
+        WoufyFX?.stopDirectoryWatcher?.();
+      };
+    } catch (e) {
+      console.warn('[fileScanner] failed to start native directory watcher:', e);
+    }
+  }
+  return () => {};
 }

@@ -33,9 +33,40 @@ export interface WoufyFXNative {
   updateNowPlaying(position: number, rate: number): void;
   clearNowPlaying(): void;
   enableRemote(on: boolean): void;
+  nativeScanDirectory(directoryUri: string): Promise<
+    {
+      id: string;
+      uri: string;
+      filename: string;
+      extension: string;
+      size: number;
+      mtime: number;
+      lrcUri?: string;
+    }[]
+  >;
+  nativeExtractMetadata(
+    items: { id: string; uri: string }[],
+    coversDirUri: string
+  ): Promise<
+    {
+      id: string;
+      title?: string;
+      artist?: string;
+      album?: string;
+      artworkUri?: string;
+      bpmTag?: number;
+      trackNumber?: number;
+      discNumber?: number;
+      lyrics?: string;
+      tagged: boolean;
+    }[]
+  >;
+  startDirectoryWatcher(directoryUri: string): void;
+  stopDirectoryWatcher(): void;
   addListener(event: 'onEnded', cb: (e: { id: string }) => void): { remove: () => void };
   addListener(event: 'onSamples', cb: (e: { id: string; frames: number[] }) => void): { remove: () => void };
   addListener(event: 'onRemote', cb: (e: { command: string; position?: number }) => void): { remove: () => void };
+  addListener(event: 'onLibraryChanged', cb: () => void): { remove: () => void };
 }
 
 export const WoufyFX: WoufyFXNative | null = requireOptionalNativeModule<WoufyFXNative>('WoufyFX');

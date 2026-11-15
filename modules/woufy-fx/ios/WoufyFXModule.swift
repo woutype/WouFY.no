@@ -10,11 +10,12 @@ public class WoufyFXModule: Module {
   private let haptics = HapticsEngine()
   private var remoteTokens: [(MPRemoteCommand, Any)] = []
   private var interruptionObserver: NSObjectProtocol?
+  private var directoryWatcher: DirectoryWatcher?
 
   public func definition() -> ModuleDefinition {
     Name("WoufyFX")
 
-    Events("onEnded", "onSamples", "onRemote")
+    Events("onEnded", "onSamples", "onRemote", "onLibraryChanged")
 
     Function("isAvailable") { () -> Bool in
       return true
@@ -223,7 +224,55 @@ public class WoufyFXModule: Module {
       }
     }
 
+    // ── Нативное сканирование и извлечение метаданных (архитектура Spotify) ──
+
+    AsyncFunction("nativeScanDirectory") { (directoryUri: String) -> [[String: Any]] in
+      let url: URL
+      if directoryUri.hasPrefix("file://") {
+        guard let u = URL(string: directoryUri) else { return [] }
+        url = u
+      } else {
+        url = URL(fileURLWithPath: directoryUri)
+      }
+      return MetadataScanner.scanDirectory(rootURL: url)
+    }
+
+    AsyncFunction("nativeExtractMetadata") { (items: [[String: Any]], coversDirUri: String) -> [[String: Any]] in
+      let coversURL: URL
+      if coversDirUri.hasPrefix("file://") {
+        guard let u = URL(string: coversDirUri) else { return [] }
+        coversURL = u
+      } else {
+        coversURL = URL(fileURLWithPath: coversDirUri)
+      }
+      return MetadataScanner.extractBatch(items: items, coversDirURL: coversURL)
+    }
+
+    Function("startDirectoryWatcher") { (directoryUri: String) -> Void in
+      let url: URL
+      if directoryUri.hasPrefix("file://") {
+        guard let u = URL(string: directoryUri) else { return }
+        url = u
+      } else {
+        url = URL(fileURLWithPath: directoryUri)
+      }
+      self.directoryWatcher?.stop()
+      let watcher = DirectoryWatcher(url: url)
+      watcher.onChange = { [weak self] in
+        self?.sendEvent("onLibraryChanged", [:])
+      }
+      watcher.start()
+      self.directoryWatcher = watcher
+    }
+
+    Function("stopDirectoryWatcher") { () -> Void in
+      self.directoryWatcher?.stop()
+      self.directoryWatcher = nil
+    }
+
     OnDestroy { () -> Void in
+      self.directoryWatcher?.stop()
+      self.directoryWatcher = nil
       self.haptics.stop()
       self.removeRemote()
       for (_, p) in self.players { p.destroy() }

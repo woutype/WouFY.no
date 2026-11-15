@@ -60,6 +60,9 @@ export async function ensureDataDir(): Promise<void> {
   try {
     const info = await FileSystem.getInfoAsync(DATA_DIR);
     if (!info.exists) await FileSystem.makeDirectoryAsync(DATA_DIR, { intermediates: true });
+    const coversDir = `${DATA_DIR}covers/`;
+    const cInfo = await FileSystem.getInfoAsync(coversDir);
+    if (!cInfo.exists) await FileSystem.makeDirectoryAsync(coversDir, { intermediates: true });
   } catch (e) {
     console.warn('[library] ensureDataDir failed', e);
   }

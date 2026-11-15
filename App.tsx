@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore }
 import { ActivityIndicator, Alert, Animated, AppState, Platform, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { enrichTracks, scanLibrary } from './src/services/fileScanner';
+import { enrichTracks, scanLibrary, startLibraryWatcher } from './src/services/fileScanner';
 import { sampleBus } from './src/services/sampleBus';
 import { musicHaptics } from './src/services/musicHaptics';
 import { bpmService } from './src/services/bpm';
@@ -125,17 +125,27 @@ function Root() {
         setReady(true);
       }
     })();
+
+    // Автоматический мониторинг добавления файлов через ядро iOS (как в Spotify)
+    const stopWatcher = startLibraryWatcher(() => {
+      rescan().catch(() => {});
+    });
+
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') {
         engine.resyncSession(); // возвращаем аудио-сессию (экран блокировки / Dynamic Island) после фона
-        // подхватываем файлы, добавленные через «Файлы» (не чаще раза в 20 секунд — сканирование читает диск)
-        if (Date.now() - lastScanAt.current > 20000) rescan().catch(() => {});
+        // Мгновенно подхватываем файлы при возврате из приложения «Файлы» или Telegram
+        if (Date.now() - lastScanAt.current > 1200) rescan().catch(() => {});
         volumeService.getVolume().then((vol) => engine.setVolume(vol, false));
       } else {
         flushState();
       }
     });
-    return () => sub.remove();
+
+    return () => {
+      sub.remove();
+      stopWatcher();
+    };
   }, [engine, rescan]);
 
   useEffect(() => {
