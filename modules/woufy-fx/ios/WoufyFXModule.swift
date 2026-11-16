@@ -33,6 +33,8 @@ final class PHPickerHandler: NSObject, PHPickerViewControllerDelegate {
       }
     }
   }
+}
+
 internal func parseLocalFileURL(_ uri: String) -> URL {
   let clean = uri.hasPrefix("file://") ? String(uri.dropFirst(7)) : uri
   let decoded = clean.removingPercentEncoding ?? clean
