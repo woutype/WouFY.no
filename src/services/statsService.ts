@@ -268,6 +268,43 @@ class StatsService {
       .sort((a, b) => b.totalDuration - a.totalDuration || b.playCount - a.playCount)
       .slice(0, limit);
   }
+
+  /** Сброс статистики по конкретному треку (удаление из Топ-10 и истории) */
+  resetTrackStats(trackId: string) {
+    if (this.currentPlayStart?.track.id === trackId) {
+      this.currentPlayStart = null;
+    }
+    this.sessions = this.sessions.filter((s) => s.trackId !== trackId);
+    this.notify();
+    this.scheduleSave();
+  }
+
+  /** Сброс статистики по артисту (удаление всех его прослушиваний из Топ-10) */
+  resetArtistStats(artistName: string) {
+    const target = artistName.trim().toLowerCase();
+    if (this.currentPlayStart) {
+      const curArtists = splitArtists(this.currentPlayStart.track.artist).map((a) => a.trim().toLowerCase());
+      if (curArtists.includes(target)) {
+        this.currentPlayStart = null;
+      }
+    }
+    this.sessions = this.sessions.filter((s) => {
+      const artists = splitArtists(s.artist).map((a) => a.trim().toLowerCase());
+      return !artists.includes(target);
+    });
+    this.notify();
+    this.scheduleSave();
+  }
+
+  /** Удаление из статистики записей о несуществующих/удалённых файлах */
+  cleanupOrphanSessions(validTrackIds: Set<string>) {
+    const before = this.sessions.length;
+    this.sessions = this.sessions.filter((s) => validTrackIds.has(s.trackId));
+    if (this.sessions.length !== before) {
+      this.notify();
+      this.scheduleSave();
+    }
+  }
 }
 
 export const statsService = new StatsService();

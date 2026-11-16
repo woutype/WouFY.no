@@ -162,17 +162,32 @@ interface CoverArtProps {
   style?: StyleProp<ViewStyle>;
 }
 
-export const CoverArt: React.FC<CoverArtProps> = ({ uri, size, radius: r = 24, style }) => (
-  <View style={[{ width: size, height: size, borderRadius: r, overflow: 'hidden', backgroundColor: colors.bgElevated }, style]}>
-    {uri ? (
-      <Image source={{ uri }} style={{ width: size, height: size }} resizeMode="cover" fadeDuration={0} />
-    ) : (
-      <View style={[styles.center, { backgroundColor: colors.bgElevated }]}>
-        <Ionicons name="musical-notes" size={Math.max(14, size * 0.26)} color="rgba(255,255,255,0.22)" />
-      </View>
-    )}
-  </View>
-);
+export const CoverArt: React.FC<CoverArtProps> = ({ uri, size, radius: r = 24, style }) => {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [uri]);
+
+  return (
+    <View style={[{ width: size, height: size, borderRadius: r, overflow: 'hidden', backgroundColor: colors.bgElevated }, style]}>
+      {uri && !failed ? (
+        <Image
+          key={uri}
+          source={{ uri }}
+          style={{ width: size, height: size }}
+          resizeMode="cover"
+          fadeDuration={0}
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <View style={[styles.center, { backgroundColor: colors.bgElevated }]}>
+          <Ionicons name="musical-notes" size={Math.max(14, size * 0.26)} color="rgba(255,255,255,0.22)" />
+        </View>
+      )}
+    </View>
+  );
+};
 
 /* ───────── Фон из размытой обложки (с кросс-фейдом) ───────── */
 

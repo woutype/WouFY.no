@@ -764,12 +764,14 @@ export class AudioEngine {
     this.playIndex(0);
   }
 
-  playIndex(index: number, seekTo?: number) {
+  playIndex(index: number, seekTo?: number, isAutoSkip = false) {
     const t = this.state.queue[index];
     if (!t) return;
     if (this.trans) this.cancelTransition();
     this.mixBlockedFor = null;
-    this.errorSkips = 0;
+    if (!isAutoSkip) {
+      this.errorSkips = 0;
+    }
     this.playIntent = true;
     this.lastCommandAt = Date.now();
     const token = ++this.playToken;
@@ -987,14 +989,29 @@ export class AudioEngine {
         patch.isPlaying = true;
       }
     }
+
+    if (s.isLoaded && s.duration > 0 && !s.error) {
+      this.errorSkips = 0;
+    }
+
     if (Object.keys(patch).length) this.set(patch);
 
     if (s.error && this.playIntent) {
       if (this.errorSkips < 3 && this.state.queue.length > 1) {
         this.errorSkips++;
-        this.playIndex((this.state.index + 1) % this.state.queue.length);
+        const nextIdx = (this.state.index + 1) % this.state.queue.length;
+        setTimeout(() => {
+          if (this.playIntent) {
+            this.playIndex(nextIdx, undefined, true);
+          }
+        }, 150);
       } else {
+        this.errorSkips = 0;
         this.playIntent = false;
+        safe(() => {
+          this.A.pause();
+          this.B.pause();
+        });
         this.set({ isPlaying: false });
       }
       return;

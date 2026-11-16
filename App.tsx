@@ -207,6 +207,9 @@ function Root() {
   const settle = useCallback(
     (target: 0 | 1) => {
       setExpanded(target === 1);
+      if (target === 0 && sheet === 'queue') {
+        setScrollToCurrentTrigger((v) => v + 1);
+      }
       Animated.spring(progress, {
         toValue: target,
         useNativeDriver: true,
@@ -216,7 +219,7 @@ function Root() {
         overshootClamping: true,
       }).start();
     },
-    [progress]
+    [progress, sheet]
   );
 
   const openSheet = useCallback(

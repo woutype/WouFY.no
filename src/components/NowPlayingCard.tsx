@@ -166,11 +166,11 @@ export const NowPlayingCard: React.FC<Props> = ({
   const miniDragMode = useRef<'none' | 'vertical' | 'horizontal'>('none');
 
   useEffect(() => {
-    if (expanded) {
+    if (expanded || miniDragMode.current === 'none') {
       miniSwipeX.setValue(0);
       miniOpacityFade.setValue(1);
     }
-  }, [expanded, miniSwipeX, miniOpacityFade]);
+  }, [expanded, state.index, miniSwipeX, miniOpacityFade]);
 
   const makePan = (condition: (dx: number, dy: number) => boolean) =>
     PanResponder.create({

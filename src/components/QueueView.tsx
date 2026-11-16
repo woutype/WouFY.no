@@ -649,10 +649,18 @@ export const QueueView: React.FC<Props> = ({
       const targetOffset = Math.max(0, 4 + scrollTargetIdx * ROW_H - Math.max(0, (listH - ROW_H) / 2));
       scrollY.current = targetOffset;
       syncThumb(targetOffset);
-      listRef.current?.scrollToOffset({ offset: targetOffset, animated: false });
-      const t = setTimeout(() => {
+      try {
+        listRef.current?.scrollToIndex({ index: scrollTargetIdx, animated: false, viewPosition: 0.5 });
+      } catch {
         listRef.current?.scrollToOffset({ offset: targetOffset, animated: false });
-      }, 50);
+      }
+      const t = setTimeout(() => {
+        try {
+          listRef.current?.scrollToIndex({ index: scrollTargetIdx, animated: false, viewPosition: 0.5 });
+        } catch {
+          listRef.current?.scrollToOffset({ offset: targetOffset, animated: false });
+        }
+      }, 70);
       return () => clearTimeout(t);
     }
   }, [scrollToCurrentTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -784,6 +792,19 @@ export const QueueView: React.FC<Props> = ({
             renderItem={renderItem}
             extraData={drag}
             getItemLayout={(_, i) => ({ length: ROW_H, offset: ROW_H * i, index: i })}
+            onScrollToIndexFailed={(info) => {
+              const offset = Math.max(0, info.index * ROW_H);
+              listRef.current?.scrollToOffset({ offset, animated: false });
+              setTimeout(() => {
+                if (listRef.current) {
+                  try {
+                    listRef.current.scrollToIndex({ index: info.index, animated: false, viewPosition: 0.5 });
+                  } catch {
+                    listRef.current.scrollToOffset({ offset, animated: false });
+                  }
+                }
+              }, 60);
+            }}
             scrollEnabled={!drag}
             initialNumToRender={16}
             windowSize={7}

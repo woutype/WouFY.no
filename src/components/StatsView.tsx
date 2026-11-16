@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Animated, FlatList, LayoutAnimation, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Animated, FlatList, LayoutAnimation, PanResponder, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { statsService, StatsPeriod, TrackStatsSummary, ArtistStatsSummary } from '../services/statsService';
@@ -75,6 +75,84 @@ function RankBadge({ rank }: { rank: number }) {
     </View>
   );
 }
+
+const SwipeableStatsRow: React.FC<{
+  onReset: () => void;
+  onPress: () => void;
+  children: React.ReactNode;
+}> = ({ onReset, onPress, children }) => {
+  const panX = useRef(new Animated.Value(0)).current;
+  const isOpen = useRef(false);
+
+  const close = () => {
+    isOpen.current = false;
+    Animated.spring(panX, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 280, mass: 0.9 }).start();
+  };
+
+  const open = () => {
+    isOpen.current = true;
+    Animated.spring(panX, { toValue: -82, useNativeDriver: true, damping: 22, stiffness: 280, mass: 0.9 }).start();
+  };
+
+  const responder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => {
+        return Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.4;
+      },
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        panX.stopAnimation();
+      },
+      onPanResponderMove: (_, g) => {
+        const base = isOpen.current ? -82 : 0;
+        const v = Math.min(0, Math.max(-110, base + g.dx));
+        panX.setValue(v);
+      },
+      onPanResponderRelease: (_, g) => {
+        const base = isOpen.current ? -82 : 0;
+        const currentX = base + g.dx;
+        if (g.vx < -0.35 || currentX < -40) {
+          open();
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        } else {
+          close();
+        }
+      },
+      onPanResponderTerminate: close,
+    })
+  ).current;
+
+  const handleRowPress = () => {
+    if (isOpen.current) {
+      close();
+    } else {
+      onPress();
+    }
+  };
+
+  const handleResetPress = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    close();
+    onReset();
+  };
+
+  return (
+    <View style={styles.swipeRowWrapper}>
+      <View style={styles.resetBackdrop}>
+        <Pressable onPress={handleResetPress} style={styles.resetBtnAction}>
+          <Ionicons name="trash-outline" size={20} color="#FFFFFF" />
+          <Text style={styles.resetBtnText}>Сброс</Text>
+        </Pressable>
+      </View>
+      <Animated.View style={{ transform: [{ translateX: panX }] }} {...responder.panHandlers}>
+        <PressableScale onPress={handleRowPress} scaleTo={0.98} haptic="none">
+          {children}
+        </PressableScale>
+      </Animated.View>
+    </View>
+  );
+};
 
 export const StatsView: React.FC<Props> = ({
   tracks,
@@ -352,14 +430,14 @@ export const StatsView: React.FC<Props> = ({
               </View>
             }
             renderItem={({ item, index }) => (
-              <PressableScale
+              <SwipeableStatsRow
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                   onPlayTopTracks(resolvedTopTracks, index);
                 }}
-                scaleTo={0.98}
-                haptic="light"
-                style={styles.cardMargin}
+                onReset={() => {
+                  statsService.resetTrackStats(item.trackId);
+                }}
               >
                 <Glass radius={16} style={styles.cardGlass}>
                   <View style={styles.trackRow}>
@@ -382,7 +460,7 @@ export const StatsView: React.FC<Props> = ({
                     <Ionicons name="play-circle" size={26} color={colors.accent} style={{ marginLeft: 8 }} />
                   </View>
                 </Glass>
-              </PressableScale>
+              </SwipeableStatsRow>
             )}
           />
         </Animated.View>
@@ -420,14 +498,14 @@ export const StatsView: React.FC<Props> = ({
               </View>
             }
             renderItem={({ item, index }) => (
-              <PressableScale
+              <SwipeableStatsRow
                 onPress={() => {
                   Haptics.selectionAsync();
                   onArtistPress(item.artist);
                 }}
-                scaleTo={0.98}
-                haptic="light"
-                style={styles.cardMargin}
+                onReset={() => {
+                  statsService.resetArtistStats(item.artist);
+                }}
               >
                 <Glass radius={16} style={styles.cardGlass}>
                   <View style={styles.trackRow}>
@@ -448,7 +526,7 @@ export const StatsView: React.FC<Props> = ({
                     <Ionicons name="chevron-forward" size={18} color={colors.text3} style={{ marginLeft: 4 }} />
                   </View>
                 </Glass>
-              </PressableScale>
+              </SwipeableStatsRow>
             )}
           />
         </Animated.View>
@@ -700,5 +778,34 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     marginBottom: 10,
     paddingHorizontal: 4,
+  },
+  swipeRowWrapper: {
+    position: 'relative',
+    marginBottom: 8,
+  },
+  resetBackdrop: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: 82,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 0,
+  },
+  resetBtnAction: {
+    width: 76,
+    height: '100%',
+    backgroundColor: '#FF3B30',
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 3,
+  },
+  resetBtnText: {
+    ...type.caption,
+    fontSize: 11,
+    color: '#FFFFFF',
+    fontWeight: '700',
   },
 });

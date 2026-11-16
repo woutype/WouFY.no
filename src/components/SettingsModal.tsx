@@ -21,6 +21,8 @@ import { DJSettings, FxSettings } from '../types';
 import { colors, type } from '../theme';
 import { Glass, PressableScale } from './ui';
 import { fxDiagnostics } from '../services/fxPlayer';
+import { getStorageStats, purgeStorage, formatBytes, StorageInfo } from '../services/storageService';
+import { loadCachedTracks } from '../services/library';
 
 interface Props {
   visible: boolean;
@@ -125,10 +127,14 @@ export const SettingsModal: React.FC<Props> = ({
   const fade = useRef(new Animated.Value(0)).current;
   const [scanning, setScanning] = useState(false);
   const [scanNote, setScanNote] = useState('');
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
+  const [cleaningStorage, setCleaningStorage] = useState(false);
+  const [storageCleanNote, setStorageCleanNote] = useState('');
 
   useEffect(() => {
     if (visible) {
       setRender(true);
+      getStorageStats().then(setStorageInfo).catch(() => {});
       y.setValue(SHEET_H + 100);
       Animated.parallel([
         Animated.spring(y, { toValue: 0, useNativeDriver: true, damping: 26, stiffness: 230, mass: 1, overshootClamping: true }),
@@ -194,6 +200,34 @@ export const SettingsModal: React.FC<Props> = ({
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
       setScanning(false);
+    }
+  };
+
+  const cleanStorage = async () => {
+    if (cleaningStorage) return;
+    setCleaningStorage(true);
+    setStorageCleanNote('');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      const tracks = await loadCachedTracks();
+      const activeCovers = new Set<string>();
+      for (const t of tracks) {
+        if (t.artworkUri) {
+          const file = t.artworkUri.split('/').pop();
+          if (file) activeCovers.add(file);
+        }
+      }
+      const freed = await purgeStorage(activeCovers);
+      await onRescan();
+      const fresh = await getStorageStats();
+      setStorageInfo(fresh);
+      setStorageCleanNote(`Очищено! Освобождено: ${formatBytes(freed)}`);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch {
+      setStorageCleanNote('Ошибка при очистке');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setCleaningStorage(false);
     }
   };
 
@@ -381,9 +415,9 @@ export const SettingsModal: React.FC<Props> = ({
               />
             </View>
 
-            {/* ───── Библиотека — всегда последней ───── */}
+            {/* ───── Библиотека ───── */}
             <Text style={[styles.section, { marginTop: 30, marginBottom: 10 }]}>Библиотека</Text>
-            <Glass radius={20} style={{ marginBottom: 24 }}>
+            <Glass radius={20} style={{ marginBottom: 16 }}>
               <View style={[styles.row, { padding: 16 }]}>
                 <View style={styles.info}>
                   <Text style={styles.rowTitle}>
@@ -393,6 +427,27 @@ export const SettingsModal: React.FC<Props> = ({
                 </View>
                 <PressableScale onPress={rescan} disabled={scanning} haptic="none">
                   {scanning ? <ActivityIndicator color={colors.text} /> : <Text style={styles.link}>Обновить</Text>}
+                </PressableScale>
+              </View>
+            </Glass>
+
+            {/* ───── Память и кэш ───── */}
+            <Text style={[styles.section, { marginTop: 14, marginBottom: 10 }]}>Память и кэш</Text>
+            <Glass radius={20} style={{ marginBottom: 30 }}>
+              <View style={[styles.row, { padding: 16 }]}>
+                <View style={styles.info}>
+                  <Text style={styles.rowTitle}>
+                    {storageInfo ? storageInfo.formattedTotal : 'Вычисление…'}
+                  </Text>
+                  <Text style={styles.rowDesc}>
+                    {storageCleanNote ||
+                      (storageInfo
+                        ? `Обложек: ${storageInfo.coversCount} · Корзина: ${formatBytes(storageInfo.trashBytes)}`
+                        : 'Кэш обложек, корзина .Trash и временные данные')}
+                  </Text>
+                </View>
+                <PressableScale onPress={cleanStorage} disabled={cleaningStorage} haptic="none">
+                  {cleaningStorage ? <ActivityIndicator color={colors.text} /> : <Text style={styles.link}>Очистить</Text>}
                 </PressableScale>
               </View>
             </Glass>

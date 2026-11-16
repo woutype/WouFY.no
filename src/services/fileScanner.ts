@@ -3,6 +3,8 @@ import { parseAudioTags } from './id3Parser';
 import { loadCachedTracks, saveCachedTracks, DATA_DIR, LEGACY_DIR, ensureDataDir } from './library';
 import { AudioExtension, TrackFile } from '../types';
 import { WoufyFX } from '../../modules/woufy-fx';
+import { cleanupOrphanCovers, cleanupTrash } from './storageService';
+import { statsService } from './statsService';
 
 /** Основная папка для музыки (пользователь может класть треки и сюда, и прямо в корень WouFY.no) */
 export const MUSIC_DIR_NAME = 'Music';
@@ -250,6 +252,21 @@ async function doScan(): Promise<ScanResult> {
 
   // Кэш обновляем сразу, чтобы мгновенный запуск работал даже при внезапном закрытии
   if (added > 0 || removed > 0) saveCachedTracks(tracks);
+
+  // Автоматическая очистка сиротских обложек и корзины при удалении файлов или очистке библиотеки
+  if (removed > 0 || tracks.length === 0) {
+    const activeCovers = new Set<string>();
+    for (const t of tracks) {
+      if (t.artworkUri) {
+        const file = t.artworkUri.split('/').pop();
+        if (file) activeCovers.add(file);
+      }
+    }
+    cleanupOrphanCovers(activeCovers).catch(() => {});
+    cleanupTrash().catch(() => {});
+    statsService.cleanupOrphanSessions(new Set(tracks.map((t) => t.id)));
+  }
+
   return { tracks, added, removed, untagged };
 }
 

@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, PanResponder, StyleSheet } from 'react-native';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { Animated, PanResponder, StyleSheet, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { TrackFile } from '../types';
 import { CoverArt } from './ui';
@@ -24,10 +24,11 @@ const COVER_RADIUS = 28;
 const mod = (a: number, n: number) => ((a % n) + n) % n;
 
 /**
- * Обложка-карусель. Палец ведёт обложку 1:1: свайп влево → следующий трек,
- * вправо → предыдущий. Свайп вниз → плавно открывает очередь.
- * Соседние обложки прозрачны в покое (не «торчат» по краям, в том числе на паузе) и проявляются только при свайпе.
- * Волна рисуется внутри каждой обложки и едет вместе с ней.
+ * Обложка-карусель с идеальной синхронизацией:
+ * - Палец ведёт обложку 1:1 по горизонтали: свайп влево → следующий трек, вправо → предыдущий.
+ * - Свайп вниз → плавно открывает очередь.
+ * - В покое текущая обложка ВСЕГДА на 100% видима (opacity: 1), а соседние скрыты.
+ * - Отсутствие динамических нод Animated внутри render исключает сбои нативного драйвера iOS.
  */
 export const ArtworkCarousel: React.FC<Props> = ({
   queue,
@@ -45,38 +46,103 @@ export const ArtworkCarousel: React.FC<Props> = ({
   const STEP = size + GAP;
   const bars = useWaveLevels(showWaveform, isPlaying);
 
-  // «виртуальный слот» текущей обложки; растёт при next и убывает при prev — позиции не сбрасываются
-  const [prevIndex, setPrevIndex] = useState(index);
-  const [slot, setSlot] = useState(0);
-  if (index !== prevIndex) {
-    let d = index - prevIndex;
-    if (n > 2) {
-      if (d > n / 2) d -= n;
-      else if (d < -n / 2) d += n;
-    }
-    setPrevIndex(index);
-    setSlot(slot + (Math.abs(d) === 1 ? d : 0));
-  }
-
-  const pos = useRef(new Animated.Value(0)).current;
-  const slotRef = useRef(0);
-  slotRef.current = slot;
+  const panX = useRef(new Animated.Value(0)).current;
   const nRef = useRef(n);
   nRef.current = n;
-  const base = useRef(0);
   const cbs = useRef({ onNext, onPrevious, onDragDownGrant, onDragDownMove, onDragDownRelease });
   cbs.current = { onNext, onPrevious, onDragDownGrant, onDragDownMove, onDragDownRelease };
   const dragMode = useRef<'none' | 'horizontal' | 'vertical'>('none');
+  const isAnimating = useRef(false);
 
   useEffect(() => {
-    Animated.spring(pos, { toValue: slot, useNativeDriver: true, damping: 24, stiffness: 240, mass: 1 }).start();
-  }, [slot, pos]);
+    panX.setValue(0);
+    isAnimating.current = false;
+  }, [index, panX]);
 
-  // обложка «дышит»: на паузе чуть меньше
+  // Обложка «дышит»: на паузе чуть меньше
   const playScale = useRef(new Animated.Value(isPlaying ? 1 : 0.9)).current;
   useEffect(() => {
     Animated.spring(playScale, { toValue: isPlaying ? 1 : 0.9, useNativeDriver: true, ...springs.sheet }).start();
   }, [isPlaying, playScale]);
+
+  // Стабильные интерполяции для 3 слотов (вычисляются 1 раз)
+  const centerOpacity = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [-STEP, -STEP * 0.55, 0, STEP * 0.55, STEP],
+        outputRange: [0, 0.5, 1, 0.5, 0],
+        extrapolate: 'clamp',
+      }),
+    [panX, STEP]
+  );
+
+  const centerScale = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [-STEP, 0, STEP],
+        outputRange: [0.88, 1, 0.88],
+        extrapolate: 'clamp',
+      }),
+    [panX, STEP]
+  );
+
+  const leftTranslateX = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [-STEP, 0, STEP],
+        outputRange: [-2 * STEP, -STEP, 0],
+      }),
+    [panX, STEP]
+  );
+
+  const leftOpacity = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [0, STEP * 0.45, STEP],
+        outputRange: [0, 0.5, 1],
+        extrapolate: 'clamp',
+      }),
+    [panX, STEP]
+  );
+
+  const leftScale = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [0, STEP],
+        outputRange: [0.88, 1],
+        extrapolate: 'clamp',
+      }),
+    [panX, STEP]
+  );
+
+  const rightTranslateX = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [-STEP, 0, STEP],
+        outputRange: [0, STEP, 2 * STEP],
+      }),
+    [panX, STEP]
+  );
+
+  const rightOpacity = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [-STEP, -STEP * 0.45, 0],
+        outputRange: [1, 0.5, 0],
+        extrapolate: 'clamp',
+      }),
+    [panX, STEP]
+  );
+
+  const rightScale = useMemo(
+    () =>
+      panX.interpolate({
+        inputRange: [-STEP, 0],
+        outputRange: [1, 0.88],
+        extrapolate: 'clamp',
+      }),
+    [panX, STEP]
+  );
 
   const responder = useRef(
     PanResponder.create({
@@ -88,21 +154,21 @@ export const ArtworkCarousel: React.FC<Props> = ({
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
         dragMode.current = 'none';
-        pos.stopAnimation((v) => {
-          base.current = v;
-        });
+        isAnimating.current = false;
+        panX.stopAnimation();
       },
       onPanResponderMove: (_, g) => {
         if (dragMode.current === 'none') {
-          if (Math.abs(g.dx) > Math.abs(g.dy) && Math.abs(g.dx) > 6) dragMode.current = 'horizontal';
-          else if (g.dy > 6 && g.dy > Math.abs(g.dx)) {
+          if (Math.abs(g.dx) > Math.abs(g.dy) && Math.abs(g.dx) > 6) {
+            dragMode.current = 'horizontal';
+          } else if (g.dy > 6 && g.dy > Math.abs(g.dx)) {
             dragMode.current = 'vertical';
             cbs.current.onDragDownGrant?.();
           }
         }
         if (dragMode.current === 'horizontal') {
           const resist = nRef.current <= 1 ? 0.25 : 1;
-          pos.setValue(base.current - (g.dx * resist) / STEP);
+          panX.setValue(g.dx * resist);
         } else if (dragMode.current === 'vertical') {
           cbs.current.onDragDownMove?.(g.dy);
         }
@@ -113,53 +179,110 @@ export const ArtworkCarousel: React.FC<Props> = ({
         } else if (dragMode.current === 'horizontal') {
           const commit = Math.abs(g.dx) > size * 0.2 || Math.abs(g.vx) > 0.45;
           if (commit && nRef.current > 1) {
+            const isNext = Math.abs(g.dx) > 15 ? g.dx < 0 : g.vx < 0;
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            if (g.dx < 0) cbs.current.onNext();
-            else cbs.current.onPrevious();
+            isAnimating.current = true;
+            Animated.spring(panX, {
+              toValue: isNext ? -STEP : STEP,
+              useNativeDriver: true,
+              damping: 22,
+              stiffness: 280,
+              mass: 0.9,
+            }).start(({ finished }) => {
+              if (finished) {
+                if (isNext) cbs.current.onNext();
+                else cbs.current.onPrevious();
+              }
+              panX.setValue(0);
+              isAnimating.current = false;
+            });
           } else {
-            Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 22, stiffness: 260, mass: 1 }).start();
+            Animated.spring(panX, {
+              toValue: 0,
+              useNativeDriver: true,
+              damping: 22,
+              stiffness: 260,
+              mass: 1,
+            }).start();
           }
         }
         dragMode.current = 'none';
       },
       onPanResponderTerminate: (_, g) => {
-        if (dragMode.current === 'vertical') cbs.current.onDragDownRelease?.(g.dy, g.vy);
-        else Animated.spring(pos, { toValue: slotRef.current, useNativeDriver: true, damping: 22, stiffness: 260, mass: 1 }).start();
+        if (dragMode.current === 'vertical') {
+          cbs.current.onDragDownRelease?.(g.dy, g.vy);
+        } else {
+          Animated.spring(panX, {
+            toValue: 0,
+            useNativeDriver: true,
+            damping: 22,
+            stiffness: 260,
+            mass: 1,
+          }).start();
+        }
         dragMode.current = 'none';
       },
     })
   ).current;
 
-  const slots = useMemo(() => (n === 0 ? [] : n === 1 ? [slot] : [slot - 1, slot, slot + 1]), [n, slot]);
+  if (n === 0) return <View style={{ width: size, height: size }} />;
+
+  const currentTrack = queue[index >= 0 && index < n ? index : 0];
+  const prevTrack = n > 1 ? queue[mod(index - 1, n)] : undefined;
+  const nextTrack = n > 1 ? queue[mod(index + 1, n)] : undefined;
 
   return (
     <Animated.View style={{ width: size, height: size, transform: [{ scale: playScale }] }} {...responder.panHandlers}>
-      <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateX: Animated.multiply(pos, -STEP) }] }]}>
-        {slots.map((s) => {
-          const track = queue[mod(index + (s - slot), n)];
-          const dist = Animated.subtract(pos, s);
-          return (
-            <Animated.View
-              key={s}
-              style={[
-                styles.item,
-                {
-                  width: size,
-                  height: size,
-                  // в покое соседи полностью прозрачны (раньше на паузе из-за масштаба 0.9 по бокам были видны их края)
-                  opacity: dist.interpolate({ inputRange: [-1, -0.55, 0, 0.55, 1], outputRange: [0, 0.5, 1, 0.5, 0], extrapolate: 'clamp' }),
-                  transform: [
-                    { translateX: s * STEP },
-                    { scale: dist.interpolate({ inputRange: [-1, 0, 1], outputRange: [0.86, 1, 0.86], extrapolate: 'clamp' }) },
-                  ],
-                },
-              ]}
-            >
-              <CoverArt uri={track?.artworkUri} size={size} radius={COVER_RADIUS} />
-              {showWaveform && <WaveOverlay bars={bars} size={size} radius={COVER_RADIUS} />}
-            </Animated.View>
-          );
-        })}
+      {/* Предыдущая обложка (слева) */}
+      {prevTrack && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.item,
+            {
+              width: size,
+              height: size,
+              opacity: leftOpacity,
+              transform: [{ translateX: leftTranslateX }, { scale: leftScale }],
+            },
+          ]}
+        >
+          <CoverArt uri={prevTrack.artworkUri} size={size} radius={COVER_RADIUS} />
+        </Animated.View>
+      )}
+
+      {/* Следующая обложка (справа) */}
+      {nextTrack && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.item,
+            {
+              width: size,
+              height: size,
+              opacity: rightOpacity,
+              transform: [{ translateX: rightTranslateX }, { scale: rightScale }],
+            },
+          ]}
+        >
+          <CoverArt uri={nextTrack.artworkUri} size={size} radius={COVER_RADIUS} />
+        </Animated.View>
+      )}
+
+      {/* Центральная активная обложка */}
+      <Animated.View
+        style={[
+          styles.item,
+          {
+            width: size,
+            height: size,
+            opacity: centerOpacity,
+            transform: [{ translateX: panX }, { scale: centerScale }],
+          },
+        ]}
+      >
+        <CoverArt uri={currentTrack?.artworkUri} size={size} radius={COVER_RADIUS} />
+        {showWaveform && <WaveOverlay bars={bars} size={size} radius={COVER_RADIUS} />}
       </Animated.View>
     </Animated.View>
   );
