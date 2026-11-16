@@ -3,8 +3,8 @@
   "identifier": "com.woufy.source",
   "subtitle": "Официальный источник обновлений WouFY.no",
   "description": "Автономный музыкальный плеер для iOS с нативным аудиодвижком, эффектами и беспроводным обновлением.",
-  "iconURL": "https://raw.githubusercontent.com/woutype/WouFY.no/main/assets/icon.png",
-  "website": "https://github.com/woutype/WouFY.no",
+  "iconURL": "https://raw.githubusercontent.com/woutype/WouFY-source/main/assets/icon.png",
+  "website": "https://github.com/woutype/WouFY-source",
   "apps": [
     {
       "name": "WouFY.no",
@@ -12,13 +12,13 @@
       "developerName": "WouFY",
       "subtitle": "Офлайн-плеер со студийным звуком",
       "localizedDescription": "Офлайн-плеер с нативным аудиодвижком, поддержкой кнопок экрана блокировки и мгновенным чтением треков.",
-      "iconURL": "https://raw.githubusercontent.com/woutype/WouFY.no/main/assets/icon.png",
+      "iconURL": "https://raw.githubusercontent.com/woutype/WouFY-source/main/assets/icon.png",
       "tintColor": "1ED760",
       "versions": [
         {
           "version": "1.2.7",
           "date": "2026-11-17",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.7/woufy.ipa",
+          "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.2.7/woufy.ipa",
           "localizedDescription": "Новый скомпилированный нативный бинарник с аппаратной генерацией миниатюр и оригиналов обложек, синхронный показ обложек без мигания, точный учёт повторов и переключений в Топ-10, исправление таймингов и поиска по текстам.",
           "size": 12967080
         },
