@@ -82,6 +82,9 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
   if (flat.flexShrink !== undefined) pressableStyle.flexShrink = flat.flexShrink;
   if (flat.alignSelf !== undefined) pressableStyle.alignSelf = flat.alignSelf;
   if (flat.width !== undefined) pressableStyle.width = flat.width;
+  if (flat.height !== undefined) pressableStyle.height = flat.height;
+  if (flat.minHeight !== undefined) pressableStyle.minHeight = flat.minHeight;
+  if (flat.maxHeight !== undefined) pressableStyle.maxHeight = flat.maxHeight;
 
   return (
     <Pressable

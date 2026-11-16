@@ -33,6 +33,7 @@ export interface WoufyFXNative {
   updateNowPlaying(position: number, rate: number): void;
   clearNowPlaying(): void;
   enableRemote(on: boolean): void;
+  pickImage(): Promise<string | null>;
   nativeScanDirectory(directoryUri: string): Promise<
     {
       id: string;

@@ -20,10 +20,12 @@ interface Props {
   expanded: boolean;
   /** завершить жест: куда «долетает» карточка */
   onSettle: (target: 0 | 1) => void;
-  onOpenSheet: (mode: 'queue' | 'lyrics') => void;
+  onOpenSheet: (mode: 'queue' | 'lyrics' | 'stats') => void;
   onOpenSettings: () => void;
   onArtistPress: (artist: string) => void;
   onEditBpm: () => void;
+  onEditTags?: () => void;
+  onShareTrack?: () => void;
   bpm?: number;
   bpmSource?: 'manual' | 'tag' | 'auto';
 }
@@ -83,6 +85,8 @@ export const NowPlayingCard: React.FC<Props> = ({
   onOpenSettings,
   onArtistPress,
   onEditBpm,
+  onEditTags,
+  onShareTrack,
   bpm,
   bpmSource,
 }) => {
@@ -150,6 +154,24 @@ export const NowPlayingCard: React.FC<Props> = ({
     };
   }, [state.isPlaying, expanded, rotAnim]);
 
+  // Свайп треков в мини-плеере (как в Spotify)
+  const miniSwipeX = useRef(new Animated.Value(0)).current;
+  const miniOpacityFade = useRef(new Animated.Value(1)).current;
+  const queueRef = useRef(state.queue);
+  queueRef.current = state.queue;
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const miniDragMode = useRef<'none' | 'vertical' | 'horizontal'>('none');
+
+  useEffect(() => {
+    if (expanded) {
+      miniSwipeX.setValue(0);
+      miniOpacityFade.setValue(1);
+    }
+  }, [expanded, miniSwipeX, miniOpacityFade]);
+
   const makePan = (condition: (dx: number, dy: number) => boolean) =>
     PanResponder.create({
       onMoveShouldSetPanResponder: (_, g) => condition(g.dx, g.dy),
@@ -169,8 +191,142 @@ export const NowPlayingCard: React.FC<Props> = ({
       onPanResponderTerminate: () => onSettle(lastE.current > 0.5 ? 1 : 0),
     });
 
-  // мини-плеер: тянем ВВЕРХ; верхняя панель полного плеера: тянем ВНИЗ
-  const miniPan = useRef(makePan((dx, dy) => dy < -6 && Math.abs(dy) > Math.abs(dx))).current;
+  // мини-плеер: свайп вверх раскрывает плеер, свайп влево/вправо переключает трек как в Spotify
+  const miniPan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => {
+        if (expandedRef.current) return false;
+        const isV = g.dy < -6 && Math.abs(g.dy) > Math.abs(g.dx) * 1.1;
+        const isH = Math.abs(g.dx) > 6 && Math.abs(g.dx) > Math.abs(g.dy) * 1.1;
+        return isV || isH;
+      },
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        miniDragMode.current = 'none';
+        e.stopAnimation();
+        miniSwipeX.stopAnimation();
+        miniOpacityFade.stopAnimation();
+        base.current = lastE.current;
+      },
+      onPanResponderMove: (_, g) => {
+        if (miniDragMode.current === 'none') {
+          if (Math.abs(g.dx) > Math.abs(g.dy) && Math.abs(g.dx) > 6) {
+            miniDragMode.current = 'horizontal';
+          } else if (g.dy < -6 && Math.abs(g.dy) > Math.abs(g.dx)) {
+            miniDragMode.current = 'vertical';
+          }
+        }
+
+        if (miniDragMode.current === 'vertical') {
+          e.setValue(clamp(base.current - g.dy / range, 0, 1));
+        } else if (miniDragMode.current === 'horizontal') {
+          const n = queueRef.current.length;
+          const resist = n <= 1 ? 0.25 : 0.85;
+          const dx = g.dx * resist;
+          miniSwipeX.setValue(dx);
+          const fade = clamp(1 - (Math.abs(dx) / 160) * 0.45, 0.45, 1);
+          miniOpacityFade.setValue(fade);
+        }
+      },
+      onPanResponderRelease: (_, g) => {
+        const mode = miniDragMode.current;
+        miniDragMode.current = 'none';
+
+        if (mode === 'vertical') {
+          const now = clamp(base.current - g.dy / range, 0, 1);
+          const projected = now + -g.vy * 0.3;
+          const target: 0 | 1 = projected > 0.5 ? 1 : 0;
+          if (target !== (expandedRef.current ? 1 : 0)) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          onSettle(target);
+          return;
+        }
+
+        if (mode === 'horizontal') {
+          const n = queueRef.current.length;
+          const commit = Math.abs(g.dx) > 36 || Math.abs(g.vx) > 0.42;
+
+          if (commit && n > 1) {
+            const isNext = Math.abs(g.dx) > 15 ? g.dx < 0 : g.vx < 0;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+            const exitDist = isNext ? Math.min(g.dx - 35, -85) : Math.max(g.dx + 35, 85);
+            const enterDist = isNext ? 80 : -80;
+
+            Animated.parallel([
+              Animated.timing(miniSwipeX, {
+                toValue: exitDist,
+                duration: 95,
+                easing: Easing.out(Easing.quad),
+                useNativeDriver: true,
+              }),
+              Animated.timing(miniOpacityFade, {
+                toValue: 0,
+                duration: 85,
+                useNativeDriver: true,
+              }),
+            ]).start(() => {
+              if (isNext) {
+                engineRef.current.next();
+              } else {
+                engineRef.current.previous(true);
+              }
+
+              miniSwipeX.setValue(enterDist);
+
+              Animated.parallel([
+                Animated.spring(miniSwipeX, {
+                  toValue: 0,
+                  useNativeDriver: true,
+                  damping: 20,
+                  stiffness: 270,
+                  mass: 0.85,
+                }),
+                Animated.timing(miniOpacityFade, {
+                  toValue: 1,
+                  duration: 160,
+                  useNativeDriver: true,
+                }),
+              ]).start();
+            });
+          } else {
+            Animated.parallel([
+              Animated.spring(miniSwipeX, {
+                toValue: 0,
+                useNativeDriver: true,
+                damping: 22,
+                stiffness: 280,
+                mass: 1,
+              }),
+              Animated.timing(miniOpacityFade, {
+                toValue: 1,
+                duration: 140,
+                useNativeDriver: true,
+              }),
+            ]).start();
+          }
+          return;
+        }
+
+        Animated.parallel([
+          Animated.spring(miniSwipeX, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 280 }),
+          Animated.timing(miniOpacityFade, { toValue: 1, duration: 140, useNativeDriver: true }),
+        ]).start();
+      },
+      onPanResponderTerminate: () => {
+        if (miniDragMode.current === 'vertical') {
+          onSettle(lastE.current > 0.5 ? 1 : 0);
+        } else {
+          Animated.parallel([
+            Animated.spring(miniSwipeX, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 280 }),
+            Animated.timing(miniOpacityFade, { toValue: 1, duration: 140, useNativeDriver: true }),
+          ]).start();
+        }
+        miniDragMode.current = 'none';
+      },
+    })
+  ).current;
+
+  // верхняя панель полного плеера: тянем ВНИЗ
   const topPan = useRef(makePan((dx, dy) => dy > 6 && Math.abs(dy) > Math.abs(dx))).current;
 
   /* ───────── интерполяции ───────── */
@@ -234,6 +390,8 @@ export const NowPlayingCard: React.FC<Props> = ({
           bpmSource={bpmSource}
           onArtistPress={onArtistPress}
           onEditBpm={onEditBpm}
+          onEditTags={onEditTags}
+          onShareTrack={onShareTrack}
           onOpenQueue={() => onOpenSheet('queue')}
           onOpenLyrics={() => onOpenSheet('lyrics')}
           active={expanded}
@@ -253,7 +411,7 @@ export const NowPlayingCard: React.FC<Props> = ({
           isPlaying={state.isPlaying}
           showWaveform={showWave && expanded}
           onNext={() => engine.next()}
-          onPrevious={() => engine.previous()}
+          onPrevious={() => engine.previous(true)}
           onDragDownGrant={() => {
             e.stopAnimation();
             base.current = lastE.current;
@@ -282,15 +440,25 @@ export const NowPlayingCard: React.FC<Props> = ({
       >
         <Glass radius={m.miniH / 2} intensity={60} style={{ flex: 1 }}>
           <Pressable style={styles.miniContent} onPress={() => onSettle(1)}>
-            {/* Слот под виниловую обложку (сама обложка перетекает через shared element) */}
-            <View style={{ width: m.thumb, height: m.thumb, marginLeft: 2, marginRight: 8 }} />
-            
-            {/* Текст + таймлайн ПОД текстом (между обложкой и кнопками) */}
-            <MiniTrackCenter track={track} engine={engine} duration={state.duration} active={!expanded} />
+            <Animated.View
+              style={[
+                styles.miniTrackRow,
+                {
+                  transform: [{ translateX: miniSwipeX }],
+                  opacity: miniOpacityFade,
+                },
+              ]}
+            >
+              {/* Слот под виниловую обложку (сама обложка перетекает через shared element) */}
+              <View style={{ width: m.thumb, height: m.thumb, marginLeft: 2, marginRight: 8 }} />
+
+              {/* Текст + таймлайн ПОД текстом (между обложкой и кнопками) */}
+              <MiniTrackCenter track={track} engine={engine} duration={state.duration} active={!expanded} />
+            </Animated.View>
 
             {/* Блок из трёх кнопок справа */}
             <View style={styles.miniBtnGroup}>
-              <PressableScale onPress={() => engine.previous()} haptic="light" hitSlop={8}>
+              <PressableScale onPress={() => engine.previous(true)} haptic="light" hitSlop={8}>
                 <View style={styles.miniBtn}>
                   <Ionicons name="play-skip-back" size={19} color={colors.text} />
                 </View>
@@ -314,25 +482,36 @@ export const NowPlayingCard: React.FC<Props> = ({
       <Animated.View
         pointerEvents="none"
         style={[
-          styles.abs,
+          StyleSheet.absoluteFill,
           {
-            top: m.coverTop,
-            left: (m.W - m.cover) / 2,
-            width: m.cover,
-            height: m.cover,
-            borderRadius: heroRadius,
-            overflow: 'hidden',
-            opacity: heroOpacity,
-            transform: [
-              { translateX: heroX },
-              { translateY: heroY },
-              { scale: heroScale },
-              { rotate: spinAngle },
-            ],
+            transform: [{ translateX: miniSwipeX }],
+            opacity: miniOpacityFade,
           },
         ]}
       >
-        <CoverArt uri={track?.artworkUri} size={m.cover} radius={0} />
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.abs,
+            {
+              top: m.coverTop,
+              left: (m.W - m.cover) / 2,
+              width: m.cover,
+              height: m.cover,
+              borderRadius: heroRadius,
+              overflow: 'hidden',
+              opacity: heroOpacity,
+              transform: [
+                { translateX: heroX },
+                { translateY: heroY },
+                { scale: heroScale },
+                { rotate: spinAngle },
+              ],
+            },
+          ]}
+        >
+          <CoverArt uri={track?.artworkUri} size={m.cover} radius={0} />
+        </Animated.View>
       </Animated.View>
     </Animated.View>
   );
@@ -358,6 +537,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 8,
+  },
+  miniTrackRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   miniCenterCol: {
     flex: 1,

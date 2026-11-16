@@ -7,6 +7,7 @@ import { TrackFile } from '../types';
 import { colors, type } from '../theme';
 import { CoverArt, Glass, PressableScale } from './ui';
 import { SortOption } from '../services/queueOrder';
+import { LyricsSearchModal } from './LyricsSearchModal';
 
 export type { SortOption };
 
@@ -14,6 +15,7 @@ export const ROW_H = 68;
 
 const SORT_LABELS: Record<SortOption, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
   default: { label: 'По умолчанию', icon: 'reorder-two-outline' },
+  recent: { label: 'Недавно добавленные', icon: 'time-outline' },
   title: { label: 'По названию (А–Я)', icon: 'text-outline' },
   artist: { label: 'По артисту', icon: 'person-outline' },
   album: { label: 'По альбому', icon: 'disc-outline' },
@@ -154,18 +156,21 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
 const SortMenu: React.FC<{
   visible: boolean;
   sortMode: SortOption;
+  searchLyrics: boolean;
   onSelect: (m: SortOption) => void;
+  onToggleSearchLyrics: () => void;
+  onOpenLyricsSearch: () => void;
   onClose: () => void;
-}> = ({ visible, sortMode, onSelect, onClose }) => {
+}> = ({ visible, sortMode, searchLyrics, onSelect, onToggleSearchLyrics, onOpenLyricsSearch, onClose }) => {
   const [mounted, setMounted] = useState(visible);
   const t = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (visible) {
       setMounted(true);
-      Animated.spring(t, { toValue: 1, damping: 20, stiffness: 260, mass: 0.7, useNativeDriver: true }).start();
+      Animated.spring(t, { toValue: 1, damping: 22, stiffness: 280, mass: 0.8, useNativeDriver: true }).start();
     } else {
-      Animated.timing(t, { toValue: 0, duration: 160, easing: Easing.out(Easing.quad), useNativeDriver: true }).start(({ finished }) => {
+      Animated.timing(t, { toValue: 0, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(({ finished }) => {
         if (finished) setMounted(false);
       });
     }
@@ -175,22 +180,25 @@ const SortMenu: React.FC<{
   return (
     <>
       {/* прозрачная подложка: тап мимо закрывает меню */}
-      <Pressable style={styles.menuBackdrop} onPress={onClose} />
+      <Animated.View style={[styles.menuBackdrop, { opacity: t }]}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      </Animated.View>
       <Animated.View
         style={[
           styles.menuWrap,
           {
             opacity: t,
             transform: [
-              { translateY: t.interpolate({ inputRange: [0, 1], outputRange: [-10, 0] }) },
-              { scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) },
+              { translateY: t.interpolate({ inputRange: [0, 1], outputRange: [-12, 0] }) },
+              { scale: t.interpolate({ inputRange: [0, 1], outputRange: [0.90, 1] }) },
             ],
           },
         ]}
       >
         <Glass radius={18} intensity={70} style={styles.menuGlass}>
           <View style={styles.filterInner}>
-            {(['title', 'artist', 'album', 'default'] as const).map((opt) => {
+            <Text style={styles.menuSectionTitle}>Сортировка</Text>
+            {(['recent', 'title', 'artist', 'album', 'default'] as const).map((opt) => {
               const active = sortMode === opt;
               return (
                 <PressableScale key={opt} onPress={() => onSelect(opt)} scaleTo={0.97} haptic="selection">
@@ -202,6 +210,48 @@ const SortMenu: React.FC<{
                 </PressableScale>
               );
             })}
+
+            <View style={styles.menuDivider} />
+
+            <Text style={styles.menuSectionTitle}>Поиск по тексту</Text>
+            <PressableScale
+              onPress={() => {
+                onClose();
+                onOpenLyricsSearch();
+              }}
+              scaleTo={0.97}
+              haptic="medium"
+            >
+              <View style={styles.filterOption}>
+                <Ionicons name="sparkles-outline" size={17} color={colors.accent} />
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={[styles.filterOptionText, { color: colors.accent, fontWeight: '700' }]}>
+                    Панель поиска в текстах
+                  </Text>
+                  <Text style={styles.filterOptionSub}>
+                    Поиск фрагментов с подсветкой
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={15} color={colors.accent} />
+              </View>
+            </PressableScale>
+
+            <PressableScale onPress={onToggleSearchLyrics} scaleTo={0.97} haptic="selection">
+              <View style={[styles.filterOption, searchLyrics && styles.filterOptionActive]}>
+                <Ionicons name="document-text-outline" size={17} color={searchLyrics ? colors.onAccent : colors.text} />
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={[styles.filterOptionText, searchLyrics && styles.filterOptionTextActive]}>
+                    Быстрый фильтр очереди
+                  </Text>
+                  <Text style={[styles.filterOptionSub, searchLyrics && styles.filterOptionSubActive]}>
+                    Искать в строке поиска очереди
+                  </Text>
+                </View>
+                <View style={[styles.toggleBox, searchLyrics && styles.toggleBoxActive]}>
+                  {searchLyrics && <Ionicons name="checkmark" size={13} color="#FFFFFF" />}
+                </View>
+              </View>
+            </PressableScale>
           </View>
         </Glass>
       </Animated.View>
@@ -252,12 +302,16 @@ interface Props {
   /** сортировка и поиск применяются к самой очереди (в движке), здесь только органы управления */
   sortMode: SortOption;
   onSortChange: (m: SortOption) => void;
+  searchLyrics?: boolean;
+  onSearchLyricsChange?: (v: boolean) => void;
   /** играющий трек не подходит под фильтр: он первый в очереди, но в списке не показывается */
   pinned: boolean;
   onPlay: (index: number, track?: TrackFile) => void;
+  onPlayTrackWithSeek?: (track: TrackFile, seekTime?: number) => void;
   onMove: (from: number, to: number) => void;
   onRefresh: () => Promise<void>;
   bottomPad: number;
+  scrollToCurrentTrigger?: number;
 }
 
 interface DragState {
@@ -273,11 +327,15 @@ export const QueueView: React.FC<Props> = ({
   onSearchChange,
   sortMode,
   onSortChange,
+  searchLyrics = false,
+  onSearchLyricsChange,
   pinned,
   onPlay,
+  onPlayTrackWithSeek,
   onMove,
   onRefresh,
   bottomPad,
+  scrollToCurrentTrigger,
 }) => {
   const listRef = useRef<FlatList<{ track: TrackFile; qi: number }>>(null);
   const [listH, setListH] = useState(600);
@@ -291,6 +349,7 @@ export const QueueView: React.FC<Props> = ({
   const [refreshing, setRefreshing] = useState(false);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [showFilterMenu, setShowFilterMenu] = useState(false);
+  const [showLyricsSearch, setShowLyricsSearch] = useState(false);
 
   // Локальная копия очереди: перестановка и сброс сдвигов применяются одним обновлением
   const [localTracks, setLocalTracks] = useState(tracks);
@@ -305,20 +364,22 @@ export const QueueView: React.FC<Props> = ({
   }, [tracks, drag]);
 
   const sortActive = sortMode !== 'default';
-  const filtering = searchQuery.trim().length > 0 || sortActive;
+  const filtering = searchQuery.trim().length > 0 || sortActive || searchLyrics;
 
   const handleSelectSort = (mode: SortOption) => {
     setShowFilterMenu(false);
-    if (mode === sortMode) return;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     onSortChange(mode);
   };
 
   const handleReset = useCallback(() => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     onSearchChange('');
+    onSearchLyricsChange?.(false);
     setShowFilterMenu(false);
     if (sortMode !== 'default') onSortChange('default');
-  }, [onSearchChange, onSortChange, sortMode]);
+  }, [onSearchChange, onSearchLyricsChange, onSortChange, sortMode]);
 
   // очередь уже отфильтрована и отсортирована движком; закреплённый (не подходящий под фильтр) играющий трек не показываем
   const data = useMemo(() => {
@@ -485,14 +546,6 @@ export const QueueView: React.FC<Props> = ({
 
   useEffect(() => stopAuto, []);
 
-  // при открытии прокручиваем к текущему треку
-  useEffect(() => {
-    if (!filtering && currentIndex > 2) {
-      const t = setTimeout(() => listRef.current?.scrollToOffset({ offset: (currentIndex - 1) * ROW_H, animated: false }), 50);
-      return () => clearTimeout(t);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   const dragTrack = useMemo(() => (drag ? localTracks.find((t) => t.id === drag.id) : undefined), [drag, localTracks]);
 
   /* ───────── ползунок: потянул вниз — пролистал до самого последнего трека ───────── */
@@ -586,6 +639,24 @@ export const QueueView: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortMode]);
 
+  // переход в очередь по слайдеру: центрируем играющий трек
+  useEffect(() => {
+    if (!scrollToCurrentTrigger) return;
+    const scrollTargetIdx = data.findIndex(
+      (d) => (currentTrackId ? d.track.id === currentTrackId : d.qi === currentIndex)
+    );
+    if (scrollTargetIdx >= 0) {
+      const targetOffset = Math.max(0, 4 + scrollTargetIdx * ROW_H - Math.max(0, (listH - ROW_H) / 2));
+      scrollY.current = targetOffset;
+      syncThumb(targetOffset);
+      listRef.current?.scrollToOffset({ offset: targetOffset, animated: false });
+      const t = setTimeout(() => {
+        listRef.current?.scrollToOffset({ offset: targetOffset, animated: false });
+      }, 50);
+      return () => clearTimeout(t);
+    }
+  }, [scrollToCurrentTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const currentTrackIndex = useMemo(
     () => (currentTrackId ? localTracks.findIndex((t) => t.id === currentTrackId) : currentIndex),
     [localTracks, currentTrackId, currentIndex]
@@ -625,7 +696,7 @@ export const QueueView: React.FC<Props> = ({
     Animated.timing(chipAnim, { toValue: sortActive ? 1 : 0, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
   }, [sortActive, chipAnim]);
 
-  const funnelActive = sortActive || showFilterMenu;
+  const funnelActive = sortActive || searchLyrics || showFilterMenu;
 
   return (
     <View style={{ flex: 1 }}>
@@ -637,7 +708,7 @@ export const QueueView: React.FC<Props> = ({
                 <Ionicons name="search" size={16} color={colors.text3} />
                 <TextInput
                   style={styles.searchInput}
-                  placeholder="Поиск по названию, артисту, альбому"
+                  placeholder={searchLyrics ? 'Поиск по строчке из текста…' : 'Поиск по названию, артисту, альбому'}
                   placeholderTextColor={colors.text3}
                   value={searchQuery}
                   onChangeText={onSearchChange}
@@ -653,6 +724,11 @@ export const QueueView: React.FC<Props> = ({
               </View>
             </Glass>
           </View>
+          <PressableScale onPress={() => setShowLyricsSearch(true)} hitSlop={6}>
+            <View style={[styles.filterBtn, showLyricsSearch && styles.filterBtnActive]}>
+              <Ionicons name="document-text-outline" size={17} color={showLyricsSearch ? colors.onAccent : colors.text} />
+            </View>
+          </PressableScale>
           <PressableScale onPress={() => setShowFilterMenu((v) => !v)} hitSlop={6}>
             <View style={[styles.filterBtn, funnelActive && styles.filterBtnActive]}>
               <Ionicons name="funnel-outline" size={17} color={funnelActive ? colors.onAccent : colors.text} />
@@ -661,9 +737,17 @@ export const QueueView: React.FC<Props> = ({
         </View>
 
         <View style={styles.metaRow}>
-          <Text style={styles.count}>
-            {filtering ? `Найдено: ${data.length}` : `${localTracks.length} ${plural(localTracks.length)}`}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Text style={styles.count}>
+              {filtering ? `Найдено: ${data.length}` : `${localTracks.length} ${plural(localTracks.length)}`}
+            </Text>
+            {searchLyrics && (
+              <View style={styles.lyricsPill}>
+                <Ionicons name="document-text" size={11} color={colors.accent} />
+                <Text style={styles.lyricsPillText}>В текстах</Text>
+              </View>
+            )}
+          </View>
           <Animated.View
             pointerEvents={sortActive ? 'auto' : 'none'}
             style={[styles.metaRight, { opacity: chipAnim, transform: [{ translateX: chipAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }] }]}
@@ -780,9 +864,31 @@ export const QueueView: React.FC<Props> = ({
             <ScrollBubble ref={bubbleRef} y={thumbY} />
           </>
         )}
-        {/* меню сортировки поверх списка: появляется плавно и не сдвигает список */}
-        <SortMenu visible={showFilterMenu} sortMode={sortMode} onSelect={handleSelectSort} onClose={() => setShowFilterMenu(false)} />
+        <LyricsSearchModal
+          visible={showLyricsSearch}
+          tracks={tracks}
+          onSelectTrack={(track, seekTime) => {
+            setShowLyricsSearch(false);
+            if (onPlayTrackWithSeek) {
+              onPlayTrackWithSeek(track, seekTime);
+            } else {
+              onPlay(-1, track);
+            }
+          }}
+          onClose={() => setShowLyricsSearch(false)}
+        />
       </View>
+
+      {/* меню сортировки: крепится ровно под кнопкой фильтра с отступом 6px */}
+      <SortMenu
+        visible={showFilterMenu}
+        sortMode={sortMode}
+        searchLyrics={searchLyrics}
+        onSelect={handleSelectSort}
+        onToggleSearchLyrics={() => onSearchLyricsChange?.(!searchLyrics)}
+        onOpenLyricsSearch={() => setShowLyricsSearch(true)}
+        onClose={() => setShowFilterMenu(false)}
+      />
     </View>
   );
 };
@@ -811,14 +917,83 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   filterBtnActive: { backgroundColor: colors.accent, borderColor: colors.accent },
-  menuBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 },
-  menuWrap: { position: 'absolute', top: 6, right: 16, width: 250, zIndex: 30, transformOrigin: 'top right' },
-  menuGlass: { borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.14)' },
+  menuBackdrop: { position: 'absolute', top: -300, left: -100, right: -100, bottom: -1000, zIndex: 90 },
+  menuWrap: {
+    position: 'absolute',
+    top: 46,
+    right: 16,
+    width: 260,
+    zIndex: 100,
+    transformOrigin: 'top right',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.5,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  menuGlass: { borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.16)' },
   filterInner: { padding: 6, gap: 2 },
   filterOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, paddingHorizontal: 12, borderRadius: 12, gap: 10 },
   filterOptionActive: { backgroundColor: colors.accent },
   filterOptionText: { ...type.body, fontSize: 14, color: colors.text, fontWeight: '500' },
   filterOptionTextActive: { color: colors.onAccent, fontWeight: '700' },
+  menuSectionTitle: {
+    ...type.caption,
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.text3,
+    textTransform: 'uppercase',
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 2,
+    letterSpacing: 0.5,
+  },
+  menuDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    marginVertical: 4,
+  },
+  filterOptionSub: {
+    ...type.caption,
+    fontSize: 10,
+    color: colors.text3,
+    marginTop: 2,
+    fontWeight: '500',
+  },
+  filterOptionSubActive: {
+    color: 'rgba(8, 8, 8, 0.60)',
+    fontWeight: '500',
+  },
+  toggleBox: {
+    width: 20,
+    height: 20,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toggleBoxActive: {
+    borderColor: '#080808',
+    backgroundColor: '#080808',
+  },
+  lyricsPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 3,
+    paddingHorizontal: 7,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+  },
+  lyricsPillText: {
+    ...type.caption,
+    fontSize: 11,
+    color: colors.text,
+    fontWeight: '700',
+  },
   metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10, paddingHorizontal: 4, minHeight: 28 },
   metaRight: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },
   activePill: {

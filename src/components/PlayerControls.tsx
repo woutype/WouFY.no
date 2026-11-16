@@ -14,6 +14,8 @@ interface Props {
   bpmSource?: 'manual' | 'tag' | 'auto';
   onArtistPress: (artist: string) => void;
   onEditBpm: () => void;
+  onEditTags?: () => void;
+  onShareTrack?: () => void;
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
   /** плеер раскрыт (иначе таймлайн не опрашивается) */
@@ -62,6 +64,8 @@ export const PlayerControls: React.FC<Props> = ({
   bpmSource,
   onArtistPress,
   onEditBpm,
+  onEditTags,
+  onShareTrack,
   onOpenQueue,
   onOpenLyrics,
   active = true,
@@ -96,16 +100,27 @@ export const PlayerControls: React.FC<Props> = ({
             </Text>
           </PressableScale>
         </View>
+
         {track && (
-          <PressableScale onPress={onEditBpm} scaleTo={0.94}>
-            <Glass radius={14} style={styles.bpmChip}>
-              <View style={styles.bpmInner}>
-                {state.mixing && <View style={styles.mixDot} />}
-                <Text style={styles.bpmText}>{bpm ? `${Math.round(bpm)} BPM` : 'BPM ?'}</Text>
-                {bpmSource === 'auto' && <Text style={styles.bpmAuto}>авто</Text>}
-              </View>
-            </Glass>
-          </PressableScale>
+          <View style={styles.chipGroup}>
+            {onEditTags && (
+              <PressableScale onPress={onEditTags} scaleTo={0.94} hitSlop={6}>
+                <Glass radius={14} style={styles.editChip}>
+                  <Ionicons name="pencil" size={13} color={colors.text} />
+                </Glass>
+              </PressableScale>
+            )}
+
+            <PressableScale onPress={onEditBpm} scaleTo={0.94}>
+              <Glass radius={14} style={styles.bpmChip}>
+                <View style={styles.bpmInner}>
+                  {state.mixing && <View style={styles.mixDot} />}
+                  <Text style={styles.bpmText}>{bpm ? `${Math.round(bpm)} BPM` : 'BPM ?'}</Text>
+                  {bpmSource === 'auto' && <Text style={styles.bpmAuto}>авто</Text>}
+                </View>
+              </Glass>
+            </PressableScale>
+          </View>
         )}
       </View>
 
@@ -152,7 +167,11 @@ export const PlayerControls: React.FC<Props> = ({
         <Ionicons name="volume-high" size={16} color={colors.text3} />
       </View>
 
-      <SheetSwitcher onOpenQueue={onOpenQueue} onOpenLyrics={onOpenLyrics} />
+      <SheetSwitcher
+        onOpenQueue={onOpenQueue}
+        onOpenLyrics={onOpenLyrics}
+        onShareTrack={onShareTrack}
+      />
     </View>
   );
 };
@@ -160,6 +179,8 @@ export const PlayerControls: React.FC<Props> = ({
 const styles = StyleSheet.create({
   wrap: { flex: 1, paddingHorizontal: 24, justifyContent: 'space-between', paddingTop: 12 },
   infoRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  chipGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  editChip: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
   title: { ...type.largeTitle, fontSize: 28, color: colors.text },
   artist: { ...type.headline, color: colors.text2, marginTop: 2 },
   bpmChip: { height: 28 },

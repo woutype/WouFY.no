@@ -4,8 +4,9 @@ import { planMix, ratesAt, volumesAt, beatPhase, wrapHalf, MixPlan, TrackTempo, 
 import { configureAudioSession } from './audioService';
 import { volumeService } from './volumeService';
 import type { PlayerLike, PlayerStatus } from './playerLike';
-import { createFxPlayer, fxNativeAvailable, fxRemote } from './fxPlayer';
+import { createFxPlayer, fxNativeAvailable, fxRemote, setRemoteHandler, WoufyFX } from './fxPlayer';
 import { SortOption, applySort, matchesQuery, normQuery } from './queueOrder';
+import { statsService } from './statsService';
 
 type AudioPlayer = PlayerLike;
 type AudioStatus = PlayerStatus;
@@ -179,11 +180,21 @@ export class AudioEngine {
   /** фильтры очереди */
   private query = '';
   private sortMode: SortOption = 'default';
+  private searchLyrics = false;
   /** порядок перемешивания ВСЕЙ библиотеки (очередь = он же, отфильтрованный) */
   private shufflePerm: string[] = [];
 
+  /** Защита от перегрузки AVPlayer при быстром перелистывании (2+ трека подряд) */
+  private lastSkipTime = 0;
+  private skipDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private audioSessionConfigured = false;
+  private lastSeekTarget: { time: number; requestedAt: number } | null = null;
+  private lastPrevTapTime = 0;
+
   constructor() {
-    configureAudioSession(true);
+    configureAudioSession(true).then(() => {
+      this.audioSessionConfigured = true;
+    });
     this.players = this.makePlayers('native');
     this.state = {
       queue: [],
@@ -202,7 +213,7 @@ export class AudioEngine {
     this.attachPlayers();
     this.timer = setInterval(this.tick, this.tickMs);
 
-    fxRemote.handler = (cmd, pos) => this.handleRemote(cmd, pos);
+    setRemoteHandler((cmd, pos) => this.handleRemote(cmd, pos));
 
     // Синхронизация с физической громкостью телефона (кнопки iPhone и Центр управления)
     volumeService.addListener((vol) => {
@@ -397,7 +408,9 @@ export class AudioEngine {
 
   /** Повторно активирует аудио-сессию (при возврате в приложение) */
   resyncSession() {
-    configureAudioSession(true);
+    configureAudioSession(true).then(() => {
+      this.audioSessionConfigured = true;
+    });
     const t = this.currentTrack;
     if (t) this.updateLockScreen(this.uiPlayer(), t);
   }
@@ -472,6 +485,9 @@ export class AudioEngine {
     return this.state.queue[this.state.index];
   }
   getPosition(): number {
+    if (this.lastSeekTarget && Date.now() - this.lastSeekTarget.requestedAt < 400) {
+      return this.lastSeekTarget.time;
+    }
     return safe(() => this.uiPlayer().currentTime) ?? 0;
   }
   getDuration(): number {
@@ -487,15 +503,19 @@ export class AudioEngine {
    */
   private deriveQueue(curId: string | undefined = this.currentTrack?.id, shuffle: boolean = this.state.shuffle) {
     const byId = new Map(this.library.map((t) => [t.id, t]));
-    const ids = shuffle ? this.shufflePerm : this.baseOrder;
+    const isCustomSort = this.sortMode !== 'default';
+    // Если включена кастомная сортировка (не default), порядок задаётся сортировкой, а не перемешиванием
+    const ids = shuffle && !isCustomSort ? this.shufflePerm : this.baseOrder;
     let list: TrackFile[] = [];
     for (const id of ids) {
       const t = byId.get(id);
       if (t) list.push(t);
     }
-    if (!shuffle) list = applySort(list, this.sortMode); // при перемешивании порядок случайный, но поиск действует
     const q = this.query;
-    if (q) list = list.filter((t) => matchesQuery(t, q));
+    if (q) list = list.filter((t) => matchesQuery(t, q, this.searchLyrics));
+    if (isCustomSort) {
+      list = applySort(list, this.sortMode);
+    }
     let index = -1;
     let pinned = false;
     const cur = curId ? byId.get(curId) : undefined;
@@ -510,14 +530,22 @@ export class AudioEngine {
     return { queue: list, index, pinned };
   }
 
-  /** Перемешивание всей библиотеки; играющий трек — первым (то, что уже играло, «позади» не появляется) */
+  /**
+   * Smart Weighted Shuffle:
+   * Треки, которые слушаются чаще, получают больший вес и оказываются ближе к началу.
+   * Скипнутые треки получают меньший вес, но не удаляются совсем.
+   * Алгоритм: Efraimidis-Spirakis weighted sampling (O(N log N)).
+   */
   private makeShufflePerm(curId?: string): string[] {
     const rest = this.library.map((t) => t.id).filter((id) => id !== curId);
-    for (let i = rest.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [rest[i], rest[j]] = [rest[j], rest[i]];
-    }
-    return curId ? [curId, ...rest] : rest;
+    const weighted = rest.map((id) => {
+      const w = statsService.getTrackWeight(id);
+      const key = Math.pow(Math.random(), 1 / Math.max(0.01, w));
+      return { id, key };
+    });
+    weighted.sort((a, b) => b.key - a.key);
+    const shuffled = weighted.map((item) => item.id);
+    return curId ? [curId, ...shuffled] : shuffled;
   }
 
   setLibrary(tracks: TrackFile[], savedOrder?: string[], savedLastId?: string) {
@@ -582,7 +610,11 @@ export class AudioEngine {
   }
 
   private notifyTrackChange() {
-    this.onTrackChange(this.currentTrack, this.upcoming());
+    const cur = this.currentTrack;
+    if (cur) {
+      statsService.onTrackStart(cur, this.state.duration, this.getPosition());
+    }
+    this.onTrackChange(cur, this.upcoming());
     this.persist();
   }
 
@@ -632,10 +664,13 @@ export class AudioEngine {
     if (on === this.state.shuffle) return;
     this.settleTransition();
     const cur = this.currentTrack;
-    if (on) this.shufflePerm = this.makeShufflePerm(cur?.id);
+    if (on) {
+      this.shufflePerm = this.makeShufflePerm(cur?.id);
+      this.sortMode = 'default';
+    }
     const d = this.deriveQueue(cur?.id, on);
     this.prep = null;
-    this.set({ shuffle: on, queue: d.queue, index: d.index, pinned: d.pinned });
+    this.set({ shuffle: on, sort: this.sortMode, queue: d.queue, index: d.index, pinned: d.pinned });
     this.persist();
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
@@ -644,16 +679,28 @@ export class AudioEngine {
    * Поиск и сортировка очереди. Очередь пересобирается целиком: «следующий трек» — всегда следующий в том списке,
    * который показан на экране. С включённым перемешиванием перемешиваются только найденные треки.
    */
-  setFilter(patch: { query?: string; sort?: SortOption }) {
+  setFilter(patch: { query?: string; sort?: SortOption; searchLyrics?: boolean }) {
     const nq = patch.query !== undefined ? normQuery(patch.query) : this.query;
     const ns = patch.sort ?? this.sortMode;
-    if (nq === this.query && ns === this.sortMode) return;
+    const nsl = patch.searchLyrics !== undefined ? patch.searchLyrics : this.searchLyrics;
+    const isSortExplicit = patch.sort !== undefined;
+    if (!isSortExplicit && nq === this.query && ns === this.sortMode && nsl === this.searchLyrics) return;
     this.settleTransition();
     this.query = nq;
     this.sortMode = ns;
-    const d = this.deriveQueue();
+    this.searchLyrics = nsl;
+    // При явном выборе режима сортировки (не default) отключаем shuffle
+    const shuffle = ns !== 'default' ? false : this.state.shuffle;
+    const d = this.deriveQueue(undefined, shuffle);
     this.prep = null;
-    this.set({ queue: d.queue, index: d.index, pinned: d.pinned, sort: ns, filtered: nq.length > 0 });
+    this.set({
+      shuffle,
+      queue: d.queue,
+      index: d.index,
+      pinned: d.pinned,
+      sort: ns,
+      filtered: nq.length > 0 || nsl,
+    });
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
 
@@ -686,40 +733,119 @@ export class AudioEngine {
 
   /* ───────────── управление воспроизведением ───────────── */
 
-  playTrack(trackOrId: TrackFile | string) {
+  playTrack(trackOrId: TrackFile | string, seekTo?: number) {
     const id = typeof trackOrId === 'string' ? trackOrId : trackOrId.id;
     const idx = this.state.queue.findIndex((t) => t.id === id);
-    if (idx >= 0) this.playIndex(idx);
+    if (idx >= 0) {
+      this.playIndex(idx, seekTo);
+    } else {
+      const libIdx = this.library.findIndex((t) => t.id === id);
+      if (libIdx >= 0) {
+        this.query = '';
+        const d = this.deriveQueue(id, false);
+        this.set({ queue: d.queue, index: d.index, filtered: false });
+        if (d.index >= 0) this.playIndex(d.index, seekTo);
+      }
+    }
   }
 
-  playIndex(index: number) {
+  /** Воспроизведение треков из Топ-10: сначала играет выбранный трек, затем остальные из топа, затем обычная библиотека */
+  playTopTracks(topList: TrackFile[], startIndex: number) {
+    if (topList.length === 0 || startIndex < 0 || startIndex >= topList.length) return;
+    this.settleTransition();
+    const topIds = new Set(topList.map((t) => t.id));
+    const topOrdered = [...topList.slice(startIndex), ...topList.slice(0, startIndex)];
+    const rest = this.library.filter((t) => !topIds.has(t.id));
+    const combined = [...topOrdered, ...rest];
+    this.baseOrder = combined.map((t) => t.id);
+    this.shufflePerm = this.makeShufflePerm(topOrdered[0]?.id);
+    const d = this.deriveQueue(topOrdered[0]?.id, false);
+    this.set({ queue: d.queue, index: 0, sort: 'default', filtered: false });
+    this.playIndex(0);
+  }
+
+  playIndex(index: number, seekTo?: number) {
     const t = this.state.queue[index];
     if (!t) return;
     if (this.trans) this.cancelTransition();
-    this.applyPendingMode(false); // эффекты отключены, а плееры ещё на AVAudioEngine — меняем их сейчас, звук всё равно переключается на новый трек
     this.mixBlockedFor = null;
     this.errorSkips = 0;
     this.playIntent = true;
     this.lastCommandAt = Date.now();
     const token = ++this.playToken;
+
+    // 1. Мгновенно переключаем визуальный UI (0ms): обложка, название, карточка и очередь обновляются без малейшей задержки
+    this.prep = null;
+    this.set({ index, isPlaying: true, duration: 0, player: this.A, mixing: false });
+    this.updateLockScreen(this.A, t);
+    this.onTrackChange(t, this.upcoming());
+    this.persist();
+
+    // 2. Умная защита от заклинивания нативного AVPlayer при быстром перелистывании (2+ трека подряд)
+    const now = Date.now();
+    const isBurst = now - this.lastSkipTime < 260;
+    this.lastSkipTime = now;
+
+    if (this.skipDebounceTimer) {
+      clearTimeout(this.skipDebounceTimer);
+      this.skipDebounceTimer = null;
+    }
+
+    if (isBurst) {
+      // Быстрое пролистывание: сразу глушим звук предыдущего трека
+      safe(() => {
+        this.A.pause();
+        this.B.pause();
+      });
+      // Откладываем тяжелый native replaceCurrentItem на 120ms:
+      // если пользователь нажмет еще раз, этот таймер сбросится и AVPlayer загрузит ТОЛЬКО финальный трек,
+      // полностью исключая 2-3 секундный затуп из-за отмены очередей AVPlayerItem
+      this.skipDebounceTimer = setTimeout(() => {
+        this.skipDebounceTimer = null;
+        this.performLoadAndPlay(t, seekTo, token);
+      }, 120);
+    } else {
+      // Одиночное переключение — стартуем сразу без задержек
+      this.performLoadAndPlay(t, seekTo, token);
+    }
+  }
+
+  private performLoadAndPlay(t: TrackFile, seekTo: number | undefined, token: number) {
+    if (token !== this.playToken || !this.playIntent) return;
+    this.applyPendingMode(false);
     const a = this.A;
     safe(() => {
       this.B.pause();
       this.load(a, t.uri);
+      if (typeof seekTo === 'number' && seekTo > 0) {
+        a.seekTo(seekTo);
+      }
       a.volume = Math.max(0.05, this.master());
       a.muted = false;
     });
     this.applyFx(a);
     this.setRate(a, 1);
-    // ВАЖНО: play() только после того, как аудио-сессия (doNotMix) реально активирована — иначе при первом запуске
-    // iOS мог оставить сессию в другом режиме и трек «играл» без звука
-    configureAudioSession(true).then(() => {
-      if (token === this.playToken && this.playIntent) safe(() => a.play());
-    });
-    this.prep = null;
-    this.set({ index, isPlaying: true, duration: 0, player: a, mixing: false });
-    this.updateLockScreen(a, t);
-    this.notifyTrackChange();
+
+    const doPlay = () => {
+      if (token !== this.playToken || !this.playIntent) return;
+      safe(() => {
+        if (typeof seekTo === 'number' && seekTo > 0) {
+          a.seekTo(seekTo);
+        }
+        a.play();
+      });
+    };
+
+    if (this.audioSessionConfigured) {
+      doPlay();
+    } else {
+      configureAudioSession(true).then(() => {
+        this.audioSessionConfigured = true;
+        doPlay();
+      });
+    }
+
+    statsService.onTrackStart(t, this.state.duration, seekTo ?? 0);
   }
 
   togglePlay() {
@@ -731,26 +857,44 @@ export class AudioEngine {
     if (this.playIntent) {
       this.playIntent = false;
       this.playToken++;
+      if (this.skipDebounceTimer) {
+        clearTimeout(this.skipDebounceTimer);
+        this.skipDebounceTimer = null;
+      }
       safe(() => {
         this.A.pause();
         if (this.trans) this.trans.to.pause();
       });
+      statsService.finalizeCurrent();
       this.set({ isPlaying: false });
       if (this.pendingNative && !this.trans) this.applyPendingMode(true);
+      this.syncLockScreenPlayback();
     } else {
       this.playIntent = true;
       const token = ++this.playToken;
       const a = this.A;
       const to = this.trans?.to;
-      configureAudioSession(true).then(() => {
+      const doPlay = () => {
         if (token !== this.playToken || !this.playIntent) return;
         safe(() => {
           a.muted = false;
           a.play();
           to?.play();
         });
-      });
+      };
+      if (this.audioSessionConfigured) {
+        doPlay();
+      } else {
+        configureAudioSession(true).then(() => {
+          this.audioSessionConfigured = true;
+          doPlay();
+        });
+      }
+      if (this.currentTrack) {
+        statsService.onTrackStart(this.currentTrack, this.state.duration, this.getPosition());
+      }
       this.set({ isPlaying: true });
+      this.syncLockScreenPlayback();
     }
   }
 
@@ -765,18 +909,31 @@ export class AudioEngine {
     this.playIndex((this.state.index + 1) % n);
   }
 
-  previous() {
+  previous(forceTrackChange = false) {
     const n = this.state.queue.length;
     if (n === 0) return;
     if (this.trans) {
       if (this.trans.uiSwitched) this.commitTransition();
       else this.cancelTransition();
     }
+
+    const now = Date.now();
+    const isDoubleTap = now - this.lastPrevTapTime < 2000;
+    this.lastPrevTapTime = now;
+
+    // Свайп обложки или повторное нажатие кнопки в течение 2 секунд: всегда переключаем на предыдущий трек
+    if (forceTrackChange || isDoubleTap) {
+      this.playIndex((this.state.index - 1 + n) % n);
+      return;
+    }
+
+    // Первое нажатие: если прошло больше 3 секунд — перематываем в начало трека
     if (this.getPosition() > 3) {
       this.seek(0);
       if (!this.playIntent) this.togglePlay();
       return;
     }
+
     this.playIndex((this.state.index - 1 + n) % n);
   }
 
@@ -786,7 +943,13 @@ export class AudioEngine {
       else this.cancelTransition();
     }
     this.mixBlockedFor = null;
-    safe(() => this.A.seekTo(Math.max(0, seconds)));
+    const clamped = Math.max(0, seconds);
+    this.lastSeekTarget = { time: clamped, requestedAt: Date.now() };
+    safe(() => this.A.seekTo(clamped));
+    const fx = WoufyFX;
+    if (fx) {
+      safe(() => fx.updateNowPlaying(clamped, this.state.isPlaying ? 1.0 : 0.0));
+    }
   }
 
   /* ───────────── обработка событий плеера ───────────── */
@@ -796,8 +959,20 @@ export class AudioEngine {
       // конец трека A во время склейки обрабатывается в tick()
       return;
     }
+    const pos = player.currentTime;
+    if (typeof pos === 'number' && !isNaN(pos)) statsService.onTrackPosition(pos);
     const patch: Partial<EngineState> = {};
-    if (s.duration > 0 && s.duration !== this.state.duration) patch.duration = s.duration;
+    if (s.duration > 0 && s.duration !== this.state.duration) {
+      patch.duration = s.duration;
+      const fx = WoufyFX;
+      if (fx && this.currentTrack) {
+        const cur = this.currentTrack;
+        safe(() => {
+          fx.setNowPlaying(cur.title, cur.artist, cur.album || 'WouFY.no', cur.artworkUri ?? null, s.duration);
+          fx.updateNowPlaying(typeof pos === 'number' ? pos : 0, this.state.isPlaying ? 1.0 : 0.0);
+        });
+      }
+    }
 
     // Синхронизация с внешними событиями (звонок, наушники, экран блокировки)
     // У плеера эффектов статус «играет/пауза» — лишь отражение наших же команд (внешние паузы приходят отдельным событием onRemote),
@@ -1229,17 +1404,48 @@ export class AudioEngine {
   /* ───────────── экран блокировки и Dynamic Island ───────────── */
 
   private updateLockScreen(player: AudioPlayer, t: TrackFile) {
+    const fx = WoufyFX;
+    if (fx) {
+      safe(() => {
+        fx.enableRemote(true);
+        fx.setNowPlaying(
+          t.title,
+          t.artist,
+          t.album || 'WouFY.no',
+          t.artworkUri ?? null,
+          this.state.duration > 0 ? this.state.duration : 0
+        );
+        const pos = this.getPosition();
+        fx.updateNowPlaying(pos, this.state.isPlaying ? 1.0 : 0.0);
+      });
+      return;
+    }
+    // Fallback для сред без нативного модуля (строго запрещаем 10s skip)
     safe(() =>
       player.setActiveForLockScreen(
         true,
         { title: t.title, artist: t.artist, albumTitle: t.album || 'WouFY.no', artworkUrl: t.artworkUri },
-        { showNextTrack: true, showPreviousTrack: true, showSeekForward: true, showSeekBackward: true, isLiveStream: false }
+        { showNextTrack: true, showPreviousTrack: true, showSeekForward: false, showSeekBackward: false, isLiveStream: false }
       )
     );
   }
 
+  private syncLockScreenPlayback() {
+    const fx = WoufyFX;
+    if (fx) {
+      safe(() => {
+        const pos = this.getPosition();
+        fx.updateNowPlaying(pos, this.state.isPlaying ? 1.0 : 0.0);
+      });
+    }
+  }
+
   dispose() {
     if (this.timer) clearInterval(this.timer);
+    if (this.skipDebounceTimer) {
+      clearTimeout(this.skipDebounceTimer);
+      this.skipDebounceTimer = null;
+    }
     fxRemote.handler = undefined;
     this.subs.forEach((s) => safe(() => s.remove()));
     this.players.forEach((p) => safe(() => p.remove()));

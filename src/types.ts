@@ -13,6 +13,8 @@ export interface TrackFile {
   title: string;
   artist: string;
   album?: string;
+  year?: number;
+  genre?: string;
   /** file:// из кэша обложек (лёгкий для памяти) */
   artworkUri?: string;
   lyrics?: string;

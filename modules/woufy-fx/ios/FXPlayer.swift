@@ -135,7 +135,35 @@ final class FXPlayer {
     stopSpatialTimer()
     if engine.isRunning { engine.stop() }
 
-    let f = try AVAudioFile(forReading: url)
+    let path = url.path
+    guard FileManager.default.fileExists(atPath: path) else {
+      throw NSError(
+        domain: "WoufyFX",
+        code: 404,
+        userInfo: [NSLocalizedDescriptionKey: "Файл не найден на диске: \(url.lastPathComponent)"]
+      )
+    }
+
+    if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size == 0 {
+      throw NSError(
+        domain: "WoufyFX",
+        code: 400,
+        userInfo: [NSLocalizedDescriptionKey: "Файл пустой (0 байт): \(url.lastPathComponent)"]
+      )
+    }
+
+    let f: AVAudioFile
+    do {
+      f = try AVAudioFile(forReading: url)
+    } catch {
+      // Попытка запасной инициализации со стандартным 32-bit float форматом (для нестандартных ID3/24-бит/ALAC/FLAC)
+      if let fallback = try? AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false) {
+        f = fallback
+      } else {
+        throw error
+      }
+    }
+
     file = f
     fileRate = f.processingFormat.sampleRate
     duration = fileRate > 0 ? Double(f.length) / fileRate : 0
@@ -236,13 +264,15 @@ final class FXPlayer {
   }
 
   private func renderedPosition() -> Double? {
-    guard let nt = node.lastRenderTime, nt.isSampleTimeValid, nt.isHostTimeValid,
-          let pt = node.playerTime(forNodeTime: nt), pt.isSampleTimeValid else { return nil }
+    guard let nt = node.lastRenderTime, nt.isSampleTimeValid, nt.isHostTimeValid else { return nil }
+    let renderHost = AVAudioTime.seconds(forHostTime: nt.hostTime)
+    // Если последний отрендеренный кадр был ДО перемотки/смены позиции — он устарел, используем anchor-время
+    if renderHost < anchorWall - 0.05 { return nil }
+    guard let pt = node.playerTime(forNodeTime: nt), pt.isSampleTimeValid else { return nil }
     let sr = pt.sampleRate > 0 ? pt.sampleRate : fileRate
     if sr <= 0 { return nil }
     let rendered = Double(pt.sampleTime) / sr
     let nowHost = AVAudioTime.seconds(forHostTime: mach_absolute_time())
-    let renderHost = AVAudioTime.seconds(forHostTime: nt.hostTime)
     let ahead = max(0.0, min(0.06, nowHost - renderHost))
     return schedStartPos + rendered + ahead * rate
   }

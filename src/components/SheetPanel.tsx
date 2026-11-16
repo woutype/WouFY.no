@@ -16,20 +16,22 @@ import * as Haptics from 'expo-haptics';
 import { colors, type } from '../theme';
 import { PressableScale } from './ui';
 
+export type SheetMode = 'queue' | 'lyrics' | 'stats';
+
 interface Props {
-  mode: 'queue' | 'lyrics';
-  onModeChange: (m: 'queue' | 'lyrics') => void;
+  mode: SheetMode;
+  onModeChange: (m: SheetMode) => void;
   /** Animated.Value (0=sheet, 1=player) driving the shared transition */
   progress: Animated.Value;
   onSettle: (target: 0 | 1) => void;
   topInset: number;
   width?: number;
-  children: [React.ReactNode, React.ReactNode] | React.ReactNode[];
+  children: [React.ReactNode, React.ReactNode, React.ReactNode] | React.ReactNode[];
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-/** Каркас вторичных экранов: горизонтальный пейджер между Очередью и Текстом, скользящее подчёркивание */
+/** Каркас вторичных экранов: горизонтальный пейджер между Очередью, Текстом и Топом */
 export const SheetPanel: React.FC<Props> = ({
   mode,
   onModeChange,
@@ -42,17 +44,17 @@ export const SheetPanel: React.FC<Props> = ({
   const screenWidth = width && width > 0 ? width : Dimensions.get('window').width;
   const base = useRef(0);
   const lastVal = useRef(0);
-  const [layouts, setLayouts] = useState<{ [k in 'queue' | 'lyrics']?: { x: number; width: number } }>({});
+  const [layouts, setLayouts] = useState<{ [k in SheetMode]?: { x: number; width: number } }>({});
   const scrollRef = useRef<ScrollView>(null);
-  const scrollX = useRef(new Animated.Value(mode === 'queue' ? 0 : screenWidth)).current;
+  const initialOffset = mode === 'queue' ? 0 : mode === 'lyrics' ? screenWidth : screenWidth * 2;
+  const scrollX = useRef(new Animated.Value(initialOffset)).current;
   const isProgrammatic = useRef(false);
 
   // Синхронизация скролла при внешнем изменении mode (нажатие на таб или кнопка из плеера)
   useEffect(() => {
-    const targetX = mode === 'queue' ? 0 : screenWidth;
+    const targetX = mode === 'queue' ? 0 : mode === 'lyrics' ? screenWidth : screenWidth * 2;
     isProgrammatic.current = true;
     (scrollRef.current as any)?.scrollTo({ x: targetX, animated: true });
-    // Через 350мс снимаем флаг
     const timer = setTimeout(() => {
       isProgrammatic.current = false;
     }, 350);
@@ -93,14 +95,14 @@ export const SheetPanel: React.FC<Props> = ({
     })
   ).current;
 
-  const handleTabPress = (targetMode: 'queue' | 'lyrics') => {
+  const handleTabPress = (targetMode: SheetMode) => {
     if (targetMode === mode) return;
     onModeChange(targetMode);
   };
 
   const onMomentumScrollEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const page = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
-    const newMode = page === 0 ? 'queue' : 'lyrics';
+    const newMode: SheetMode = page === 0 ? 'queue' : page === 1 ? 'lyrics' : 'stats';
     if (newMode !== mode) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       onModeChange(newMode);
@@ -108,32 +110,41 @@ export const SheetPanel: React.FC<Props> = ({
   };
 
   const qX = layouts.queue?.x ?? 0;
-  const qW = layouts.queue?.width ?? 112;
-  const lX = layouts.lyrics?.x ?? 136;
-  const lW = layouts.lyrics?.width ?? 76;
+  const qW = layouts.queue?.width ?? 96;
+  const lX = layouts.lyrics?.x ?? 116;
+  const lW = layouts.lyrics?.width ?? 72;
+  const sX = layouts.stats?.x ?? 200;
+  const sW = layouts.stats?.width ?? 68;
 
   // Подчёркивание плавно следует за пальцем в реальном времени при свайпе
   const lineLeft = scrollX.interpolate({
-    inputRange: [0, screenWidth],
-    outputRange: [qX, lX],
+    inputRange: [0, screenWidth, screenWidth * 2],
+    outputRange: [qX, lX, sX],
     extrapolate: 'clamp',
   });
   const lineWidth = scrollX.interpolate({
-    inputRange: [0, screenWidth],
-    outputRange: [qW, lW],
+    inputRange: [0, screenWidth, screenWidth * 2],
+    outputRange: [qW, lW, sW],
     extrapolate: 'clamp',
   });
 
   const childrenArray = React.Children.toArray(children);
   const queueChild = childrenArray[0];
   const lyricsChild = childrenArray[1];
+  const statsChild = childrenArray[2];
+
+  const TAB_LABELS: Record<SheetMode, string> = {
+    queue: 'Очередь',
+    lyrics: 'Текст',
+    stats: 'Топ 10',
+  };
 
   return (
     <View style={{ flex: 1, paddingTop: topInset }}>
       <View style={styles.header} {...panGesture.panHandlers}>
         <View style={styles.grabber} />
         <View style={styles.tabs}>
-          {(['queue', 'lyrics'] as const).map((m) => {
+          {(['queue', 'lyrics', 'stats'] as const).map((m) => {
             const on = m === mode;
             return (
               <PressableScale
@@ -148,7 +159,7 @@ export const SheetPanel: React.FC<Props> = ({
               >
                 <View style={styles.tab}>
                   <Text style={[styles.tabText, !on && { color: colors.text3 }]}>
-                    {m === 'queue' ? 'Очередь' : 'Текст'}
+                    {TAB_LABELS[m]}
                   </Text>
                 </View>
               </PressableScale>
@@ -164,7 +175,7 @@ export const SheetPanel: React.FC<Props> = ({
         </PressableScale>
       </View>
 
-      {/* Горизонтальный пейджер между вкладками Очередь и Текст */}
+      {/* Горизонтальный пейджер между вкладками Очередь, Текст и Топ 10 */}
       <Animated.ScrollView
         ref={scrollRef as any}
         horizontal
@@ -178,7 +189,7 @@ export const SheetPanel: React.FC<Props> = ({
           { useNativeDriver: false }
         )}
         onMomentumScrollEnd={onMomentumScrollEnd}
-        contentOffset={{ x: mode === 'queue' ? 0 : screenWidth, y: 0 }}
+        contentOffset={{ x: initialOffset, y: 0 }}
         style={{ flex: 1 }}
       >
         <View style={{ width: screenWidth, flex: 1 }}>
@@ -186,6 +197,9 @@ export const SheetPanel: React.FC<Props> = ({
         </View>
         <View style={{ width: screenWidth, flex: 1 }}>
           {lyricsChild}
+        </View>
+        <View style={{ width: screenWidth, flex: 1 }}>
+          {statsChild}
         </View>
       </Animated.ScrollView>
     </View>
@@ -195,9 +209,9 @@ export const SheetPanel: React.FC<Props> = ({
 const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 4, paddingBottom: 8 },
   grabber: { position: 'absolute', top: 0, left: '50%', marginLeft: -19, width: 38, height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.22)' },
-  tabs: { flexDirection: 'row', gap: 24, flex: 1, paddingTop: 10, position: 'relative' },
+  tabs: { flexDirection: 'row', gap: 18, flex: 1, paddingTop: 10, position: 'relative' },
   tab: { paddingVertical: 6, alignItems: 'center' },
-  tabText: { ...type.largeTitle, fontSize: 30, color: colors.text },
+  tabText: { ...type.largeTitle, fontSize: 26, color: colors.text },
   slidingUnderline: {
     position: 'absolute',
     bottom: 2,

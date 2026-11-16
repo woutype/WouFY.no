@@ -2,6 +2,42 @@ import ExpoModulesCore
 import AVFoundation
 import MediaPlayer
 import UIKit
+import PhotosUI
+
+private var pickerKey: UInt8 = 0
+
+final class PHPickerHandler: NSObject, PHPickerViewControllerDelegate {
+  let completion: (String?) -> Void
+  init(completion: @escaping (String?) -> Void) {
+    self.completion = completion
+  }
+  func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+    picker.dismiss(animated: true)
+    guard let provider = results.first?.itemProvider, provider.canLoadObject(ofClass: UIImage.self) else {
+      completion(nil)
+      return
+    }
+    provider.loadObject(ofClass: UIImage.self) { image, _ in
+      guard let img = image as? UIImage else {
+        self.completion(nil)
+        return
+      }
+      let fileName = "cover_\(UUID().uuidString).jpg"
+      let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+      let fileURL = dir.appendingPathComponent(fileName)
+      if let data = img.jpegData(compressionQuality: 0.95) {
+        try? data.write(to: fileURL)
+        self.completion(fileURL.absoluteString)
+      } else {
+        self.completion(nil)
+      }
+    }
+  }
+internal func parseLocalFileURL(_ uri: String) -> URL {
+  let clean = uri.hasPrefix("file://") ? String(uri.dropFirst(7)) : uri
+  let decoded = clean.removingPercentEncoding ?? clean
+  return URL(fileURLWithPath: decoded)
+}
 
 /// Нативный модуль WouFY.no: плеер с реверберацией, 8D и Slowed / Speed Up на AVAudioEngine,
 /// плюс собственные «Now Playing» и кнопки экрана блокировки (на время, пока работают эффекты).
@@ -42,13 +78,7 @@ public class WoufyFXModule: Module {
 
     AsyncFunction("load") { (id: String, uri: String) throws -> Double in
       guard let p = self.players[id] else { return 0 }
-      let url: URL
-      if uri.hasPrefix("file://") {
-        guard let u = URL(string: uri) else { return 0 }
-        url = u
-      } else {
-        url = URL(fileURLWithPath: uri)
-      }
+      let url = parseLocalFileURL(uri)
       return try p.load(url: url)
     }.runOnQueue(DispatchQueue.main)
 
@@ -111,29 +141,14 @@ public class WoufyFXModule: Module {
     // ── Офлайн-анализ огибающей для BPM (без воспроизведения) ──
 
     AsyncFunction("analyzeWindow") { (uri: String, start: Double, len: Double) throws -> [String: Any] in
-      let url: URL
-      if uri.hasPrefix("file://") {
-        guard let u = URL(string: uri) else { throw Analyzer.Failure() }
-        url = u
-      } else {
-        url = URL(fileURLWithPath: uri)
-      }
+      let url = parseLocalFileURL(uri)
       return try Analyzer.window(url: url, start: start, len: len)
     }
 
     // ── Распознавание вокала (для подгона текста без таймингов) ──
 
     AsyncFunction("recognizeSpeech") { (uri: String, locale: String, promise: Promise) -> Void in
-      let url: URL
-      if uri.hasPrefix("file://") {
-        guard let u = URL(string: uri) else {
-          promise.reject("E_URI", "bad uri")
-          return
-        }
-        url = u
-      } else {
-        url = URL(fileURLWithPath: uri)
-      }
+      let url = parseLocalFileURL(uri)
       SpeechAligner.recognize(url: url, localeId: locale) { result in
         switch result {
         case .success(let words):
@@ -198,12 +213,15 @@ public class WoufyFXModule: Module {
         }
       }
       DispatchQueue.main.async {
+        self.installRemote()
+        self.enforceLockScreenCommands()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
       }
     }
 
     Function("updateNowPlaying") { (position: Double, rate: Double) -> Void in
       DispatchQueue.main.async {
+        self.enforceLockScreenCommands()
         let center = MPNowPlayingInfoCenter.default()
         guard var info = center.nowPlayingInfo else { return }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position
@@ -227,35 +245,17 @@ public class WoufyFXModule: Module {
     // ── Нативное сканирование и извлечение метаданных (архитектура Spotify) ──
 
     AsyncFunction("nativeScanDirectory") { (directoryUri: String) -> [[String: Any]] in
-      let url: URL
-      if directoryUri.hasPrefix("file://") {
-        guard let u = URL(string: directoryUri) else { return [] }
-        url = u
-      } else {
-        url = URL(fileURLWithPath: directoryUri)
-      }
+      let url = parseLocalFileURL(directoryUri)
       return MetadataScanner.scanDirectory(rootURL: url)
     }
 
     AsyncFunction("nativeExtractMetadata") { (items: [[String: Any]], coversDirUri: String) -> [[String: Any]] in
-      let coversURL: URL
-      if coversDirUri.hasPrefix("file://") {
-        guard let u = URL(string: coversDirUri) else { return [] }
-        coversURL = u
-      } else {
-        coversURL = URL(fileURLWithPath: coversDirUri)
-      }
+      let coversURL = parseLocalFileURL(coversDirUri)
       return MetadataScanner.extractBatch(items: items, coversDirURL: coversURL)
     }
 
     Function("startDirectoryWatcher") { (directoryUri: String) -> Void in
-      let url: URL
-      if directoryUri.hasPrefix("file://") {
-        guard let u = URL(string: directoryUri) else { return }
-        url = u
-      } else {
-        url = URL(fileURLWithPath: directoryUri)
-      }
+      let url = parseLocalFileURL(directoryUri)
       self.directoryWatcher?.stop()
       let watcher = DirectoryWatcher(url: url)
       watcher.onChange = { [weak self] in
@@ -270,6 +270,29 @@ public class WoufyFXModule: Module {
       self.directoryWatcher = nil
     }
 
+    AsyncFunction("pickImage") { () -> String? in
+      return try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.main.async {
+          guard let rootVC = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow?.rootViewController })
+            .first ?? UIApplication.shared.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+            continuation.resume(returning: nil)
+            return
+          }
+          var config = PHPickerConfiguration()
+          config.filter = .images
+          config.selectionLimit = 1
+          let picker = PHPickerViewController(configuration: config)
+          let handler = PHPickerHandler { uri in
+            continuation.resume(returning: uri)
+          }
+          picker.delegate = handler
+          objc_setAssociatedObject(picker, &pickerKey, handler, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+          rootVC.present(picker, animated: true)
+        }
+      }
+    }
+
     OnDestroy { () -> Void in
       self.directoryWatcher?.stop()
       self.directoryWatcher = nil
@@ -280,11 +303,11 @@ public class WoufyFXModule: Module {
     }
   }
 
-  private func installRemote() {
-    if !remoteTokens.isEmpty { return }
+  private func enforceLockScreenCommands() {
     let c = MPRemoteCommandCenter.shared()
 
-    // Disable 10s/15s skip interval commands so iOS Lock Screen and Control Center show Next/Previous track buttons
+    // Strictly disable 10s/15s skip interval commands so iOS Lock Screen, Dynamic Island,
+    // and Control Center ALWAYS display Next/Previous track buttons instead of 10s/15s skip arrows.
     c.skipForwardCommand.removeTarget(nil)
     c.skipForwardCommand.preferredIntervals = []
     c.skipForwardCommand.isEnabled = false
@@ -298,6 +321,19 @@ public class WoufyFXModule: Module {
 
     c.seekBackwardCommand.removeTarget(nil)
     c.seekBackwardCommand.isEnabled = false
+
+    c.nextTrackCommand.isEnabled = true
+    c.previousTrackCommand.isEnabled = true
+    c.playCommand.isEnabled = true
+    c.pauseCommand.isEnabled = true
+    c.togglePlayPauseCommand.isEnabled = true
+    c.changePlaybackPositionCommand.isEnabled = true
+  }
+
+  private func installRemote() {
+    enforceLockScreenCommands()
+    if !remoteTokens.isEmpty { return }
+    let c = MPRemoteCommandCenter.shared()
 
     func add(_ cmd: MPRemoteCommand, _ name: String) {
       cmd.removeTarget(nil)

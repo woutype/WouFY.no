@@ -37,8 +37,15 @@ const registry = new Map<string, FxPlayer>();
 let subscribed = false;
 let nextId = 1;
 
-/** Обработчик кнопок экрана блокировки / Центра управления в режиме эффектов (ставит движок) */
+export { WoufyFX };
+
+/** Обработчик кнопок экрана блокировки / Центра управления (ставит движок) */
 export const fxRemote: { handler?: (command: string, position?: number) => void } = {};
+
+export function setRemoteHandler(handler: (command: string, position?: number) => void) {
+  fxRemote.handler = handler;
+  ensureSubscriptions();
+}
 
 function ensureSubscriptions() {
   if (subscribed || !WoufyFX) return;
@@ -103,6 +110,8 @@ export class FxPlayer implements PlayerLike {
       const d = await fx.load(this.id, uri);
       if (!d || d <= 0) throw new Error('файл не открылся в нативном движке: ' + uri.slice(-40));
       fxDiag.loads++;
+      fxDiag.lastError = undefined;
+      this.lastError = undefined;
       this._duration = d;
       this._loaded = true;
       fx.setVolume(this.id, this.muted ? 0 : this._volume);

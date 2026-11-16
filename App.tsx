@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, Platform, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, AppState, Platform, Share, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { enrichTracks, scanLibrary, startLibraryWatcher } from './src/services/fileScanner';
@@ -7,7 +7,7 @@ import { sampleBus } from './src/services/sampleBus';
 import { musicHaptics } from './src/services/musicHaptics';
 import { bpmService } from './src/services/bpm';
 import { volumeService } from './src/services/volumeService';
-import { flushState, getState, loadCachedTracks, loadState, patchState } from './src/services/library';
+import { flushState, getState, loadCachedTracks, loadState, patchState, saveCachedTracks } from './src/services/library';
 import { useAudioEngine, useEngineState } from './src/hooks/useAudioController';
 import { useMetrics } from './src/layout';
 import { DEFAULT_DJ, DEFAULT_FX, DJSettings, FxSettings, TrackFile } from './src/types';
@@ -16,8 +16,12 @@ import { AmbientBackground } from './src/components/ui';
 import { NowPlayingCard } from './src/components/NowPlayingCard';
 import { QueueView } from './src/components/QueueView';
 import { LyricsView } from './src/components/LyricsView';
-import { SheetPanel } from './src/components/SheetPanel';
+import { SheetMode, SheetPanel } from './src/components/SheetPanel';
+import { StatsView } from './src/components/StatsView';
+import { TagEditorModal } from './src/components/TagEditorModal';
 import { SettingsModal } from './src/components/SettingsModal';
+import { statsService } from './src/services/statsService';
+import { splitArtists } from './src/services/queueOrder';
 
 function Root() {
   const m = useMetrics();
@@ -26,10 +30,13 @@ function Root() {
 
   const [ready, setReady] = useState(false);
   const [libCount, setLibCount] = useState(0);
-  const [sheet, setSheet] = useState<'queue' | 'lyrics'>('queue');
+  const [sheet, setSheet] = useState<SheetMode>('queue');
+  const [scrollToCurrentTrigger, setScrollToCurrentTrigger] = useState(0);
   const [expanded, setExpanded] = useState(true);
   const [search, setSearch] = useState('');
+  const [searchLyrics, setSearchLyrics] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showTagEditor, setShowTagEditor] = useState(false);
   const [dj, setDj] = useState<DJSettings>(DEFAULT_DJ);
   const [fx, setFxState] = useState<FxSettings>(DEFAULT_FX);
   const [hapticsOn, setHapticsOn] = useState(false);
@@ -87,6 +94,7 @@ function Root() {
       onPersist: (s) => patchState(s),
     });
     (async () => {
+      await statsService.load();
       const st = await loadState();
       const settings = { ...DEFAULT_DJ, ...(st.dj ?? {}) };
       setDj(settings);
@@ -138,6 +146,7 @@ function Root() {
         if (Date.now() - lastScanAt.current > 1200) rescan().catch(() => {});
         volumeService.getVolume().then((vol) => engine.setVolume(vol, false));
       } else {
+        statsService.finalizeCurrent();
         flushState();
       }
     });
@@ -175,9 +184,9 @@ function Root() {
 
   // поиск применяется к самой очереди (с небольшой задержкой, чтобы не пересобирать её на каждую букву)
   useEffect(() => {
-    const t = setTimeout(() => engine.setFilter({ query: search }), search ? 160 : 0);
+    const t = setTimeout(() => engine.setFilter({ query: search, searchLyrics }), search ? 160 : 0);
     return () => clearTimeout(t);
-  }, [engine, search]);
+  }, [engine, search, searchLyrics]);
 
   const updateDj = (s: DJSettings) => {
     setDj(s);
@@ -211,8 +220,11 @@ function Root() {
   );
 
   const openSheet = useCallback(
-    (mode: 'queue' | 'lyrics') => {
+    (mode: SheetMode) => {
       setSheet(mode);
+      if (mode === 'queue') {
+        setScrollToCurrentTrigger((v) => v + 1);
+      }
       settle(0);
     },
     [settle]
@@ -220,10 +232,55 @@ function Root() {
 
   const onArtistPress = useCallback(
     (artist: string) => {
-      setSearch(artist);
-      openSheet('queue');
+      const parts = splitArtists(artist);
+      if (parts.length > 1) {
+        Alert.alert(
+          'Исполнители',
+          'Выберите исполнителя для фильтрации:',
+          [
+            ...parts.map((p) => ({
+              text: p,
+              onPress: () => {
+                setSearch(p);
+                openSheet('queue');
+              },
+            })),
+            { text: 'Отмена', style: 'cancel' as const },
+          ]
+        );
+      } else {
+        setSearch(artist);
+        openSheet('queue');
+      }
     },
     [openSheet]
+  );
+
+  const handleSaveTrack = useCallback(
+    (updated: TrackFile) => {
+      libRef.current.set(updated.id, updated);
+      engine.patchTracks([updated]);
+      saveCachedTracks([...libRef.current.values()]).catch(() => {});
+      bpmService.registerTags([updated]);
+    },
+    [engine]
+  );
+
+  const handleShareTrack = useCallback(
+    async (t?: TrackFile) => {
+      const target = t ?? state.queue[state.index];
+      if (!target) return;
+      try {
+        await Share.share(
+          Platform.OS === 'ios'
+            ? { url: target.uri, title: `${target.artist} — ${target.title}` }
+            : { message: `${target.artist} — ${target.title}`, title: target.title }
+        );
+      } catch (e) {
+        console.warn('Share error:', e);
+      }
+    },
+    [state.queue, state.index]
   );
 
   /* ───────── BPM ───────── */
@@ -298,13 +355,17 @@ function Root() {
             onSearchChange={setSearch}
             sortMode={state.sort}
             onSortChange={(m) => engine.setFilter({ sort: m })}
+            searchLyrics={searchLyrics}
+            onSearchLyricsChange={setSearchLyrics}
             pinned={state.pinned}
             onPlay={(i, track) => (track ? engine.playTrack(track) : engine.playIndex(i))}
+            onPlayTrackWithSeek={(track, seekTime) => engine.playTrack(track, seekTime)}
             onMove={(a, b) => engine.moveQueueItem(a, b)}
             onRefresh={async () => {
               await rescan();
             }}
             bottomPad={bottomPad}
+            scrollToCurrentTrigger={scrollToCurrentTrigger}
           />
           <LyricsView
             engine={engine}
@@ -314,6 +375,13 @@ function Root() {
             bottomPad={bottomPad}
             onSaved={rescan}
             visible={!expanded && sheet === 'lyrics'}
+          />
+          <StatsView
+            tracks={state.queue}
+            onPlayTopTracks={(topTracks, index) => engine.playTopTracks(topTracks, index)}
+            onArtistPress={onArtistPress}
+            bottomPad={bottomPad}
+            visible={!expanded && sheet === 'stats'}
           />
         </SheetPanel>
       </Animated.View>
@@ -329,8 +397,17 @@ function Root() {
         onOpenSettings={() => setShowSettings(true)}
         onArtistPress={onArtistPress}
         onEditBpm={editBpm}
+        onEditTags={() => setShowTagEditor(true)}
+        onShareTrack={handleShareTrack}
         bpm={bpm}
         bpmSource={bpmSource}
+      />
+
+      <TagEditorModal
+        visible={showTagEditor}
+        track={track}
+        onSave={handleSaveTrack}
+        onClose={() => setShowTagEditor(false)}
       />
 
       <SettingsModal
