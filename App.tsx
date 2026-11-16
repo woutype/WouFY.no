@@ -162,7 +162,7 @@ function Root() {
         if (Date.now() - lastScanAt.current > 1200) rescan().catch(() => {});
         volumeService.getVolume().then((vol) => engine.setVolume(vol, false));
       } else {
-        statsService.finalizeCurrent();
+        statsService.checkpoint();
         flushState();
       }
     });

@@ -62,6 +62,14 @@ export interface WoufyFXNative {
       tagged: boolean;
     }[]
   >;
+  /** Миниатюры обложек (JPEG, maxPixel по длинной стороне); имя файла — хэш содержимого. Нет в старых сборках. */
+  nativeExtractThumbnails?(
+    items: { id: string; uri: string }[],
+    coversDirUri: string,
+    maxPixel: number
+  ): Promise<{ id: string; artworkUri: string }[]>;
+  /** Оригинал обложки из тега (без перекодирования) в кэш cacheDirUri; null — обложки нет. Нет в старых сборках. */
+  nativeExtractArtwork?(uri: string, cacheDirUri: string): Promise<string | null>;
   startDirectoryWatcher(directoryUri: string): void;
   stopDirectoryWatcher(): void;
   addListener(event: 'onEnded', cb: (e: { id: string }) => void): { remove: () => void };

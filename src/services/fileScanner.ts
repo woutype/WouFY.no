@@ -5,6 +5,7 @@ import { AudioExtension, TrackFile } from '../types';
 import { WoufyFX } from '../../modules/woufy-fx';
 import { cleanupOrphanCovers, cleanupTrash, cleanupTempCache } from './storageService';
 import { statsService } from './statsService';
+import { needsThumb, THUMB_PX } from './artwork';
 
 /** Основная папка для музыки (пользователь может класть треки и сюда, и прямо в корень WouFY.no) */
 export const MUSIC_DIR_NAME = 'Music';
@@ -268,15 +269,8 @@ async function doScan(): Promise<ScanResult> {
   // Автоматическая сборка мусора (отложена на 4 сек, чтобы не замедлять старт приложения):
   // гарантируем, что на диске остаются ТОЛЬКО обложки существующих треков,
   // а корзина .Trash и временные кэши очищаются без бесконечного накопления
+  // (сиротские обложки чистит enrichTracks после того, как миниатюры дописаны — иначе свежие файлы попали бы под удаление)
   setTimeout(() => {
-    const activeCovers = new Set<string>();
-    for (const t of tracks) {
-      if (t.artworkUri) {
-        const file = t.artworkUri.split('/').pop();
-        if (file) activeCovers.add(file);
-      }
-    }
-    cleanupOrphanCovers(activeCovers).catch(() => {});
     cleanupTrash().catch(() => {});
     cleanupTempCache().catch(() => {});
     statsService.cleanupOrphanSessions(new Set(tracks.map((t) => t.id)));
@@ -286,6 +280,16 @@ async function doScan(): Promise<ScanResult> {
 }
 
 let enriching = false;
+
+/** Удаляет из covers/ всё, на что не ссылается ни один трек (старые полноразмерные копии, дубликаты, удалённые треки) */
+function gcCovers(tracks: Iterable<TrackFile>): void {
+  const active = new Set<string>();
+  for (const t of tracks) {
+    const file = t.artworkUri?.split('/').pop();
+    if (file) active.add(file);
+  }
+  cleanupOrphanCovers(active).catch(() => {});
+}
 
 /**
  * Высокоскоростное фоновое чтение тегов и обложек (как в Spotify).
@@ -301,11 +305,13 @@ export async function enrichTracks(
 ): Promise<boolean> {
   if (enriching) return false;
   const rank = new Map(priority.map((id, i) => [id, i]));
-  const todo = tracks
-    .filter((t) => t.tagged === false)
-    .sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9));
+  const byRank = (a: TrackFile, b: TrackFile) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9);
+  const todo = tracks.filter((t) => t.tagged === false).sort(byRank);
 
-  if (todo.length === 0) return true;
+  if (todo.length === 0 && !tracks.some(needsThumb)) {
+    gcCovers(tracks);
+    return true;
+  }
   enriching = true;
 
   try {
@@ -318,6 +324,36 @@ export async function enrichTracks(
     const useNative = Boolean(WoufyFX?.nativeExtractMetadata);
     const BATCH = useNative ? 32 : 8;
 
+    /** Лёгкие миниатюры (JPEG ~192px, имя = хэш содержимого → общий файл на альбом). Текст к этому моменту уже на экране. */
+    const thumbPass = async (list: TrackFile[]) => {
+      if (!WoufyFX?.nativeExtractThumbnails) return;
+      const TB = 16;
+      for (let j = 0; j < list.length; j += TB) {
+        if (isCancelled()) return;
+        const chunk = list.slice(j, j + TB);
+        try {
+          const res = await WoufyFX.nativeExtractThumbnails(
+            chunk.map((t) => ({ id: t.id, uri: t.uri })),
+            coversDir,
+            THUMB_PX
+          );
+          const found = new Map(res.map((r) => [r.id, r.artworkUri]));
+          const upd = chunk.map((t) => {
+            const cur = all.get(t.id) ?? t;
+            return { ...cur, artworkUri: found.get(t.id) ?? cur.artworkUri, thumbDone: true };
+          });
+          for (const u of upd) all.set(u.id, u);
+          onBatch(upd);
+          sinceSave += upd.length;
+        } catch (e) {
+          console.warn('[fileScanner] nativeExtractThumbnails error:', e);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 4));
+      }
+    };
+
+    // Фаза 1: только текстовые теги (название, артист…) — отдаются на экран первыми
     for (let i = 0; i < todo.length; i += BATCH) {
       if (isCancelled()) break;
       const batch = todo.slice(i, i + BATCH);
@@ -341,7 +377,6 @@ export async function enrichTracks(
               title: meta?.title?.trim() || fb.title,
               artist: meta?.artist?.trim() || fb.artist,
               album: meta?.album?.trim() || 'Сингл',
-              artworkUri: meta?.artworkUri,
               lyrics: meta?.lyrics,
               bpmTag: meta?.bpmTag,
               trackNumber: meta?.trackNumber ?? t.trackNumber,
@@ -367,6 +402,7 @@ export async function enrichTracks(
               artist: meta.artist?.trim() || fb.artist,
               album: meta.album?.trim() || 'Сингл',
               artworkUri: meta.artworkUri,
+              thumbDone: true, // JS-парсер сохраняет обложку один раз (по хэшу содержимого), ужимать нечем
               lyrics: meta.lyrics,
               syncedLyrics: meta.syncedLyrics,
               bpmTag: meta.bpm,
@@ -389,6 +425,15 @@ export async function enrichTracks(
         lastFlush = Date.now();
       }
 
+      // Миниатюры самой первой (приоритетной) пачки — сразу, чтобы видимая часть очереди не ждала всю библиотеку
+      if (i === 0) {
+        if (pending.length) {
+          onBatch(pending);
+          pending = [];
+        }
+        await thumbPass(done.filter(needsThumb));
+      }
+
       // Сохраняем кэш сразу после первой пачки (активный трек) и каждые 60 треков
       if (i === 0 || sinceSave >= 60) {
         sinceSave = 0;
@@ -399,7 +444,12 @@ export async function enrichTracks(
     }
 
     if (pending.length) onBatch(pending);
+
+    // Фаза 2: миниатюры остальных треков (приоритетные — первыми); заодно миграция старых полноразмерных копий
+    await thumbPass([...all.values()].filter(needsThumb).sort(byRank));
+
     await saveCachedTracks([...all.values()]);
+    gcCovers(all.values());
   } finally {
     enriching = false;
   }

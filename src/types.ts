@@ -17,6 +17,8 @@ export interface TrackFile {
   genre?: string;
   /** file:// из кэша обложек (лёгкий для памяти) */
   artworkUri?: string;
+  /** миниатюра обложки уже сформирована (или обложки в файле нет) — повторно не читаем */
+  thumbDone?: boolean;
   lyrics?: string;
   syncedLyrics?: SyncedLyricLine[];
   /** Путь к .lrc рядом с треком, если есть */

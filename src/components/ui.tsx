@@ -15,6 +15,8 @@ import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { colors, radius, springs } from '../theme';
+import { TrackFile } from '../types';
+import { useFullArtwork } from '../hooks/useFullArtwork';
 
 /* ───────── Liquid Glass ───────── */
 
@@ -185,6 +187,25 @@ export const CoverArt: React.FC<CoverArtProps> = ({ uri, size, radius: r = 24, s
           <Ionicons name="musical-notes" size={Math.max(14, size * 0.26)} color="rgba(255,255,255,0.22)" />
         </View>
       )}
+    </View>
+  );
+};
+
+/** Обложка главного экрана: мгновенно показывает миниатюру, поверх подгружает оригинал без сжатия */
+export const FullCover: React.FC<{ track?: TrackFile; size: number; radius?: number }> = ({ track, size, radius: r = 24 }) => {
+  const full = useFullArtwork(track);
+  return (
+    <View style={{ width: size, height: size }}>
+      <CoverArt uri={track?.artworkUri} size={size} radius={r} />
+      {full ? (
+        <Image
+          key={full}
+          source={{ uri: full }}
+          style={{ position: 'absolute', width: size, height: size, borderRadius: r }}
+          resizeMode="cover"
+          fadeDuration={0}
+        />
+      ) : null}
     </View>
   );
 };

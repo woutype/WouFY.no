@@ -213,6 +213,10 @@ export class FxPlayer implements PlayerLike {
   }
 
   handleEnded() {
+    // устаревшее событие конца ПРЕДЫДУЩЕГО файла, пришедшее уже после replace() нового трека, — игнорируем:
+    // иначе новый трек «сразу заканчивается» и движок листает очередь каскадом
+    if (!this._loaded || !this.wantPlay) return;
+    if (this._duration > 0 && this.currentTime < this._duration - 1.5) return;
     this.finished = true;
     this.wantPlay = false;
     this.emitStatus(true);

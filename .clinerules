@@ -1,0 +1,10 @@
+# WouFY.no Architecture & Rules
+- Stack: Expo SDK 58, React Native 0.88 (New Architecture), TypeScript, Swift (modules/woufy-fx with AVAudioEngine, CoreHaptics).
+- Code style: Strict TypeScript, native Swift concurrency, 100% offline-first.
+
+# Token & Cost Optimization Guidelines
+1. Be extremely concise. Do NOT write conversational filler, greetings, or long explanations unless asked.
+2. Always prefer minimal search-and-replace DIFF edits. NEVER rewrite entire files if you only modify a few functions.
+3. Only inspect and modify files directly relevant to the current user prompt. Do not read the entire repository without need.
+4. Always verify TypeScript types using `npx tsc --noEmit` before declaring a task finished.
+5. All comments and explanations in chat must be in Russian, but all code, variables, and commit logs in English.

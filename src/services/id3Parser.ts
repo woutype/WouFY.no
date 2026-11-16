@@ -159,10 +159,14 @@ const parseIntPart = (s: string): number | undefined => {
 };
 
 /** Сохраняет обложку в постоянный кэш (Application Support/WouFY/covers) и возвращает путь */
-async function saveCover(bytes: Uint8Array, ext: 'jpg' | 'png', key: string): Promise<string | undefined> {
+async function saveCover(bytes: Uint8Array, ext: 'jpg' | 'png', _key: string): Promise<string | undefined> {
   try {
     const dir = `${DATA_DIR}covers/`;
-    const filePath = `${dir}${hash(key)}_${bytes.length}.${ext}`;
+    // имя по содержимому (длина + выборка байт), а не по треку: одинаковая обложка альбома хранится один раз
+    let sample = '';
+    const step = Math.max(1, Math.floor(bytes.length / 64));
+    for (let i = 0; i < bytes.length; i += step) sample += String.fromCharCode(bytes[i]);
+    const filePath = `${dir}${hash(sample)}_${bytes.length}.${ext}`;
     const existing = await FileSystem.getInfoAsync(filePath);
     if (existing.exists) return filePath;
     const dirInfo = await FileSystem.getInfoAsync(dir);

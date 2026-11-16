@@ -256,6 +256,19 @@ public class WoufyFXModule: Module {
       return MetadataScanner.extractBatch(items: items, coversDirURL: coversURL)
     }
 
+    AsyncFunction("nativeExtractThumbnails") { (items: [[String: Any]], coversDirUri: String, maxPixel: Int) -> [[String: Any]] in
+      let coversURL = parseLocalFileURL(coversDirUri)
+      return MetadataScanner.extractThumbnails(items: items, coversDirURL: coversURL, maxPixel: maxPixel)
+    }
+
+    AsyncFunction("nativeExtractArtwork") { (uri: String, cacheDirUri: String) -> String? in
+      return MetadataScanner.extractOriginalArtwork(
+        fileURL: parseLocalFileURL(uri),
+        cacheDirURL: parseLocalFileURL(cacheDirUri),
+        keep: 16
+      )
+    }
+
     Function("startDirectoryWatcher") { (directoryUri: String) -> Void in
       let url = parseLocalFileURL(directoryUri)
       self.directoryWatcher?.stop()

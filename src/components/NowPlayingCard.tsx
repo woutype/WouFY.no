@@ -6,7 +6,7 @@ import { AudioEngine, EngineState } from '../services/audioEngine';
 import { TrackFile } from '../types';
 import { Metrics } from '../layout';
 import { colors, radius, type } from '../theme';
-import { CoverArt, Glass, IconButton, PressableScale } from './ui';
+import { CoverArt, FullCover, Glass, IconButton, PressableScale } from './ui';
 import { ArtworkCarousel } from './ArtworkCarousel';
 import { PlayerControls } from './PlayerControls';
 import { usePosition } from '../hooks/useAudioController';
@@ -510,7 +510,7 @@ export const NowPlayingCard: React.FC<Props> = ({
             },
           ]}
         >
-          <CoverArt uri={track?.artworkUri} size={m.cover} radius={0} />
+          <FullCover track={track} size={m.cover} radius={0} />
         </Animated.View>
       </Animated.View>
     </Animated.View>

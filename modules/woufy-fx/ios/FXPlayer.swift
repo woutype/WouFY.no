@@ -134,6 +134,10 @@ final class FXPlayer {
     node.stop()
     stopSpatialTimer()
     if engine.isRunning { engine.stop() }
+    // если новый файл не откроется, старый не должен остаться «текущим» (иначе следующий play() сыграет прошлый трек)
+    file = nil
+    duration = 0
+    anchorPos = 0
 
     let path = url.path
     guard FileManager.default.fileExists(atPath: path) else {

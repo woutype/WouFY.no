@@ -8,6 +8,10 @@ import { createFxPlayer, fxNativeAvailable, fxRemote, setRemoteHandler, WoufyFX 
 import { SortOption, applySort, matchesQuery, normQuery } from './queueOrder';
 import { statsService } from './statsService';
 import { resolveTrackUri } from './library';
+import { getFullArtwork } from './artwork';
+
+/** пропуск раньше этого порога (сек) понижает приоритет трека в текущей очереди Smart Shuffle */
+const SKIP_DEMOTE_SEC = 10;
 
 type AudioPlayer = PlayerLike;
 type AudioStatus = PlayerStatus;
@@ -163,6 +167,7 @@ export class AudioEngine {
   private busy = false;
   private lastCommandAt = 0;
   private errorSkips = 0;
+  private errorSkipTimer: ReturnType<typeof setTimeout> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private subs: { remove: () => void }[] = [];
   private bpmLookup: (t: TrackFile) => number | undefined = () => undefined;
@@ -541,8 +546,9 @@ export class AudioEngine {
    */
   private makeShufflePerm(curId?: string): string[] {
     const rest = this.library.map((t) => t.id).filter((id) => id !== curId);
+    const weights = statsService.getTrackWeights();
     const weighted = rest.map((id) => {
-      const w = statsService.getTrackWeight(id);
+      const w = weights.get(id) ?? 1;
       const key = Math.pow(Math.random(), 1 / Math.max(0.01, w));
       return { id, key };
     });
@@ -615,7 +621,8 @@ export class AudioEngine {
 
   private notifyTrackChange() {
     const cur = this.currentTrack;
-    if (cur) {
+    // смена очереди/rescan не должны обрывать идущую сессию прослушивания (иначе один трек считается дважды)
+    if (cur && !statsService.isTracking(cur.id)) {
       statsService.onTrackStart(cur, this.state.duration, this.getPosition());
     }
     this.onTrackChange(cur, this.upcoming());
@@ -669,8 +676,12 @@ export class AudioEngine {
     this.settleTransition();
     const cur = this.currentTrack;
     if (on) {
+      // каждое включение — новый взвешенный порядок (веса учитывают дослушивания/скипы)
       this.shufflePerm = this.makeShufflePerm(cur?.id);
       this.sortMode = 'default';
+    } else if (this.sortMode === 'default' && this.shufflePerm.length > 0) {
+      // выключение оставляет текущий (перемешанный) порядок как базовый
+      this.baseOrder = [...this.shufflePerm];
     }
     const d = this.deriveQueue(cur?.id, on);
     this.prep = null;
@@ -757,20 +768,58 @@ export class AudioEngine {
   playTopTracks(topList: TrackFile[], startIndex: number) {
     if (topList.length === 0 || startIndex < 0 || startIndex >= topList.length) return;
     this.settleTransition();
-    const topIds = new Set(topList.map((t) => t.id));
-    const topOrdered = [...topList.slice(startIndex), ...topList.slice(0, startIndex)];
+    const selectedId = topList[startIndex].id;
+    // берём только треки, реально существующие в библиотеке (иначе индексы очереди разъезжаются с топом)
+    const byId = new Map(this.library.map((t) => [t.id, t]));
+    const playable = topList.map((t) => byId.get(t.id)).filter((t): t is TrackFile => !!t);
+    const start = playable.findIndex((t) => t.id === selectedId);
+    if (start < 0) return;
+    const topIds = new Set(playable.map((t) => t.id));
+    const topOrdered = [...playable.slice(start), ...playable.slice(0, start)];
     const rest = this.library.filter((t) => !topIds.has(t.id));
-    const combined = [...topOrdered, ...rest];
-    this.baseOrder = combined.map((t) => t.id);
-    this.shufflePerm = this.makeShufflePerm(topOrdered[0]?.id);
-    const d = this.deriveQueue(topOrdered[0]?.id, false);
-    this.set({ queue: d.queue, index: 0, sort: 'default', filtered: false });
-    this.playIndex(0);
+    this.baseOrder = [...topOrdered, ...rest].map((t) => t.id);
+    this.shufflePerm = this.makeShufflePerm(selectedId);
+    // сбрасываем поиск/сортировку ВНУТРИ движка, иначе deriveQueue пересортирует/отфильтрует очередь
+    this.query = '';
+    this.sortMode = 'default';
+    const d = this.deriveQueue(selectedId, false);
+    this.prep = null;
+    this.set({ queue: d.queue, index: d.index, sort: 'default', filtered: false, shuffle: false, pinned: d.pinned });
+    this.playIndex(d.index);
+  }
+
+  /**
+   * Smart Shuffle: трек, пропущенный в первые SKIP_DEMOTE_SEC секунд, уходит ближе к концу оставшейся очереди.
+   * Возвращает актуальный индекс целевого трека (очередь могла сдвинуться).
+   */
+  private demoteEarlySkip(targetId: string, fallbackIndex: number): number {
+    const leaving = this.currentTrack;
+    if (!leaving || leaving.id === targetId || !this.state.shuffle || this.sortMode !== 'default') return fallbackIndex;
+    const listened = statsService.currentListened(leaving.id);
+    if (listened === null || listened >= SKIP_DEMOTE_SEC) return fallbackIndex;
+    const perm = this.shufflePerm.filter((id) => id !== leaving.id);
+    const at = perm.indexOf(targetId);
+    if (at < 0) return fallbackIndex;
+    // в последнюю треть оставшейся части очереди (не в самый конец — чтобы не был предсказуем)
+    const tail = perm.length - (at + 1);
+    const pos = perm.length - Math.floor(Math.random() * Math.max(1, Math.ceil(tail / 3)));
+    perm.splice(Math.max(at + 1, pos), 0, leaving.id);
+    this.shufflePerm = perm;
+    const d = this.deriveQueue(targetId, true);
+    if (d.index < 0) return fallbackIndex;
+    this.set({ queue: d.queue, index: d.index, pinned: d.pinned });
+    return d.index;
   }
 
   playIndex(index: number, seekTo?: number, isAutoSkip = false) {
+    if (!isAutoSkip && this.state.queue[index]) index = this.demoteEarlySkip(this.state.queue[index].id, index);
     const t = this.state.queue[index];
     if (!t) return;
+    // отложенный пропуск «битого» трека не должен сработать поверх нового выбора (иначе лишний +1)
+    if (this.errorSkipTimer) {
+      clearTimeout(this.errorSkipTimer);
+      this.errorSkipTimer = null;
+    }
     if (this.trans) this.cancelTransition();
     this.mixBlockedFor = null;
     if (!isAutoSkip) {
@@ -873,7 +922,7 @@ export class AudioEngine {
         this.A.pause();
         if (this.trans) this.trans.to.pause();
       });
-      statsService.finalizeCurrent();
+      statsService.finalizeCurrent(true);
       this.set({ isPlaying: false });
       if (this.pendingNative && !this.trans) this.applyPendingMode(true);
       this.syncLockScreenPlayback();
@@ -976,7 +1025,7 @@ export class AudioEngine {
       return;
     }
     const pos = player.currentTime;
-    if (typeof pos === 'number' && !isNaN(pos)) statsService.onTrackPosition(pos);
+    if (typeof pos === 'number' && !isNaN(pos)) statsService.onTrackPosition(pos, s.duration);
     const patch: Partial<EngineState> = {};
     if (s.duration > 0 && s.duration !== this.state.duration) {
       patch.duration = s.duration;
@@ -1004,7 +1053,9 @@ export class AudioEngine {
       }
     }
 
-    if (s.isLoaded && s.duration > 0 && !s.error) {
+    // счётчик сбрасываем только когда трек реально играет (а не на «загружен и сразу закончился»),
+    // иначе лимит автопропуска никогда не срабатывает и треки листаются бесконечно
+    if (s.isLoaded && s.duration > 0 && !s.error && !s.didJustFinish && typeof pos === 'number' && pos > 1.5) {
       this.errorSkips = 0;
     }
 
@@ -1036,10 +1087,12 @@ export class AudioEngine {
 
   private handleTrackError() {
     if (!this.playIntent) return;
+    if (this.errorSkipTimer) return; // пропуск уже запланирован (статус с ошибкой приходит каждые 250 мс)
     if (this.errorSkips < 3 && this.state.queue.length > 1) {
       this.errorSkips++;
       const nextIdx = (this.state.index + 1) % this.state.queue.length;
-      setTimeout(() => {
+      this.errorSkipTimer = setTimeout(() => {
+        this.errorSkipTimer = null;
         if (this.playIntent) {
           this.playIndex(nextIdx, undefined, true);
         }
@@ -1472,6 +1525,16 @@ export class AudioEngine {
         const pos = this.getPosition();
         fx.updateNowPlaying(pos, this.state.isPlaying ? 1.0 : 0.0);
       });
+      // на экран блокировки — оригинал обложки (миниатюра там выглядела бы размытой)
+      getFullArtwork(t)
+        .then((full) => {
+          if (!full || full === t.artworkUri || this.currentTrack?.id !== t.id) return;
+          safe(() => {
+            fx.setNowPlaying(t.title, t.artist, t.album || 'WouFY.no', full, this.state.duration > 0 ? this.state.duration : 0);
+            fx.updateNowPlaying(this.getPosition(), this.state.isPlaying ? 1.0 : 0.0);
+          });
+        })
+        .catch(() => {});
       return;
     }
     // Fallback для сред без нативного модуля (строго запрещаем 10s skip)

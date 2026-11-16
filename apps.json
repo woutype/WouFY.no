@@ -16,6 +16,13 @@
       "tintColor": "1ED760",
       "versions": [
         {
+          "version": "1.2.5",
+          "date": "2026-11-16",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.5/woufy.ipa",
+          "localizedDescription": "Оптимизация обложек (лёгкие миниатюры для списков и несжатый оригинал на главном экране), улучшенный Smart Shuffle с учётом скипов и точный подсчёт времени прослушивания без накрутки при перемотках.",
+          "size": 12946658
+        },
+        {
           "version": "1.2.4",
           "date": "2026-11-16",
           "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.4/woufy.ipa",

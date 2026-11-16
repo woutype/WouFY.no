@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, PanResponder, StyleSheet, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { TrackFile } from '../types';
-import { CoverArt } from './ui';
+import { FullCover } from './ui';
 import { WaveOverlay, useWaveLevels } from './WaveformVisualizer';
 import { springs } from '../theme';
 
@@ -296,7 +296,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
             },
           ]}
         >
-          <CoverArt uri={prevTrack.artworkUri} size={size} radius={COVER_RADIUS} />
+          <FullCover track={prevTrack} size={size} radius={COVER_RADIUS} />
         </Animated.View>
       )}
 
@@ -314,7 +314,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
             },
           ]}
         >
-          <CoverArt uri={nextTrack.artworkUri} size={size} radius={COVER_RADIUS} />
+          <FullCover track={nextTrack} size={size} radius={COVER_RADIUS} />
         </Animated.View>
       )}
 
@@ -330,7 +330,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
           },
         ]}
       >
-        <CoverArt uri={currentTrack?.artworkUri} size={size} radius={COVER_RADIUS} />
+        <FullCover track={currentTrack} size={size} radius={COVER_RADIUS} />
         {showWaveform && <WaveOverlay bars={bars} size={size} radius={COVER_RADIUS} />}
       </Animated.View>
     </Animated.View>

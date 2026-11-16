@@ -4,7 +4,7 @@ import ImageIO
 import UIKit
 
 /// Высокопроизводительный нативный сканер и парсер метаданных (аналог архитектуры Spotify Local Files на iOS).
-/// Сканирует папки за 2–5 мс, извлекает теги и формирует аппаратные 512x512 миниатюры обложек через ImageIO.
+/// Сканирует папки за 2–5 мс, сначала отдаёт теги, затем формирует лёгкие миниатюры обложек через ImageIO.
 public class MetadataScanner {
 
   // MARK: - Сканирование файлов (директории)
@@ -119,7 +119,6 @@ public class MetadataScanner {
     var trackNumber: Int?
     var discNumber: Int?
     var lyrics: String?
-    var artworkUri: String?
 
     // 1. Стандартные общие метаданные
     for item in AVMetadataItem.metadataItems(from: allMetadata, filteredByIdentifier: .commonIdentifierTitle) {
@@ -188,24 +187,7 @@ public class MetadataScanner {
       }
     }
 
-    // 3. Обложка: сохраняем ОРИГИНАЛЬНОЕ идеальное разрешение (без сжатия и без потери качества)
-    let artworkItems = AVMetadataItem.metadataItems(from: allMetadata, filteredByIdentifier: .commonIdentifierArtwork)
-    if let firstArtwork = artworkItems.first, let imgData = firstArtwork.dataValue, !imgData.isEmpty {
-      let ext = sniffImageExtension(data: imgData)
-      let hash = String(format: "%08x", abs(id.hashValue))
-      let coverURL = coversDirURL.appendingPathComponent("\(hash).\(ext)")
-
-      if FileManager.default.fileExists(atPath: coverURL.path) {
-        artworkUri = "file://" + coverURL.path
-      } else {
-        do {
-          try imgData.write(to: coverURL, options: .atomic)
-          artworkUri = "file://" + coverURL.path
-        } catch {
-          // fallback если запись не удалась
-        }
-      }
-    }
+    // 3. Обложки здесь НЕ читаем: текст отдаётся первым, миниатюры — extractThumbnails, оригинал — extractOriginalArtwork
 
     var dict: [String: Any] = [
       "id": id,
@@ -218,9 +200,97 @@ public class MetadataScanner {
     if let trk = trackNumber, trk > 0 { dict["trackNumber"] = trk }
     if let d = discNumber, d > 0 { dict["discNumber"] = d }
     if let lyr = lyrics, !lyr.isEmpty { dict["lyrics"] = lyr }
-    if let art = artworkUri { dict["artworkUri"] = art }
 
     return dict
+  }
+
+  // MARK: - Обложки: миниатюры (долговременный кэш) и оригинал (по запросу)
+
+  private static func artworkData(fileURL: URL) -> Data? {
+    let asset = AVURLAsset(url: fileURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+    let items = AVMetadataItem.metadataItems(from: asset.metadata, filteredByIdentifier: .commonIdentifierArtwork)
+    guard let d = items.first?.dataValue, !d.isEmpty else { return nil }
+    return d
+  }
+
+  /// Стабильный (между запусками) FNV-1a хэш содержимого: одинаковые обложки → одно имя файла
+  private static func contentHash(_ data: Data) -> UInt64 {
+    var h: UInt64 = 0xcbf29ce484222325
+    data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+      for b in buf { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+    }
+    return h
+  }
+
+  private static func makeThumbnail(from data: Data, maxPixel: Int) -> Data? {
+    guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+    let opts: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceShouldCacheImmediately: true,
+      kCGImageSourceThumbnailMaxPixelSize: maxPixel
+    ]
+    guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+    let out = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else { return nil }
+    CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.75] as CFDictionary)
+    guard CGImageDestinationFinalize(dest) else { return nil }
+    return out as Data
+  }
+
+  /// Лёгкие JPEG-миниатюры для очереди/списков. Имя = хэш содержимого + «_t»:
+  /// треки одного альбома делят один файл, повторные проходы ничего не дублируют.
+  public static func extractThumbnails(items: [[String: Any]], coversDirURL: URL, maxPixel: Int) -> [[String: Any]] {
+    let fm = FileManager.default
+    if !fm.fileExists(atPath: coversDirURL.path) {
+      try? fm.createDirectory(at: coversDirURL, withIntermediateDirectories: true, attributes: nil)
+    }
+    var results: [[String: Any]] = []
+    results.reserveCapacity(items.count)
+
+    for item in items {
+      autoreleasepool { () -> Void in
+        guard let uriStr = item["uri"] as? String,
+              let id = item["id"] as? String,
+              let data = artworkData(fileURL: parseLocalFileURL(uriStr)) else { return }
+        let thumbURL = coversDirURL.appendingPathComponent(String(format: "%016llx_t.jpg", contentHash(data)))
+        if !fm.fileExists(atPath: thumbURL.path) {
+          guard let jpeg = makeThumbnail(from: data, maxPixel: maxPixel),
+                (try? jpeg.write(to: thumbURL, options: .atomic)) != nil else { return }
+        }
+        results.append(["id": id, "artworkUri": "file://" + thumbURL.path])
+      }
+    }
+    return results
+  }
+
+  /// Оригинал обложки (байты из тега без перекодирования) для главного экрана.
+  /// Пишется во временный кэш; хранятся только `keep` последних файлов.
+  public static func extractOriginalArtwork(fileURL: URL, cacheDirURL: URL, keep: Int) -> String? {
+    guard let data = artworkData(fileURL: fileURL) else { return nil }
+    let fm = FileManager.default
+    try? fm.createDirectory(at: cacheDirURL, withIntermediateDirectories: true, attributes: nil)
+    let name = String(format: "%016llx", contentHash(data)) + "." + sniffImageExtension(data: data)
+    let url = cacheDirURL.appendingPathComponent(name)
+    if fm.fileExists(atPath: url.path) {
+      try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    } else {
+      do { try data.write(to: url, options: .atomic) } catch { return nil }
+    }
+    pruneCache(cacheDirURL, keep: keep)
+    return "file://" + url.path
+  }
+
+  private static func pruneCache(_ dir: URL, keep: Int) {
+    let fm = FileManager.default
+    guard let files = try? fm.contentsOfDirectory(
+      at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]
+    ), files.count > keep else { return }
+    func mtime(_ u: URL) -> Date {
+      return (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+    }
+    let sorted = files.sorted { (l: URL, r: URL) -> Bool in mtime(l) > mtime(r) }
+    for f in sorted.dropFirst(keep) { try? fm.removeItem(at: f) }
   }
 
   // MARK: - Определение формата изображения без декодирования
