@@ -162,8 +162,20 @@ public class MetadataScanner {
           bpm = num.doubleValue
         }
       }
-      if lyrics == nil && (keyString == "USLT" || keyString == "©lyr" || keyString == "lyrics") {
-        lyrics = item.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let idStr = item.identifier?.rawValue ?? ""
+      let isLyrics = keyString == "USLT" || keyString == "©lyr" || keyString == "lyrics" || keyString == "COMM"
+        || idStr.contains("USLT") || idStr.contains("©lyr") || idStr.contains("Lyrics") || idStr.contains("lyrics")
+
+      if lyrics == nil && isLyrics {
+        if let str = item.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !str.isEmpty {
+          lyrics = str
+        } else if let dict = item.value as? [String: Any], let txt = (dict["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !txt.isEmpty {
+          lyrics = txt
+        } else if let dict = item.value as? NSDictionary, let txt = (dict["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !txt.isEmpty {
+          lyrics = txt
+        } else if let data = item.dataValue, let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !str.isEmpty {
+          lyrics = str
+        }
       }
       if trackNumber == nil && (keyString == "TRCK" || keyString == "trkn") {
         if let str = item.stringValue {
@@ -187,7 +199,24 @@ public class MetadataScanner {
       }
     }
 
-    // 3. Обложки здесь НЕ читаем: текст отдаётся первым, миниатюры — extractThumbnails, оригинал — extractOriginalArtwork
+    // 3. Обложка: аппаратное сжатие в лёгкий JPEG thumbnail 384x384 через ImageIO (для быстрых очередей и списков)
+    var artworkUri: String?
+    let artworkItems = AVMetadataItem.metadataItems(from: allMetadata, filteredByIdentifier: .commonIdentifierArtwork)
+    if let firstArtwork = artworkItems.first, let imgData = firstArtwork.dataValue, !imgData.isEmpty {
+      let hash = String(format: "%016llx", contentHash(imgData))
+      let thumbURL = coversDirURL.appendingPathComponent("\(hash)_t.jpg")
+
+      if FileManager.default.fileExists(atPath: thumbURL.path) {
+        artworkUri = "file://" + thumbURL.path
+      } else if let thumbData = makeThumbnail(from: imgData, maxPixel: 384) {
+        do {
+          try thumbData.write(to: thumbURL, options: .atomic)
+          artworkUri = "file://" + thumbURL.path
+        } catch {
+          // fallback
+        }
+      }
+    }
 
     var dict: [String: Any] = [
       "id": id,
@@ -200,6 +229,7 @@ public class MetadataScanner {
     if let trk = trackNumber, trk > 0 { dict["trackNumber"] = trk }
     if let d = discNumber, d > 0 { dict["discNumber"] = d }
     if let lyr = lyrics, !lyr.isEmpty { dict["lyrics"] = lyr }
+    if let art = artworkUri { dict["artworkUri"] = art }
 
     return dict
   }

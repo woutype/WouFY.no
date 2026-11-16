@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { TrackFile } from '../types';
 import { DATA_DIR, LEGACY_DIR } from './library';
+import { parseAudioTags } from './id3Parser';
 
 export interface LyricLine {
   /** начало строки, сек */
@@ -69,6 +70,12 @@ export function parseLrc(raw: string): LyricLine[] | null {
 
 export function plainLinesOf(text: string): string[] {
   return text
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
     .split(/\r?\n/)
     .map((l) => l.replace(TS_RE, '').trim())
     .filter((l) => l.length > 0);
@@ -507,34 +514,50 @@ export async function fetchOnlineLrc(track: TrackFile, duration: number): Promis
 }
 
 /** Свои/сохранённые тексты: .lrc рядом с треком (положил пользователь) и локальный кэш приложения (в т.ч. ручная разметка и сдвиг) */
-async function loadCuratedLrc(track: TrackFile): Promise<LyricsData | null> {
+async function loadCuratedLrc(track: TrackFile, duration = 0): Promise<LyricsData | null> {
   const tryRead = async (path: string): Promise<LyricsData | null> => {
     try {
       const info = await FileSystem.getInfoAsync(path);
       if (!info.exists) return null;
-      const lines = parseLrc(await FileSystem.readAsStringAsync(path));
-      return lines ? { lines, synced: true, source: 'lrc-file', plain: lines.map((l) => l.text) } : null;
+      const raw = await FileSystem.readAsStringAsync(path);
+      if (!raw || !raw.trim()) return null;
+      const lines = parseLrc(raw);
+      if (lines) return { lines, synced: true, source: 'lrc-file', plain: lines.map((l) => l.text) };
+      const plain = plainLinesOf(raw);
+      if (plain.length) {
+        return {
+          lines: buildEstimate(plain, duration > 0 ? duration : 0),
+          synced: false,
+          source: 'lrc-file',
+          plain,
+          forDuration: duration,
+        };
+      }
+      return null;
     } catch {
       return null;
     }
   };
   const safeId = (track.id || `${track.artist}_${track.title}`).replace(/[^a-zA-Z0-9_\u0400-\u04FF]/g, '_');
+  const baseUri = track.uri.replace(/\.[^/.]+$/, '');
   return (
     (await tryRead(cachePathFor(track))) ||
     (await tryRead(`${LEGACY_CACHE_DIR}${safeId}.lrc`)) ||
-    (track.lrcUri ? await tryRead(track.lrcUri) : null)
+    (track.lrcUri ? await tryRead(track.lrcUri) : null) ||
+    (await tryRead(`${baseUri}.lrc`)) ||
+    (await tryRead(`${baseUri}.txt`))
   );
 }
 
 /**
  * Порядок источников (в «идеале» совпадает с песней):
- *  1. сохранённый/свой .lrc (ручная разметка, сдвиг, ранее найденное в базе);
+ *  1. сохранённый/свой .lrc/.txt (ручная разметка, сдвиг, ранее найденное в базе);
  *  2. онлайн-база LRCLIB (оценка кандидатов по длительности, названию, артисту);
- *  3. если в базе нет — текст из самого файла: SYLT (теги с таймингами) → LRC-метки в USLT → обычный текст USLT;
+ *  3. если в базе нет — текст из самого файла: SYLT (теги с таймингами) → LRC-метки в USLT → обычный текст USLT/MP4/FLAC;
  *  4. обычный текст без таймингов (из файла или из базы) — приблизительные тайминги по слогам.
  */
 export async function loadLyrics(track: TrackFile, duration: number, allowOnline = true): Promise<LyricsData> {
-  const curated = await loadCuratedLrc(track);
+  const curated = await loadCuratedLrc(track, duration);
   if (curated) return curated;
 
   let onlinePlain: string | undefined;
@@ -558,19 +581,40 @@ export async function loadLyrics(track: TrackFile, duration: number, allowOnline
     }
   }
 
-  // текст из самого файла
+  // Если у трека в памяти ещё нет тегов текста — читаем напрямую из аудиофайла
+  if (!track.syncedLyrics && !track.lyrics) {
+    try {
+      const meta = await parseAudioTags(track.uri, track.id, track.extension);
+      if (meta.syncedLyrics && meta.syncedLyrics.length >= 2) {
+        track.syncedLyrics = meta.syncedLyrics;
+      }
+      if (meta.lyrics) {
+        track.lyrics = meta.lyrics;
+      }
+    } catch (e) {
+      console.warn('[lyrics] direct parseAudioTags error:', e);
+    }
+  }
+
+  // текст из самого файла: синхронизированный (SYLT)
   if (track.syncedLyrics && track.syncedLyrics.length >= 2) {
     const lines = track.syncedLyrics.map((l) => ({ time: l.time, text: l.text, section: isSectionLine(l.text) }));
     return { lines, synced: true, source: 'sylt', plain: lines.map((l) => l.text) };
   }
+
+  // текст из тегов файла: LRC-разметка или обычный текст (USLT, ©lyr, COMM, Vorbis)
   if (track.lyrics) {
     const lines = parseLrc(track.lyrics);
     if (lines) return { lines, synced: true, source: 'lrc-tag', plain: lines.map((l) => l.text) };
+    const plain = plainLinesOf(track.lyrics);
+    if (plain.length) {
+      return { lines: buildEstimate(plain, duration), synced: false, source: 'lrc-tag', plain, forDuration: duration };
+    }
   }
 
-  const plainText = track.lyrics || onlinePlain;
-  if (plainText) {
-    const plain = plainLinesOf(plainText);
+  // fallback: текст из онлайн-базы (без таймингов)
+  if (onlinePlain) {
+    const plain = plainLinesOf(onlinePlain);
     if (plain.length) return { lines: buildEstimate(plain, duration), synced: false, source: 'estimate', plain, forDuration: duration };
   }
 

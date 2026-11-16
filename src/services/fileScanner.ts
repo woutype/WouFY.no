@@ -326,30 +326,59 @@ export async function enrichTracks(
 
     /** Лёгкие миниатюры (JPEG ~192px, имя = хэш содержимого → общий файл на альбом). Текст к этому моменту уже на экране. */
     const thumbPass = async (list: TrackFile[]) => {
-      if (!WoufyFX?.nativeExtractThumbnails) return;
-      const TB = 16;
-      for (let j = 0; j < list.length; j += TB) {
-        if (isCancelled()) return;
-        const chunk = list.slice(j, j + TB);
-        try {
-          const res = await WoufyFX.nativeExtractThumbnails(
-            chunk.map((t) => ({ id: t.id, uri: t.uri })),
-            coversDir,
-            THUMB_PX
-          );
-          const found = new Map(res.map((r) => [r.id, r.artworkUri]));
-          const upd = chunk.map((t) => {
-            const cur = all.get(t.id) ?? t;
-            return { ...cur, artworkUri: found.get(t.id) ?? cur.artworkUri, thumbDone: true };
-          });
-          for (const u of upd) all.set(u.id, u);
-          onBatch(upd);
-          sinceSave += upd.length;
-        } catch (e) {
-          console.warn('[fileScanner] nativeExtractThumbnails error:', e);
-          return;
+      if (list.length === 0) return;
+      if (WoufyFX?.nativeExtractThumbnails) {
+        const TB = 16;
+        for (let j = 0; j < list.length; j += TB) {
+          if (isCancelled()) return;
+          const chunk = list.slice(j, j + TB);
+          try {
+            const res = await WoufyFX.nativeExtractThumbnails(
+              chunk.map((t) => ({ id: t.id, uri: t.uri })),
+              coversDir,
+              THUMB_PX
+            );
+            const found = new Map(res.map((r) => [r.id, r.artworkUri]));
+            const upd = chunk.map((t) => {
+              const cur = all.get(t.id) ?? t;
+              const art = found.get(t.id);
+              return { ...cur, artworkUri: art ?? cur.artworkUri, thumbDone: true };
+            });
+            for (const u of upd) all.set(u.id, u);
+            onBatch(upd);
+            sinceSave += upd.length;
+          } catch (e) {
+            console.warn('[fileScanner] nativeExtractThumbnails error:', e);
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 4));
         }
-        await new Promise((r) => setTimeout(r, 4));
+      }
+
+      // JS fallback для треков, у которых так и не появилась обложка/миниатюра или тексты
+      const missing = list.filter((t) => !all.get(t.id)?.artworkUri);
+      if (missing.length > 0) {
+        for (const t of missing) {
+          if (isCancelled()) return;
+          try {
+            const meta = await parseAudioTags(t.uri, t.id, t.extension);
+            if (meta.artworkUri || meta.lyrics || meta.syncedLyrics) {
+              const cur = all.get(t.id) ?? t;
+              const upd: TrackFile = {
+                ...cur,
+                artworkUri: meta.artworkUri ?? cur.artworkUri,
+                thumbDone: true,
+                lyrics: meta.lyrics ?? cur.lyrics,
+                syncedLyrics: meta.syncedLyrics ?? cur.syncedLyrics,
+              };
+              all.set(t.id, upd);
+              onBatch([upd]);
+              sinceSave++;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
       }
     };
 
@@ -372,15 +401,18 @@ export async function enrichTracks(
             const meta = metaMap.get(t.id);
             const baseName = t.filename.replace(/\.[^/.]+$/, '');
             const fb = parseName(baseName);
+            const artworkUri = meta?.artworkUri ?? t.artworkUri;
             return {
               ...t,
               title: meta?.title?.trim() || fb.title,
               artist: meta?.artist?.trim() || fb.artist,
               album: meta?.album?.trim() || 'Сингл',
-              lyrics: meta?.lyrics,
-              bpmTag: meta?.bpmTag,
+              artworkUri,
+              thumbDone: Boolean(artworkUri),
+              lyrics: meta?.lyrics ?? t.lyrics,
+              bpmTag: meta?.bpmTag ?? t.bpmTag,
               trackNumber: meta?.trackNumber ?? t.trackNumber,
-              discNumber: meta?.discNumber,
+              discNumber: meta?.discNumber ?? t.discNumber,
               tagged: true,
             };
           });

@@ -119,7 +119,7 @@ function decodeUtf16(bytes: Uint8Array, start: number, end: number, forceBE = fa
   let out = '';
   for (; i + 1 < end; i += 2) {
     const code = le ? bytes[i] | (bytes[i + 1] << 8) : (bytes[i] << 8) | bytes[i + 1];
-    if (code === 0) break;
+    if (code === 0) continue;
     out += String.fromCharCode(code);
   }
   return out;
@@ -259,6 +259,20 @@ async function parseID3(fileUri: string, cacheKey: string): Promise<AudioMetadat
       const txt = decodeText(data, afterDesc, pEnd, enc).trim();
       // несколько USLT-кадров (разные языки): берём самый длинный
       if (!meta.lyrics || txt.length > meta.lyrics.length) meta.lyrics = txt;
+    } else if (frameId === 'COMM' || frameId === 'COM') {
+      const [, afterDesc] = findTerminator(data, pStart + 4, pEnd, enc);
+      const desc = decodeText(data, pStart + 4, afterDesc, enc).toLowerCase();
+      const txt = decodeText(data, afterDesc, pEnd, enc).trim();
+      if ((desc.includes('lyric') || txt.split('\n').length > 3) && (!meta.lyrics || txt.length > meta.lyrics.length)) {
+        meta.lyrics = txt;
+      }
+    } else if (frameId === 'TXXX') {
+      const [descEnd, afterDesc] = findTerminator(data, pStart + 1, pEnd, enc);
+      const desc = decodeText(data, pStart + 1, descEnd, enc).toUpperCase();
+      if (desc.includes('LYRIC')) {
+        const txt = decodeText(data, afterDesc, pEnd, enc).trim();
+        if (txt && (!meta.lyrics || txt.length > meta.lyrics.length)) meta.lyrics = txt;
+      }
     } else if (frameId === 'SYLT') {
       // enc(1) lang(3) timestampFormat(1) contentType(1) descriptor\0 { text\0 time(4) }*
       const tsFormat = data[pStart + 4];
@@ -438,7 +452,7 @@ async function parseMp4(fileUri: string, cacheKey: string): Promise<AudioMetadat
       else if (name === '©ART') meta.artist = decodeUtf8(moov, payload, de, false).trim();
       else if (name === 'aART' && !meta.artist) meta.artist = decodeUtf8(moov, payload, de, false).trim();
       else if (name === '©alb') meta.album = decodeUtf8(moov, payload, de, false).trim();
-      else if (name === '©lyr') meta.lyrics = decodeUtf8(moov, payload, de, false).trim();
+      else if (name === '©lyr' || name === 'lyrics') meta.lyrics = decodeUtf8(moov, payload, de, false).trim();
       else if (name === 'trkn' && de - payload >= 4) meta.trackNumber = (moov[payload + 2] << 8) | moov[payload + 3] || undefined;
       else if (name === 'disk' && de - payload >= 4) meta.discNumber = (moov[payload + 2] << 8) | moov[payload + 3] || undefined;
       else if (name === 'tmpo' && de - payload >= 2) meta.bpm = parseBpm(String((moov[payload] << 8) | moov[payload + 1]));

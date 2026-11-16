@@ -2,6 +2,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { WoufyFX } from '../../modules/woufy-fx';
 import { DATA_DIR } from './library';
 import { TrackFile } from '../types';
+import { parseAudioTags } from './id3Parser';
 
 /** Размер миниатюры (px по длинной стороне): хватает для строк очереди/статистики на 3x-экранах */
 export const THUMB_PX = 192;
@@ -30,7 +31,7 @@ const MEMO_MAX = 8;
  * null — оригинала нет (в этом случае UI остаётся на миниатюре).
  */
 export async function getFullArtwork(t: TrackFile): Promise<string | null> {
-  if (!WoufyFX?.nativeExtractArtwork || isUserCover(t.artworkUri)) return t.artworkUri ?? null;
+  if (isUserCover(t.artworkUri)) return t.artworkUri ?? null;
   const key = t.id;
   const hit = memo.get(key);
   if (hit) {
@@ -42,15 +43,35 @@ export async function getFullArtwork(t: TrackFile): Promise<string | null> {
     }
     memo.delete(key);
   } else if (hit === null) {
-    return null;
+    return t.artworkUri ?? null;
   }
+
+  // 1. Нативный Swift метод (быстро, аппаратно)
+  if (WoufyFX?.nativeExtractArtwork) {
+    try {
+      const uri = await WoufyFX.nativeExtractArtwork(t.uri, originalsDir());
+      if (uri) {
+        memo.set(key, uri);
+        if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value as string);
+        return uri;
+      }
+    } catch (e) {
+      console.warn('[artwork] nativeExtractArtwork failed:', e);
+    }
+  }
+
+  // 2. JS fallback: читаем оригинальные несжатые байты обложки из тегов
   try {
-    const uri = await WoufyFX.nativeExtractArtwork(t.uri, originalsDir());
-    memo.set(key, uri);
-    if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value as string);
-    return uri;
+    const meta = await parseAudioTags(t.uri, t.id, t.extension);
+    if (meta.artworkUri) {
+      memo.set(key, meta.artworkUri);
+      if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value as string);
+      return meta.artworkUri;
+    }
   } catch (e) {
-    console.warn('[artwork] nativeExtractArtwork failed:', e);
-    return null;
+    console.warn('[artwork] JS parseAudioTags failed:', e);
   }
+
+  memo.set(key, null);
+  return t.artworkUri ?? null;
 }

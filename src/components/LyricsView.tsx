@@ -482,7 +482,13 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
       ? 'Синхронизирован (база)'
       : data.source === 'aligned'
       ? 'Подогнан по голосу'
+      : data.source === 'sylt' || data.source === 'lrc-tag'
+      ? 'Синхронизирован (файл)'
+      : data.source === 'lrc-file'
+      ? 'Из файла .lrc'
       : 'Синхронизирован'
+    : data?.source === 'lrc-tag' || data?.source === 'lrc-file'
+    ? 'Текст из файла'
     : 'Приблизительно';
 
   return (

@@ -75,7 +75,7 @@ export const LEGACY_DIR = `${getDocRoot()}.woufy/`;
 const FILE = `${DATA_DIR}state.json`;
 const TRACKS_CACHE_FILE = `${DATA_DIR}library_cache.json`;
 /** версия формата кэша треков: при смене старый кэш перепроверяется и пересохраняется в новом формате */
-const TRACKS_CACHE_VERSION = 4;
+const TRACKS_CACHE_VERSION = 5;
 
 let cache: PersistedState = {};
 let loaded = false;
@@ -152,6 +152,7 @@ export async function loadCachedTracks(): Promise<TrackFile[]> {
   try {
     const raw = await readJson<{ v?: number; tracks?: TrackFile[] } | TrackFile[]>(TRACKS_CACHE_FILE);
     let tracks: TrackFile[] = [];
+    const isCurrentVersion = raw && !Array.isArray(raw) && raw.v === TRACKS_CACHE_VERSION;
     if (raw && !Array.isArray(raw) && Array.isArray(raw.tracks)) {
       tracks = raw.tracks;
     } else if (Array.isArray(raw)) {
@@ -163,12 +164,16 @@ export async function loadCachedTracks(): Promise<TrackFile[]> {
         const id = normalizeTrackId(t.id || t.uri || t.filename);
         const uri = resolveTrackUri(id);
         const coverName = t.artworkUri ? t.artworkUri.split('/').pop() : undefined;
+        // Если версия кэша старая или у трека потеряна обложка, даём ему возможность переобогатиться в фоне
+        const needsReenrich = !isCurrentVersion || (!coverName && t.tagged);
         return {
           ...t,
           id,
           uri,
           artworkUri: coverName ? `${dataDir}covers/${coverName}` : undefined,
           lrcUri: t.lrcUri ? uri.replace(/\.[^/.]+$/, '.lrc') : undefined,
+          tagged: needsReenrich ? false : t.tagged,
+          thumbDone: coverName ? t.thumbDone : false,
         };
       });
     }
