@@ -40,6 +40,7 @@ function Root() {
   const [dj, setDj] = useState<DJSettings>(DEFAULT_DJ);
   const [fx, setFxState] = useState<FxSettings>(DEFAULT_FX);
   const [hapticsOn, setHapticsOn] = useState(false);
+  const [sheetScrollEnabled, setSheetScrollEnabled] = useState(true);
   const libRef = useRef<Map<string, TrackFile>>(new Map());
   const lastScanAt = useRef(0);
   const progress = useRef(new Animated.Value(1)).current;
@@ -67,14 +68,15 @@ function Root() {
     if (!same) engine.setLibrary(merged, st.order, st.lastTrackId);
     else if (lrcChanged.length) engine.patchTracks(lrcChanged);
     lastScanAt.current = Date.now();
+    const s = engine.getState();
+    const curTrackId = s.queue[s.index]?.id ?? st.lastTrackId;
+    const prio = [curTrackId, ...s.queue.slice(Math.max(0, s.index - 2), s.index + 20).map((t) => t.id)].filter(Boolean) as string[];
+
     enrichTracks(merged, (upd) => {
       for (const u of upd) libRef.current.set(u.id, u);
       bpmService.registerTags([...libRef.current.values()]);
       engine.patchTracks(upd);
-    }, undefined, (() => {
-      const s = engine.getState();
-      return s.queue.slice(Math.max(0, s.index), Math.max(0, s.index) + 60).map((t) => t.id);
-    })());
+    }, undefined, prio);
     const parts = [`Найдено: ${merged.length}`];
     if (res.added) parts.push(`новых: ${res.added}`);
     if (res.removed) parts.push(`удалено: ${res.removed}`);
@@ -94,8 +96,13 @@ function Root() {
       onPersist: (s) => patchState(s),
     });
     (async () => {
-      await statsService.load();
-      const st = await loadState();
+      // 1. Быстрая параллельная загрузка настроек, кэша и статистики за считанные миллисекунды
+      const [st, cached] = await Promise.all([
+        loadState(),
+        loadCachedTracks(),
+        statsService.load().catch(() => {}),
+      ]);
+
       const settings = { ...DEFAULT_DJ, ...(st.dj ?? {}) };
       setDj(settings);
       engine.setDJ(settings);
@@ -103,16 +110,17 @@ function Root() {
       setFxState(fxSettings);
       engine.setFx(fxSettings);
       setHapticsOn(Boolean(st.musicHaptics));
-      try {
-        const curVol = await volumeService.getVolume();
-        engine.setVolume(curVol, false);
-      } catch {
-        if (st.volume !== undefined) engine.setVolume(st.volume, false);
-      }
+
       if (st.repeat) engine.setRepeat(st.repeat);
 
-      // Мгновенная инициализация из дискового кэша
-      const cached = await loadCachedTracks();
+      // Громкость запрашиваем в фоне, не блокируя мгновенный показ плеера
+      volumeService.getVolume().then((curVol) => {
+        engine.setVolume(curVol, false);
+      }).catch(() => {
+        if (st.volume !== undefined) engine.setVolume(st.volume, false);
+      });
+
+      // Мгновенная инициализация из дискового кэша: плеер готов за 20 мс!
       if (cached.length > 0) {
         libRef.current = new Map(cached.map((t) => [t.id, t]));
         bpmService.registerTags(cached);
@@ -122,15 +130,20 @@ function Root() {
         setReady(true);
       }
 
-      // Сверка со списком файлов: на 1300 треков занимает доли секунды, интерфейс не блокируется
-      try {
-        await rescan();
-      } catch (e) {
-        console.error('Scan error:', e);
-      }
+      // Если кэша ещё нет (первый запуск / после сбоя) — сканируем и сразу открываем
       if (cached.length === 0) {
+        try {
+          await rescan();
+        } catch (e) {
+          console.error('Scan error:', e);
+        }
         if (st.shuffle) engine.setShuffle(true);
         setReady(true);
+      } else {
+        // Фоновая проверка библиотеки без задержки первого кадра
+        setTimeout(() => {
+          rescan().catch(() => {});
+        }, 1200);
       }
     })();
 
@@ -348,6 +361,7 @@ function Root() {
           onSettle={settle}
           topInset={m.top}
           width={m.W}
+          scrollEnabled={sheetScrollEnabled}
         >
           <QueueView
             tracks={state.queue}
@@ -385,6 +399,7 @@ function Root() {
             onArtistPress={onArtistPress}
             bottomPad={bottomPad}
             visible={!expanded && sheet === 'stats'}
+            onRowActiveChange={(active) => setSheetScrollEnabled(!active)}
           />
         </SheetPanel>
       </Animated.View>

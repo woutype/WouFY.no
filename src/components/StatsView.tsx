@@ -14,6 +14,7 @@ interface Props {
   onArtistPress: (artist: string) => void;
   bottomPad: number;
   visible?: boolean;
+  onRowActiveChange?: (active: boolean) => void;
 }
 
 const PERIODS: { key: StatsPeriod; label: string }[] = [
@@ -58,18 +59,21 @@ function RankBadge({ rank }: { rank: number }) {
 const SwipeableStatsRow: React.FC<{
   onReset: () => void;
   onPress: () => void;
+  onActiveChange?: (active: boolean) => void;
   children: React.ReactNode;
-}> = ({ onReset, onPress, children }) => {
+}> = ({ onReset, onPress, onActiveChange, children }) => {
   const panX = useRef(new Animated.Value(0)).current;
   const isOpen = useRef(false);
 
   const close = () => {
     isOpen.current = false;
+    onActiveChange?.(false);
     Animated.spring(panX, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 280, mass: 0.9 }).start();
   };
 
   const open = () => {
     isOpen.current = true;
+    onActiveChange?.(true);
     Animated.spring(panX, { toValue: -82, useNativeDriver: true, damping: 22, stiffness: 280, mass: 0.9 }).start();
   };
 
@@ -90,6 +94,7 @@ const SwipeableStatsRow: React.FC<{
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
         panX.stopAnimation();
+        onActiveChange?.(true);
       },
       onPanResponderMove: (_, g) => {
         const base = isOpen.current ? -82 : 0;
@@ -174,6 +179,7 @@ export const StatsView: React.FC<Props> = ({
   onPlayTopTracks,
   onArtistPress,
   bottomPad,
+  onRowActiveChange,
 }) => {
   const { width: screenWidth } = useWindowDimensions();
   const [period, setPeriod] = useState<StatsPeriod>('3days');
@@ -453,6 +459,7 @@ export const StatsView: React.FC<Props> = ({
                 onReset={() => {
                   statsService.resetTrackStats(item.trackId);
                 }}
+                onActiveChange={onRowActiveChange}
               >
                 <Glass radius={16} style={styles.cardGlass}>
                   <View style={styles.trackRow}>
@@ -521,6 +528,7 @@ export const StatsView: React.FC<Props> = ({
                 onReset={() => {
                   statsService.resetArtistStats(item.artist);
                 }}
+                onActiveChange={onRowActiveChange}
               >
                 <Glass radius={16} style={styles.cardGlass}>
                   <View style={styles.trackRow}>

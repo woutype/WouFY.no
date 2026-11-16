@@ -26,6 +26,7 @@ interface Props {
   onSettle: (target: 0 | 1) => void;
   topInset: number;
   width?: number;
+  scrollEnabled?: boolean;
   children: [React.ReactNode, React.ReactNode, React.ReactNode] | React.ReactNode[];
 }
 
@@ -39,6 +40,7 @@ export const SheetPanel: React.FC<Props> = ({
   onSettle,
   topInset,
   width,
+  scrollEnabled = true,
   children,
 }) => {
   const screenWidth = width && width > 0 ? width : Dimensions.get('window').width;
@@ -183,7 +185,7 @@ export const SheetPanel: React.FC<Props> = ({
         showsHorizontalScrollIndicator={false}
         bounces={false}
         directionalLockEnabled
-        scrollEnabled={mode !== 'stats'}
+        scrollEnabled={scrollEnabled}
         scrollEventThrottle={16}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { x: scrollX } } }],

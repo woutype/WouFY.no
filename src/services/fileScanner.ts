@@ -253,19 +253,22 @@ async function doScan(): Promise<ScanResult> {
   // Кэш обновляем сразу, чтобы мгновенный запуск работал даже при внезапном закрытии
   if (added > 0 || removed > 0) saveCachedTracks(tracks);
 
-  // Автоматическая сборка мусора: гарантируем, что на диске остаются ТОЛЬКО обложки существующих треков,
-  // а корзина .Trash и временные системные кэши очищаются без бесконечного накопления
-  const activeCovers = new Set<string>();
-  for (const t of tracks) {
-    if (t.artworkUri) {
-      const file = t.artworkUri.split('/').pop();
-      if (file) activeCovers.add(file);
+  // Автоматическая сборка мусора (отложена на 4 сек, чтобы не замедлять старт приложения):
+  // гарантируем, что на диске остаются ТОЛЬКО обложки существующих треков,
+  // а корзина .Trash и временные кэши очищаются без бесконечного накопления
+  setTimeout(() => {
+    const activeCovers = new Set<string>();
+    for (const t of tracks) {
+      if (t.artworkUri) {
+        const file = t.artworkUri.split('/').pop();
+        if (file) activeCovers.add(file);
+      }
     }
-  }
-  cleanupOrphanCovers(activeCovers).catch(() => {});
-  cleanupTrash().catch(() => {});
-  cleanupTempCache().catch(() => {});
-  statsService.cleanupOrphanSessions(new Set(tracks.map((t) => t.id)));
+    cleanupOrphanCovers(activeCovers).catch(() => {});
+    cleanupTrash().catch(() => {});
+    cleanupTempCache().catch(() => {});
+    statsService.cleanupOrphanSessions(new Set(tracks.map((t) => t.id)));
+  }, 4000);
 
   return { tracks, added, removed, untagged };
 }
@@ -374,7 +377,8 @@ export async function enrichTracks(
         lastFlush = Date.now();
       }
 
-      if (sinceSave >= 300) {
+      // Сохраняем кэш сразу после первой пачки (активный трек) и каждые 60 треков
+      if (i === 0 || sinceSave >= 60) {
         sinceSave = 0;
         saveCachedTracks([...all.values()]);
       }
