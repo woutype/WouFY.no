@@ -194,16 +194,23 @@ export const CoverArt: React.FC<CoverArtProps> = ({ uri, size, radius: r = 24, s
 /** Обложка главного экрана: мгновенно показывает миниатюру, поверх подгружает оригинал без сжатия */
 export const FullCover: React.FC<{ track?: TrackFile; size: number; radius?: number }> = ({ track, size, radius: r = 24 }) => {
   const full = useFullArtwork(track);
+  const [fullFailed, setFullFailed] = useState(false);
+
+  useEffect(() => {
+    setFullFailed(false);
+  }, [full]);
+
   return (
     <View style={{ width: size, height: size }}>
       <CoverArt uri={track?.artworkUri} size={size} radius={r} />
-      {full ? (
+      {full && full !== track?.artworkUri && !fullFailed ? (
         <Image
           key={full}
           source={{ uri: full }}
           style={{ position: 'absolute', width: size, height: size, borderRadius: r }}
           resizeMode="cover"
           fadeDuration={0}
+          onError={() => setFullFailed(true)}
         />
       ) : null}
     </View>

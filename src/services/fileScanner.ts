@@ -362,21 +362,22 @@ export async function enrichTracks(
           if (isCancelled()) return;
           try {
             const meta = await parseAudioTags(t.uri, t.id, t.extension);
+            const cur = all.get(t.id) ?? t;
+            const upd: TrackFile = {
+              ...cur,
+              artworkUri: meta.artworkUri ?? cur.artworkUri,
+              thumbDone: true,
+              lyrics: meta.lyrics ?? cur.lyrics,
+              syncedLyrics: meta.syncedLyrics ?? cur.syncedLyrics,
+            };
+            all.set(t.id, upd);
             if (meta.artworkUri || meta.lyrics || meta.syncedLyrics) {
-              const cur = all.get(t.id) ?? t;
-              const upd: TrackFile = {
-                ...cur,
-                artworkUri: meta.artworkUri ?? cur.artworkUri,
-                thumbDone: true,
-                lyrics: meta.lyrics ?? cur.lyrics,
-                syncedLyrics: meta.syncedLyrics ?? cur.syncedLyrics,
-              };
-              all.set(t.id, upd);
               onBatch([upd]);
-              sinceSave++;
             }
+            sinceSave++;
           } catch {
-            /* ignore */
+            const cur = all.get(t.id) ?? t;
+            all.set(t.id, { ...cur, thumbDone: true });
           }
         }
       }

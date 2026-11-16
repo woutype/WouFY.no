@@ -173,7 +173,7 @@ public class MetadataScanner {
           lyrics = txt
         } else if let dict = item.value as? NSDictionary, let txt = (dict["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !txt.isEmpty {
           lyrics = txt
-        } else if let data = item.dataValue, let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !str.isEmpty {
+        } else if let data = item.dataValue, let str = decodeLyricsData(data), !str.isEmpty {
           lyrics = str
         }
       }
@@ -201,8 +201,7 @@ public class MetadataScanner {
 
     // 3. Обложка: аппаратное сжатие в лёгкий JPEG thumbnail 384x384 через ImageIO (для быстрых очередей и списков)
     var artworkUri: String?
-    let artworkItems = AVMetadataItem.metadataItems(from: allMetadata, filteredByIdentifier: .commonIdentifierArtwork)
-    if let firstArtwork = artworkItems.first, let imgData = firstArtwork.dataValue, !imgData.isEmpty {
+    if let imgData = extractArtworkData(from: asset, allMetadata: allMetadata) {
       let hash = String(format: "%016llx", contentHash(imgData))
       let thumbURL = coversDirURL.appendingPathComponent("\(hash)_t.jpg")
 
@@ -234,13 +233,79 @@ public class MetadataScanner {
     return dict
   }
 
-  // MARK: - Обложки: миниатюры (долговременный кэш) и оригинал (по запросу)
+  // MARK: - Обложки и тексты: универсальное извлечение из любых контейнеров
+
+  private static func extractArtworkData(from asset: AVURLAsset, allMetadata: [AVMetadataItem]) -> Data? {
+    func bytesOf(_ item: AVMetadataItem) -> Data? {
+      if let d = item.dataValue, !d.isEmpty { return d }
+      if let d = item.value as? Data, !d.isEmpty { return d }
+      if let dict = item.value as? [String: Any], let d = dict["data"] as? Data, !d.isEmpty { return d }
+      if let dict = item.value as? NSDictionary, let d = dict["data"] as? Data, !d.isEmpty { return d }
+      return nil
+    }
+    for item in AVMetadataItem.metadataItems(from: allMetadata, filteredByIdentifier: .commonIdentifierArtwork) {
+      if let d = bytesOf(item) { return d }
+    }
+    for item in AVMetadataItem.metadataItems(from: asset.commonMetadata, withKey: AVMetadataKey.commonKeyArtwork, keySpace: .common) {
+      if let d = bytesOf(item) { return d }
+    }
+    for item in allMetadata {
+      let keyStr = item.commonKey?.rawValue ?? (item.key as? String) ?? ""
+      let idStr = item.identifier?.rawValue ?? ""
+      if item.commonKey == .commonKeyArtwork || keyStr == "APIC" || keyStr == "PIC" || keyStr == "covr" || idStr.contains("APIC") || idStr.contains("covr") {
+        if let d = bytesOf(item) { return d }
+      }
+    }
+    return nil
+  }
+
+  private static func decodeLyricsData(_ data: Data) -> String? {
+    if data.isEmpty { return nil }
+    let bytes = [UInt8](data)
+    // Если это сырой ID3 USLT/COMM кадр: [enc(0..3), lang(3), descriptor\0, text]
+    if bytes.count > 4 && bytes[0] <= 3 &&
+       bytes[1] >= 0x41 && bytes[1] <= 0x7A &&
+       bytes[2] >= 0x41 && bytes[2] <= 0x7A &&
+       bytes[3] >= 0x41 && bytes[3] <= 0x7A {
+      let enc = bytes[0]
+      var start = 4
+      if enc == 1 || enc == 2 {
+        while start + 1 < bytes.count {
+          if bytes[start] == 0 && bytes[start + 1] == 0 {
+            start += 2
+            break
+          }
+          start += 2
+        }
+      } else {
+        while start < bytes.count {
+          if bytes[start] == 0 {
+            start += 1
+            break
+          }
+          start += 1
+        }
+      }
+      if start < bytes.count {
+        let payload = Data(bytes[start..<bytes.count])
+        let encoding: String.Encoding = enc == 1 ? .utf16 : enc == 2 ? .utf16BigEndian : enc == 3 ? .utf8 : .isoLatin1
+        if let s = String(data: payload, encoding: encoding)?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+          return s
+        }
+      }
+    }
+    if let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+      return s
+    }
+    if let s = String(data: data, encoding: .utf16)?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+      return s
+    }
+    return nil
+  }
 
   private static func artworkData(fileURL: URL) -> Data? {
     let asset = AVURLAsset(url: fileURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
-    let items = AVMetadataItem.metadataItems(from: asset.metadata, filteredByIdentifier: .commonIdentifierArtwork)
-    guard let d = items.first?.dataValue, !d.isEmpty else { return nil }
-    return d
+    return extractArtworkData(from: asset, allMetadata: asset.metadata)
   }
 
   /// Стабильный (между запусками) FNV-1a хэш содержимого: одинаковые обложки → одно имя файла

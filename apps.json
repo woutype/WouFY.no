@@ -16,6 +16,13 @@
       "tintColor": "1ED760",
       "versions": [
         {
+          "version": "1.2.7",
+          "date": "2026-11-17",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.7/woufy.ipa",
+          "localizedDescription": "Новый скомпилированный нативный бинарник с аппаратной генерацией миниатюр и оригиналов обложек, синхронный показ обложек без мигания, точный учёт повторов и переключений в Топ-10, исправление таймингов и поиска по текстам.",
+          "size": 12967080
+        },
+        {
           "version": "1.2.6",
           "date": "2026-11-17",
           "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.6/woufy.ipa",

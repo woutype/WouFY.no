@@ -294,6 +294,7 @@ const ScrollBubble = forwardRef<BubbleHandle, { y: Animated.Value }>(function Sc
 
 interface Props {
   tracks: TrackFile[]; // очередь в порядке воспроизведения
+  allTracks?: TrackFile[]; // полная библиотека для поиска по текстам
   currentIndex: number;
   currentTrackId?: string;
   isPlaying: boolean;
@@ -320,6 +321,7 @@ interface DragState {
 
 export const QueueView: React.FC<Props> = ({
   tracks,
+  allTracks,
   currentIndex,
   currentTrackId,
   isPlaying,
@@ -750,10 +752,13 @@ export const QueueView: React.FC<Props> = ({
               {filtering ? `Найдено: ${data.length}` : `${localTracks.length} ${plural(localTracks.length)}`}
             </Text>
             {searchLyrics && (
-              <View style={styles.lyricsPill}>
-                <Ionicons name="document-text" size={11} color={colors.accent} />
-                <Text style={styles.lyricsPillText}>В текстах</Text>
-              </View>
+              <PressableScale onPress={() => onSearchLyricsChange?.(false)} hitSlop={6}>
+                <View style={styles.lyricsPill}>
+                  <Ionicons name="document-text" size={11} color={colors.accent} />
+                  <Text style={styles.lyricsPillText}>В текстах</Text>
+                  <Ionicons name="close" size={11} color={colors.accent} />
+                </View>
+              </PressableScale>
             )}
           </View>
           <Animated.View
@@ -887,7 +892,7 @@ export const QueueView: React.FC<Props> = ({
         )}
         <LyricsSearchModal
           visible={showLyricsSearch}
-          tracks={tracks}
+          tracks={allTracks ?? tracks}
           onSelectTrack={(track, seekTime) => {
             setShowLyricsSearch(false);
             if (onPlayTrackWithSeek) {

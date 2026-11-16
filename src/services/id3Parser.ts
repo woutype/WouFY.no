@@ -158,10 +158,10 @@ const parseIntPart = (s: string): number | undefined => {
   return !isNaN(n) && n > 0 ? n : undefined;
 };
 
-/** Сохраняет обложку в постоянный кэш (Application Support/WouFY/covers) и возвращает путь */
-async function saveCover(bytes: Uint8Array, ext: 'jpg' | 'png', _key: string): Promise<string | undefined> {
+/** Сохраняет обложку в постоянный кэш (Application Support/WouFY/covers) или указанную папку и возвращает путь */
+async function saveCover(bytes: Uint8Array, ext: 'jpg' | 'png', _key: string, targetDir?: string): Promise<string | undefined> {
   try {
-    const dir = `${DATA_DIR}covers/`;
+    const dir = targetDir ?? `${DATA_DIR}covers/`;
     // имя по содержимому (длина + выборка байт), а не по треку: одинаковая обложка альбома хранится один раз
     let sample = '';
     const step = Math.max(1, Math.floor(bytes.length / 64));
@@ -197,7 +197,7 @@ const V22_MAP: Record<string, string> = {
   PIC: 'APIC',
 };
 
-async function parseID3(fileUri: string, cacheKey: string): Promise<AudioMetadata> {
+async function parseID3(fileUri: string, cacheKey: string, coverDir?: string): Promise<AudioMetadata> {
   const header = await readRange(fileUri, 0, 10);
   if (header.length < 10) return {};
   if (header[0] !== 0x49 || header[1] !== 0x44 || header[2] !== 0x33) return {};
@@ -309,7 +309,7 @@ async function parseID3(fileUri: string, cacheKey: string): Promise<AudioMetadat
           // после mime: 0x00, тип картинки (1 байт), описание (в кодировке enc), данные
           [, imgStart] = findTerminator(data, mimeEnd + 2, pEnd, enc);
         }
-        if (imgStart < pEnd) meta.artworkUri = await saveCover(data.subarray(imgStart, pEnd), ext, cacheKey);
+        if (imgStart < pEnd) meta.artworkUri = await saveCover(data.subarray(imgStart, pEnd), ext, cacheKey, coverDir);
       } catch (e) {
         console.warn('[id3Parser] artwork failed:', e);
       }
@@ -320,7 +320,7 @@ async function parseID3(fileUri: string, cacheKey: string): Promise<AudioMetadat
 
 /* ───────────── FLAC: Vorbis comments + PICTURE ───────────── */
 
-async function parseFlac(fileUri: string, cacheKey: string): Promise<AudioMetadata> {
+async function parseFlac(fileUri: string, cacheKey: string, coverDir?: string): Promise<AudioMetadata> {
   const head = await readRange(fileUri, 0, 4);
   if (head.length < 4 || head[0] !== 0x66 || head[1] !== 0x4c || head[2] !== 0x61 || head[3] !== 0x43) return {};
 
@@ -376,7 +376,7 @@ async function parseFlac(fileUri: string, cacheKey: string): Promise<AudioMetada
       o += 4;
       if (dataLen > 0 && o + dataLen <= d.length) {
         const img = d.subarray(o, o + dataLen);
-        meta.artworkUri = await saveCover(img, sniffImageExt(img), cacheKey);
+        meta.artworkUri = await saveCover(img, sniffImageExt(img), cacheKey, coverDir);
       }
     }
     pos = body + len;
@@ -391,7 +391,7 @@ async function parseFlac(fileUri: string, cacheKey: string): Promise<AudioMetada
 const fourcc = (d: Uint8Array, o: number) => String.fromCharCode(d[o], d[o + 1], d[o + 2], d[o + 3]);
 const u32 = (d: Uint8Array, o: number) => ((d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]) >>> 0;
 
-async function parseMp4(fileUri: string, cacheKey: string): Promise<AudioMetadata> {
+async function parseMp4(fileUri: string, cacheKey: string, coverDir?: string): Promise<AudioMetadata> {
   const info = await FileSystem.getInfoAsync(fileUri);
   const fileSize = info.exists && 'size' in info && typeof info.size === 'number' ? info.size : 0;
   if (!fileSize) return {};
@@ -458,7 +458,7 @@ async function parseMp4(fileUri: string, cacheKey: string): Promise<AudioMetadat
       else if (name === 'tmpo' && de - payload >= 2) meta.bpm = parseBpm(String((moov[payload] << 8) | moov[payload + 1]));
       else if (name === 'covr' && !meta.artworkUri && de - payload > 16) {
         const img = moov.subarray(payload, de);
-        meta.artworkUri = await saveCover(img, sniffImageExt(img), cacheKey);
+        meta.artworkUri = await saveCover(img, sniffImageExt(img), cacheKey, coverDir);
       }
     }
     o += sz;
@@ -470,16 +470,16 @@ async function parseMp4(fileUri: string, cacheKey: string): Promise<AudioMetadat
  * Единая точка входа: определяет формат по расширению и читает теги прямо из файла
  * (читается только блок тегов, а не весь трек).
  */
-export async function parseAudioTags(fileUri: string, cacheKey: string, ext: string): Promise<AudioMetadata> {
+export async function parseAudioTags(fileUri: string, cacheKey: string, ext: string, coverDir?: string): Promise<AudioMetadata> {
   try {
-    if (ext === 'mp3') return await parseID3(fileUri, cacheKey);
-    if (ext === 'flac') return await parseFlac(fileUri, cacheKey);
+    if (ext === 'mp3') return await parseID3(fileUri, cacheKey, coverDir);
+    if (ext === 'flac') return await parseFlac(fileUri, cacheKey, coverDir);
     if (ext === 'm4a' || ext === 'aac') {
-      const m = await parseMp4(fileUri, cacheKey);
+      const m = await parseMp4(fileUri, cacheKey, coverDir);
       if (m.title || m.artist || m.artworkUri || m.lyrics) return m;
-      return await parseID3(fileUri, cacheKey); // .aac бывает с ID3 в начале
+      return await parseID3(fileUri, cacheKey, coverDir); // .aac бывает с ID3 в начале
     }
-    if (ext === 'wav' || ext === 'aiff') return await parseID3(fileUri, cacheKey);
+    if (ext === 'wav' || ext === 'aiff') return await parseID3(fileUri, cacheKey, coverDir);
   } catch (error) {
     console.warn(`[tags] Could not parse tags for ${fileUri}:`, error);
   }

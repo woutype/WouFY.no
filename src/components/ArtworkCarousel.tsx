@@ -53,12 +53,19 @@ export const ArtworkCarousel: React.FC<Props> = ({
   cbs.current = { onNext, onPrevious, onDragDownGrant, onDragDownMove, onDragDownRelease };
   const dragMode = useRef<'none' | 'horizontal' | 'vertical'>('none');
   const isAnimating = useRef(false);
+  const currentTrack = n > 0 ? queue[index >= 0 && index < n ? index : 0] : undefined;
+  const currentTrackId = currentTrack?.id;
   const prevIndexRef = useRef(index);
+  const prevTrackIdRef = useRef(currentTrackId);
 
   useEffect(() => {
-    if (prevIndexRef.current === index) return;
     const prev = prevIndexRef.current;
+    const prevId = prevTrackIdRef.current;
     prevIndexRef.current = index;
+    prevTrackIdRef.current = currentTrackId;
+
+    // Если играющий трек не менялся (например, включили Shuffle или переставили очередь) — не дёргаем обложку
+    if (!prevId || prevId === currentTrackId) return;
 
     if (isAnimating.current) {
       // Переключение произошло от жеста пальцем (жест уже сам анимировал смещение)
@@ -70,13 +77,13 @@ export const ArtworkCarousel: React.FC<Props> = ({
       return;
     }
 
-    const isNext = (index - prev + nRef.current) % nRef.current === 1;
-    const isPrev = (prev - index + nRef.current) % nRef.current === 1;
+    const isPrev = index !== prev && (prev - index + nRef.current) % nRef.current === 1;
+    const isNext = (index - prev + nRef.current) % nRef.current === 1 || index === prev;
 
     panX.stopAnimation();
 
     if (isNext) {
-      // Кнопка «Следующий трек» (или автопереход): старая обложка уезжает влево, новая заезжает справа
+      // Кнопка «Следующий трек» (или автопереход / скип в Smart Shuffle): старая обложка уезжает влево, новая заезжает справа
       panX.setValue(STEP);
       Animated.spring(panX, {
         toValue: 0,
@@ -106,7 +113,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
         mass: 0.85,
       }).start();
     }
-  }, [index, panX, STEP]);
+  }, [index, currentTrackId, panX, STEP]);
 
   // Обложка «дышит»: на паузе чуть меньше
   const playScale = useRef(new Animated.Value(isPlaying ? 1 : 0.9)).current;
@@ -276,7 +283,6 @@ export const ArtworkCarousel: React.FC<Props> = ({
 
   if (n === 0) return <View style={{ width: size, height: size }} />;
 
-  const currentTrack = queue[index >= 0 && index < n ? index : 0];
   const prevTrack = n > 1 ? queue[mod(index - 1, n)] : undefined;
   const nextTrack = n > 1 ? queue[mod(index + 1, n)] : undefined;
 

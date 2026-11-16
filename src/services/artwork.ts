@@ -15,7 +15,7 @@ const originalsDir = () => `${FileSystem.cacheDirectory ?? ''}artwork/`;
 export function isUserCover(uri?: string): boolean {
   if (!uri) return false;
   const name = uri.split('/').pop() ?? '';
-  return name.startsWith('online_') || !uri.startsWith(COVERS_DIR);
+  return name.startsWith('online_') || name.startsWith('user_') || !uri.startsWith(COVERS_DIR);
 }
 
 /** Нужно ли сформировать миниатюру (теги прочитаны, но миниатюры ещё нет, либо это старая полноразмерная копия) */
@@ -24,7 +24,15 @@ export function needsThumb(t: TrackFile): boolean {
 }
 
 const memo = new Map<string, string | null>();
-const MEMO_MAX = 8;
+const MEMO_MAX = 12;
+
+/** Мгновенное синхронное получение уже прочитанного оригинала обложки (без мигания при перелистывании) */
+export function peekFullArtwork(t?: TrackFile): string | undefined {
+  if (!t) return undefined;
+  if (isUserCover(t.artworkUri)) return t.artworkUri;
+  const hit = memo.get(t.id);
+  return hit ?? undefined;
+}
 
 /**
  * Оригинал обложки без сжатия: байты берутся прямо из тега аудиофайла (нативно, без base64 через JS).
@@ -60,9 +68,9 @@ export async function getFullArtwork(t: TrackFile): Promise<string | null> {
     }
   }
 
-  // 2. JS fallback: читаем оригинальные несжатые байты обложки из тегов
+  // 2. JS fallback: читаем оригинальные несжатые байты обложки из тегов во временный кэш originalsDir()
   try {
-    const meta = await parseAudioTags(t.uri, t.id, t.extension);
+    const meta = await parseAudioTags(t.uri, t.id, t.extension, originalsDir());
     if (meta.artworkUri) {
       memo.set(key, meta.artworkUri);
       if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value as string);

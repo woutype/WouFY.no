@@ -450,40 +450,43 @@ export const StatsView: React.FC<Props> = ({
                 )}
               </View>
             }
-            renderItem={({ item, index }) => (
-              <SwipeableStatsRow
-                onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  onPlayTopTracks(resolvedTopTracks, index);
-                }}
-                onReset={() => {
-                  statsService.resetTrackStats(item.trackId);
-                }}
-                onActiveChange={onRowActiveChange}
-              >
-                <Glass radius={16} style={styles.cardGlass}>
-                  <View style={styles.trackRow}>
-                    <RankBadge rank={index + 1} />
-                    <CoverArt uri={item.artworkUri} size={48} radius={11} style={styles.cover} />
-                    <View style={styles.trackInfo}>
-                      <Text style={styles.trackTitle} numberOfLines={1}>
-                        {item.title}
-                      </Text>
-                      <Text style={styles.trackArtist} numberOfLines={1}>
-                        {item.artist}
-                      </Text>
+            renderItem={({ item, index }) => {
+              const liveTrack = trackMap.get(item.trackId);
+              return (
+                <SwipeableStatsRow
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    onPlayTopTracks(resolvedTopTracks, index);
+                  }}
+                  onReset={() => {
+                    statsService.resetTrackStats(item.trackId);
+                  }}
+                  onActiveChange={onRowActiveChange}
+                >
+                  <Glass radius={16} style={styles.cardGlass}>
+                    <View style={styles.trackRow}>
+                      <RankBadge rank={index + 1} />
+                      <CoverArt uri={liveTrack?.artworkUri ?? item.artworkUri} size={48} radius={11} style={styles.cover} />
+                      <View style={styles.trackInfo}>
+                        <Text style={styles.trackTitle} numberOfLines={1}>
+                          {liveTrack?.title || item.title}
+                        </Text>
+                        <Text style={styles.trackArtist} numberOfLines={1}>
+                          {liveTrack?.artist || item.artist}
+                        </Text>
+                      </View>
+                      <View style={styles.statCol}>
+                        <Text style={styles.statPlays}>
+                          {item.playCount} {pluralPlays(item.playCount)}
+                        </Text>
+                        <Text style={styles.statTime}>{fmtTrackTime(item.totalDuration)}</Text>
+                      </View>
+                      <Ionicons name="play-circle" size={26} color={colors.accent} style={{ marginLeft: 8 }} />
                     </View>
-                    <View style={styles.statCol}>
-                      <Text style={styles.statPlays}>
-                        {item.playCount} {pluralPlays(item.playCount)}
-                      </Text>
-                      <Text style={styles.statTime}>{fmtTrackTime(item.totalDuration)}</Text>
-                    </View>
-                    <Ionicons name="play-circle" size={26} color={colors.accent} style={{ marginLeft: 8 }} />
-                  </View>
-                </Glass>
-              </SwipeableStatsRow>
-            )}
+                  </Glass>
+                </SwipeableStatsRow>
+              );
+            }}
           />
         </Animated.View>
 

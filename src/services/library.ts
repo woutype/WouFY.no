@@ -64,7 +64,7 @@ export function resolveTrackUri(idOrUri: string): string {
   return `${root}${relId}`;
 }
 
-function resolveDataDir(): string {
+export function resolveDataDir(): string {
   const doc = getDocRoot();
   if (/\/Documents\/$/.test(doc)) return doc.replace(/\/Documents\/$/, '/Library/Application Support/WouFY/');
   return `${doc}.woufy/`;
@@ -75,7 +75,7 @@ export const LEGACY_DIR = `${getDocRoot()}.woufy/`;
 const FILE = `${DATA_DIR}state.json`;
 const TRACKS_CACHE_FILE = `${DATA_DIR}library_cache.json`;
 /** версия формата кэша треков: при смене старый кэш перепроверяется и пересохраняется в новом формате */
-const TRACKS_CACHE_VERSION = 5;
+const TRACKS_CACHE_VERSION = 6;
 
 let cache: PersistedState = {};
 let loaded = false;
@@ -164,8 +164,8 @@ export async function loadCachedTracks(): Promise<TrackFile[]> {
         const id = normalizeTrackId(t.id || t.uri || t.filename);
         const uri = resolveTrackUri(id);
         const coverName = t.artworkUri ? t.artworkUri.split('/').pop() : undefined;
-        // Если версия кэша старая или у трека потеряна обложка, даём ему возможность переобогатиться в фоне
-        const needsReenrich = !isCurrentVersion || (!coverName && t.tagged);
+        // Если версия кэша старая или обложка ещё ни разу не проверялась (!thumbDone), переобогащаем в фоне
+        const needsReenrich = !isCurrentVersion || (!coverName && !t.thumbDone);
         return {
           ...t,
           id,
@@ -173,7 +173,7 @@ export async function loadCachedTracks(): Promise<TrackFile[]> {
           artworkUri: coverName ? `${dataDir}covers/${coverName}` : undefined,
           lrcUri: t.lrcUri ? uri.replace(/\.[^/.]+$/, '.lrc') : undefined,
           tagged: needsReenrich ? false : t.tagged,
-          thumbDone: coverName ? t.thumbDone : false,
+          thumbDone: needsReenrich ? false : Boolean(t.thumbDone || coverName),
         };
       });
     }

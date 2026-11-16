@@ -25,6 +25,10 @@ import { Glass, PressableScale } from './ui';
 
 const savedCache = new Map<string, LyricsData>();
 
+export function invalidateLyricsCache(trackId: string) {
+  savedCache.delete(trackId);
+}
+
 /** прозрачность неактивных строк по расстоянию до активной — плавное «угасание» вместо резкой границы */
 const DIST_OPACITY = [1, 0.62, 0.46, 0.34, 0.26, 0.2];
 
@@ -173,8 +177,8 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
   // Приблизительные тайминги считались, пока плеер ещё не знал длительность (или для другой версии файла) —
   // пересчитываем под настоящую, чтобы текст шёл от первого слова и ровно до конца трека
   useEffect(() => {
-    if (!data || data.source !== 'estimate' || !(duration > 0)) return;
-    if (data.forDuration !== undefined && Math.abs(duration - data.forDuration) <= 1) return;
+    if (!data || data.synced || data.plain.length === 0 || !(duration > 0)) return;
+    if (data.forDuration !== undefined && data.forDuration > 0 && Math.abs(duration - data.forDuration) <= 1) return;
     const fixed: LyricsData = { ...data, lines: buildEstimate(data.plain, duration), forDuration: duration };
     setData(fixed);
   }, [data, duration]);
@@ -222,8 +226,8 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
       }
       if (cancelled) return;
       if (local) setData(local);
-      // сохранённый/свой .lrc — окончательный; всё остальное (SYLT, текст из файла) сначала сверяем с онлайн-базой
-      if (local?.source === 'lrc-file') {
+      // сохранённый/свой синхронизированный .lrc — окончательный; всё остальное сначала сверяем с онлайн-базой
+      if (local?.source === 'lrc-file' && local.synced) {
         savedCache.set(track.id, local);
         setSearching(false);
         return;
@@ -231,19 +235,18 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
       // 2) сеть (LRCLIB): ждём, пока плеер узнает длительность — по ней выбирается нужная версия
       for (let i = 0; i < 12 && durationRef.current <= 0 && !cancelled; i++) await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
-      let result: LyricsData | null = local;
       try {
         const online = await loadLyrics(track, durationRef.current, true);
         if (cancelled) return;
-        if (online.source === 'lrclib' || online.source === 'lrc-file') {
+        if (online.source === 'lrclib' || (online.source === 'lrc-file' && online.synced)) {
           setData(online);
           ys.current = {};
           savedCache.set(track.id, online);
-          result = online;
         } else if (!local || local.source === 'none') {
           setData(online);
-          result = online;
-        } else if (local.synced) savedCache.set(track.id, local);
+        } else if (local.synced) {
+          savedCache.set(track.id, local);
+        }
       } catch (e) {
         console.warn('[lyrics] online load error:', e);
       } finally {
@@ -255,7 +258,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     return () => {
       cancelled = true;
     };
-  }, [track?.id, track?.lrcUri]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [track?.id, track?.lrcUri, track?.lyrics]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Тайминги в базе не нашлись — подгоняем текст из файла по голосу в самом треке. Только когда вкладка «Текст» открыта
@@ -294,12 +297,13 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     })();
   }, [visible, track?.id, data, searching, syncing]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Принудительный поиск в онлайн-каталоге (кнопки «обновить» / «искать») */
+  /** Принудительный поиск в онлайн-каталоге и тегах (кнопки «обновить» / «искать») */
   const fetchOnline = useCallback(async () => {
     if (!track) return;
     setSearching(true);
     try {
-      const raw = await fetchOnlineLrc(track, durationRef.current || engine.getDuration());
+      const dur = durationRef.current || engine.getDuration();
+      const raw = await fetchOnlineLrc(track, dur);
       const parsed = raw ? parseLrc(raw) : null;
       if (parsed) {
         const d: LyricsData = { lines: parsed, synced: true, source: 'lrclib', plain: parsed.map((l) => l.text) };
@@ -307,8 +311,15 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         setData(d);
         ys.current = {};
         saveLrc(track, parsed).catch(() => {});
-      } else if (!data || data.source === 'none') {
-        setData({ lines: [], synced: false, source: 'none', plain: [] });
+      } else {
+        const fallback = await loadLyrics(track, dur, true);
+        if (fallback.source !== 'none') {
+          setData(fallback);
+          ys.current = {};
+          if (fallback.synced) savedCache.set(track.id, fallback);
+        } else if (!data || data.source === 'none') {
+          setData({ lines: [], synced: false, source: 'none', plain: [] });
+        }
       }
     } catch (e) {
       console.warn('[lyrics] fetch error:', e);

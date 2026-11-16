@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { DATA_DIR, ensureDataDir } from './library';
+import { DATA_DIR, ensureDataDir, normalizeTrackId, resolveDataDir } from './library';
 import { splitArtists, UNKNOWN_ARTIST } from './queueOrder';
 import { TrackFile } from '../types';
 
@@ -80,7 +80,18 @@ class StatsService {
       const info = await FileSystem.getInfoAsync(STATS_FILE);
       if (info.exists) {
         const raw = await FileSystem.readAsStringAsync(STATS_FILE);
-        this.sessions = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const dataDir = resolveDataDir();
+          this.sessions = parsed.map((s: PlaySession) => {
+            const coverName = s.artworkUri ? s.artworkUri.split('/').pop() : undefined;
+            return {
+              ...s,
+              trackId: normalizeTrackId(s.trackId),
+              artworkUri: coverName ? `${dataDir}covers/${coverName}` : undefined,
+            };
+          });
+        }
       }
     } catch (e) {
       console.warn('[StatsService] load failed:', e);

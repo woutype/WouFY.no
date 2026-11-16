@@ -25,6 +25,9 @@ import { downloadCoverToCache, OnlineCoverResult, searchOnlineCovers } from '../
 import { splitArtists } from '../services/queueOrder';
 import { parseLrc, saveLrc } from '../services/lyrics';
 import { WoufyFX } from '../services/fxPlayer';
+import * as FileSystem from 'expo-file-system/legacy';
+import { DATA_DIR } from '../services/library';
+import { invalidateLyricsCache } from './LyricsView';
 
 interface Props {
   visible: boolean;
@@ -113,9 +116,16 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
     }
     try {
       Haptics.selectionAsync();
-      const localUri = await fx.pickImage();
-      if (localUri) {
-        setArtworkUri(localUri);
+      const pickedUri = await fx.pickImage();
+      if (pickedUri) {
+        const coversDir = `${DATA_DIR}covers/`;
+        const dirInfo = await FileSystem.getInfoAsync(coversDir);
+        if (!dirInfo.exists) {
+          await FileSystem.makeDirectoryAsync(coversDir, { intermediates: true });
+        }
+        const destUri = `${coversDir}user_${Date.now()}.jpg`;
+        await FileSystem.copyAsync({ from: pickedUri, to: destUri });
+        setArtworkUri(destUri);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       }
     } catch (e) {
@@ -203,6 +213,8 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
     const trimmedArtist = artist.trim() || 'Неизвестный исполнитель';
     const parsedYear = parseInt(year.trim(), 10);
     const parsedTrackNo = parseInt(trackNumber.trim(), 10);
+    const trimmedLyrics = lyrics.trim() || undefined;
+    const parsedLines = trimmedLyrics ? parseLrc(trimmedLyrics) : null;
 
     const updated: TrackFile = {
       ...track,
@@ -213,15 +225,17 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
       genre: genre.trim() || undefined,
       trackNumber: !isNaN(parsedTrackNo) && parsedTrackNo > 0 ? parsedTrackNo : undefined,
       artworkUri: artworkUri || track.artworkUri,
-      lyrics: lyrics.trim() || undefined,
+      thumbDone: true,
+      tagged: true,
+      lyrics: trimmedLyrics,
+      syncedLyrics: parsedLines ? parsedLines.map((l) => ({ time: l.time, text: l.text })) : undefined,
     };
 
-    // Если введен текст, также сохраняем в кэш текстов для синхронизации с LyricsView
-    if (updated.lyrics) {
-      const parsedLines = parseLrc(updated.lyrics);
-      if (parsedLines && parsedLines.length > 0) {
-        saveLrc(updated, parsedLines).catch(() => {});
-      }
+    invalidateLyricsCache(updated.id);
+
+    // Если введен текст с таймингами, также сохраняем в кэш текстов для синхронизации с LyricsView
+    if (parsedLines && parsedLines.length > 0) {
+      saveLrc(updated, parsedLines).catch(() => {});
     }
 
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);

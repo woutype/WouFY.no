@@ -540,13 +540,21 @@ async function loadCuratedLrc(track: TrackFile, duration = 0): Promise<LyricsDat
   };
   const safeId = (track.id || `${track.artist}_${track.title}`).replace(/[^a-zA-Z0-9_\u0400-\u04FF]/g, '_');
   const baseUri = track.uri.replace(/\.[^/.]+$/, '');
-  return (
+  const found =
     (await tryRead(cachePathFor(track))) ||
     (await tryRead(`${LEGACY_CACHE_DIR}${safeId}.lrc`)) ||
     (track.lrcUri ? await tryRead(track.lrcUri) : null) ||
     (await tryRead(`${baseUri}.lrc`)) ||
-    (await tryRead(`${baseUri}.txt`))
-  );
+    (await tryRead(`${baseUri}.txt`));
+  if (found) {
+    if (found.synced && !track.syncedLyrics) {
+      track.syncedLyrics = found.lines.map((l) => ({ time: l.time, text: l.text }));
+    }
+    if (!track.lyrics && found.plain.length) {
+      track.lyrics = found.plain.join('\n');
+    }
+  }
+  return found;
 }
 
 /**
@@ -571,6 +579,8 @@ export async function loadLyrics(track: TrackFile, duration: number, allowOnline
           lines = lines.map((l) => ({ ...l, time: l.time * k }));
         }
         if (lines) {
+          track.syncedLyrics = lines.map((l) => ({ time: l.time, text: l.text }));
+          if (!track.lyrics) track.lyrics = lines.map((l) => l.text).join('\n');
           saveLrc(track, lines).catch(() => {}); // кэш приложения (не папка Music)
           return { lines, synced: true, source: 'lrclib', plain: lines.map((l) => l.text) };
         }
@@ -615,7 +625,10 @@ export async function loadLyrics(track: TrackFile, duration: number, allowOnline
   // fallback: текст из онлайн-базы (без таймингов)
   if (onlinePlain) {
     const plain = plainLinesOf(onlinePlain);
-    if (plain.length) return { lines: buildEstimate(plain, duration), synced: false, source: 'estimate', plain, forDuration: duration };
+    if (plain.length) {
+      track.lyrics = plain.join('\n');
+      return { lines: buildEstimate(plain, duration), synced: false, source: 'estimate', plain, forDuration: duration };
+    }
   }
 
   return { lines: [], synced: false, source: 'none', plain: [] };

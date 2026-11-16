@@ -8,7 +8,7 @@ import { createFxPlayer, fxNativeAvailable, fxRemote, setRemoteHandler, WoufyFX 
 import { SortOption, applySort, matchesQuery, normQuery } from './queueOrder';
 import { statsService } from './statsService';
 import { resolveTrackUri } from './library';
-import { getFullArtwork } from './artwork';
+import { getFullArtwork, peekFullArtwork } from './artwork';
 
 /** пропуск раньше этого порога (сек) понижает приоритет трека в текущей очереди Smart Shuffle */
 const SKIP_DEMOTE_SEC = 10;
@@ -622,7 +622,7 @@ export class AudioEngine {
   private notifyTrackChange() {
     const cur = this.currentTrack;
     // смена очереди/rescan не должны обрывать идущую сессию прослушивания (иначе один трек считается дважды)
-    if (cur && !statsService.isTracking(cur.id)) {
+    if (this.playIntent && cur && !statsService.isTracking(cur.id)) {
       statsService.onTrackStart(cur, this.state.duration, this.getPosition());
     }
     this.onTrackChange(cur, this.upcoming());
@@ -815,6 +815,7 @@ export class AudioEngine {
     if (!isAutoSkip && this.state.queue[index]) index = this.demoteEarlySkip(this.state.queue[index].id, index);
     const t = this.state.queue[index];
     if (!t) return;
+    statsService.finalizeCurrent(false);
     // отложенный пропуск «битого» трека не должен сработать поверх нового выбора (иначе лишний +1)
     if (this.errorSkipTimer) {
       clearTimeout(this.errorSkipTimer);
@@ -1032,8 +1033,9 @@ export class AudioEngine {
       const fx = WoufyFX;
       if (fx && this.currentTrack) {
         const cur = this.currentTrack;
+        const art = peekFullArtwork(cur) ?? cur.artworkUri ?? null;
         safe(() => {
-          fx.setNowPlaying(cur.title, cur.artist, cur.album || 'WouFY.no', cur.artworkUri ?? null, s.duration);
+          fx.setNowPlaying(cur.title, cur.artist, cur.album || 'WouFY.no', art, s.duration);
           fx.updateNowPlaying(typeof pos === 'number' ? pos : 0, this.state.isPlaying ? 1.0 : 0.0);
         });
       }
@@ -1047,9 +1049,13 @@ export class AudioEngine {
       if (s.timeControlStatus === 'paused' && this.playIntent && s.isLoaded && !s.didJustFinish && !s.isBuffering) {
         this.playIntent = false;
         patch.isPlaying = false;
+        statsService.finalizeCurrent(true);
       } else if (s.timeControlStatus === 'playing' && !this.playIntent) {
         this.playIntent = true;
         patch.isPlaying = true;
+        if (this.currentTrack) {
+          statsService.onTrackStart(this.currentTrack, s.duration || this.state.duration, typeof pos === 'number' ? pos : 0);
+        }
       }
     }
 
@@ -1121,14 +1127,19 @@ export class AudioEngine {
     this.errorSkips = 0;
     const { repeat } = this.state;
     if (repeat === 'one') {
+      statsService.finalizeCurrent(false);
       safe(() => {
         this.A.seekTo(0);
         this.A.play();
       });
+      if (this.currentTrack) {
+        statsService.onTrackStart(this.currentTrack, this.state.duration, 0);
+      }
       return;
     }
     const n = this.nextIndexAuto();
     if (n === null) {
+      statsService.finalizeCurrent(false);
       this.playIntent = false;
       safe(() => {
         this.A.pause();

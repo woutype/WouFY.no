@@ -368,6 +368,7 @@ function Root() {
         >
           <QueueView
             tracks={state.queue}
+            allTracks={engine.libraryOrder()}
             currentIndex={state.index}
             currentTrackId={engine.currentTrack?.id}
             isPlaying={state.isPlaying}
@@ -397,7 +398,7 @@ function Root() {
             visible={!expanded && sheet === 'lyrics'}
           />
           <StatsView
-            tracks={state.queue}
+            tracks={engine.libraryOrder()}
             onPlayTopTracks={(topTracks, index) => engine.playTopTracks(topTracks, index)}
             onArtistPress={onArtistPress}
             bottomPad={bottomPad}
