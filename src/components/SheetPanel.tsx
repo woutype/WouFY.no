@@ -183,6 +183,7 @@ export const SheetPanel: React.FC<Props> = ({
         showsHorizontalScrollIndicator={false}
         bounces={false}
         directionalLockEnabled
+        scrollEnabled={mode !== 'stats'}
         scrollEventThrottle={16}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { x: scrollX } } }],

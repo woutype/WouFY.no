@@ -48,30 +48,9 @@ function pluralPlays(n: number): string {
 }
 
 function RankBadge({ rank }: { rank: number }) {
-  if (rank === 1) {
-    return (
-      <View style={[styles.rankBox, styles.rankGold]}>
-        <Text style={styles.rankMedal}>🥇</Text>
-      </View>
-    );
-  }
-  if (rank === 2) {
-    return (
-      <View style={[styles.rankBox, styles.rankSilver]}>
-        <Text style={styles.rankMedal}>🥈</Text>
-      </View>
-    );
-  }
-  if (rank === 3) {
-    return (
-      <View style={[styles.rankBox, styles.rankBronze]}>
-        <Text style={styles.rankMedal}>🥉</Text>
-      </View>
-    );
-  }
   return (
     <View style={styles.rankBox}>
-      <Text style={styles.rankNum}>{rank}</Text>
+      <Text style={[styles.rankNum, rank <= 3 && styles.rankTopNum]}>{rank}</Text>
     </View>
   );
 }
@@ -96,8 +75,17 @@ const SwipeableStatsRow: React.FC<{
 
   const responder = useRef(
     PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_, g) => {
+        if (isOpen.current) {
+          return Math.abs(g.dx) > 4;
+        }
+        return g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2;
+      },
       onMoveShouldSetPanResponder: (_, g) => {
-        return Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.4;
+        if (isOpen.current) {
+          return Math.abs(g.dx) > 4;
+        }
+        return g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2;
       },
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
@@ -105,17 +93,23 @@ const SwipeableStatsRow: React.FC<{
       },
       onPanResponderMove: (_, g) => {
         const base = isOpen.current ? -82 : 0;
-        const v = Math.min(0, Math.max(-110, base + g.dx));
+        const v = Math.min(0, Math.max(-100, base + g.dx));
         panX.setValue(v);
       },
       onPanResponderRelease: (_, g) => {
-        const base = isOpen.current ? -82 : 0;
-        const currentX = base + g.dx;
-        if (g.vx < -0.35 || currentX < -40) {
-          open();
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        if (isOpen.current) {
+          if (g.dx > 18 || g.vx > 0.25) {
+            close();
+          } else {
+            open();
+          }
         } else {
-          close();
+          if (g.dx < -32 || g.vx < -0.3) {
+            open();
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          } else {
+            close();
+          }
         }
       },
       onPanResponderTerminate: close,
@@ -137,14 +131,35 @@ const SwipeableStatsRow: React.FC<{
     onReset();
   };
 
+  // Кнопка удаления абсолютно невидима до начала свайпа (не просвечивает сквозь стекло)
+  const btnOpacity = panX.interpolate({
+    inputRange: [-82, -20, 0],
+    outputRange: [1, 0.4, 0],
+    extrapolate: 'clamp',
+  });
+
+  const btnScale = panX.interpolate({
+    inputRange: [-82, 0],
+    outputRange: [1, 0.75],
+    extrapolate: 'clamp',
+  });
+
   return (
     <View style={styles.swipeRowWrapper}>
-      <View style={styles.resetBackdrop}>
+      <Animated.View
+        style={[
+          styles.resetBackdrop,
+          {
+            opacity: btnOpacity,
+            transform: [{ scale: btnScale }],
+          },
+        ]}
+      >
         <Pressable onPress={handleResetPress} style={styles.resetBtnAction}>
           <Ionicons name="trash-outline" size={20} color="#FFFFFF" />
           <Text style={styles.resetBtnText}>Сброс</Text>
         </Pressable>
-      </View>
+      </Animated.View>
       <Animated.View style={{ transform: [{ translateX: panX }] }} {...responder.panHandlers}>
         <PressableScale onPress={handleRowPress} scaleTo={0.98} haptic="none">
           {children}
@@ -683,6 +698,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.text3,
     fontWeight: '700',
+  },
+  rankTopNum: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '800',
   },
   cover: {
     marginRight: 10,
