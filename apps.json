@@ -16,6 +16,13 @@
       "tintColor": "1ED760",
       "versions": [
         {
+          "version": "1.2.0",
+          "date": "2026-11-16",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.0/woufy.ipa",
+          "localizedDescription": "Очистка кэша и корзины (3 ГБ), сброс в Топ-10 свайпом влево, стабильная карусель обложек, точное центрирование очереди.",
+          "size": 12951346
+        },
+        {
           "version": "1.1.0",
           "date": "2025-01-01",
           "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.1.0/woufy.ipa",
