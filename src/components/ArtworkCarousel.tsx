@@ -53,11 +53,60 @@ export const ArtworkCarousel: React.FC<Props> = ({
   cbs.current = { onNext, onPrevious, onDragDownGrant, onDragDownMove, onDragDownRelease };
   const dragMode = useRef<'none' | 'horizontal' | 'vertical'>('none');
   const isAnimating = useRef(false);
+  const prevIndexRef = useRef(index);
 
   useEffect(() => {
-    panX.setValue(0);
-    isAnimating.current = false;
-  }, [index, panX]);
+    if (prevIndexRef.current === index) return;
+    const prev = prevIndexRef.current;
+    prevIndexRef.current = index;
+
+    if (isAnimating.current) {
+      // Переключение произошло от жеста пальцем (жест уже сам анимировал смещение)
+      return;
+    }
+
+    if (nRef.current <= 1) {
+      panX.setValue(0);
+      return;
+    }
+
+    const isNext = (index - prev + nRef.current) % nRef.current === 1;
+    const isPrev = (prev - index + nRef.current) % nRef.current === 1;
+
+    panX.stopAnimation();
+
+    if (isNext) {
+      // Кнопка «Следующий трек» (или автопереход): старая обложка уезжает влево, новая заезжает справа
+      panX.setValue(STEP);
+      Animated.spring(panX, {
+        toValue: 0,
+        useNativeDriver: true,
+        damping: 24,
+        stiffness: 280,
+        mass: 0.85,
+      }).start();
+    } else if (isPrev) {
+      // Кнопка «Предыдущий трек»: старая обложка уезжает вправо, новая заезжает слева
+      panX.setValue(-STEP);
+      Animated.spring(panX, {
+        toValue: 0,
+        useNativeDriver: true,
+        damping: 24,
+        stiffness: 280,
+        mass: 0.85,
+      }).start();
+    } else {
+      // Выбор трека в очереди: мягкий заезд справа
+      panX.setValue(STEP * 0.4);
+      Animated.spring(panX, {
+        toValue: 0,
+        useNativeDriver: true,
+        damping: 24,
+        stiffness: 280,
+        mass: 0.85,
+      }).start();
+    }
+  }, [index, panX, STEP]);
 
   // Обложка «дышит»: на паузе чуть меньше
   const playScale = useRef(new Animated.Value(isPlaying ? 1 : 0.9)).current;
@@ -70,7 +119,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
     () =>
       panX.interpolate({
         inputRange: [-STEP, -STEP * 0.55, 0, STEP * 0.55, STEP],
-        outputRange: [0, 0.5, 1, 0.5, 0],
+        outputRange: [0.2, 0.6, 1, 0.6, 0.2],
         extrapolate: 'clamp',
       }),
     [panX, STEP]
