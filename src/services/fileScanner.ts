@@ -1,6 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { parseAudioTags } from './id3Parser';
-import { loadCachedTracks, saveCachedTracks, DATA_DIR, LEGACY_DIR, ensureDataDir } from './library';
+import { loadCachedTracks, saveCachedTracks, DATA_DIR, LEGACY_DIR, ensureDataDir, normalizeTrackId, resolveTrackUri } from './library';
 import { AudioExtension, TrackFile } from '../types';
 import { WoufyFX } from '../../modules/woufy-fx';
 import { cleanupOrphanCovers, cleanupTrash, cleanupTempCache } from './storageService';
@@ -56,6 +56,7 @@ export async function ensureAppFolders(): Promise<void> {
 }
 
 interface RawFoundFile {
+  id?: string;
   uri: string;
   name: string;
   size?: number;
@@ -77,13 +78,16 @@ async function collectJS(dir: string, out: RawFoundFile[], lrc: Set<string>, roo
   const subdirs: string[] = [];
   for (const item of items) {
     if (item.startsWith('.')) continue; // скрытые папки и файлы (.woufy, .Trash, .DS_Store)
-    const uri = `${dir}${item}`;
+    const itemUri = `${dir}${item}`;
     if (AUDIO_RE.test(item)) {
-      out.push({ uri, name: item });
+      const id = normalizeTrackId(itemUri);
+      const uri = resolveTrackUri(id);
+      out.push({ id, uri, name: item });
     } else if (/\.lrc$/i.test(item)) {
-      lrc.add(uri);
+      const id = normalizeTrackId(itemUri);
+      lrc.add(resolveTrackUri(id));
     } else if (!NON_DIR_RE.test(item)) {
-      subdirs.push(uri);
+      subdirs.push(itemUri);
     }
   }
 
@@ -137,14 +141,16 @@ export function scanLibrary(): Promise<ScanResult> {
 }
 
 function quickTrack(f: RawFoundFile, id: string, ext: AudioExtension, lrcUri?: string): TrackFile {
+  const normId = normalizeTrackId(id || f.id || f.uri || f.name);
+  const uri = resolveTrackUri(normId);
   const baseName = f.name.replace(/\.[^/.]+$/, '');
   const fb = parseName(baseName);
   let trackNumber: number | undefined;
   const m = baseName.match(/^(\d{1,3})[\s.\-_)]+\D/);
   if (m) trackNumber = parseInt(m[1], 10);
   return {
-    id,
-    uri: f.uri,
+    id: normId,
+    uri,
     filename: f.name,
     title: fb.title,
     artist: fb.artist,
@@ -175,13 +181,16 @@ async function doScan(): Promise<ScanResult> {
       const nativeItems = await WoufyFX.nativeScanDirectory(root);
       if (Array.isArray(nativeItems)) {
         for (const item of nativeItems) {
+          const id = normalizeTrackId(item.id || item.uri || item.filename);
+          const uri = resolveTrackUri(id);
           found.push({
-            uri: item.uri,
+            id,
+            uri,
             name: item.filename,
             size: item.size,
             mtime: item.mtime,
           });
-          if (item.lrcUri) lrcSet.add(item.lrcUri);
+          if (item.lrcUri) lrcSet.add(uri.replace(/\.[^/.]+$/, '.lrc'));
         }
         nativeSuccess = true;
       }
@@ -201,11 +210,12 @@ async function doScan(): Promise<ScanResult> {
   const seen = new Set<string>();
 
   for (const f of found) {
-    const id = f.uri.startsWith(root) ? f.uri.slice(root.length) : f.uri;
+    const id = normalizeTrackId(f.id || f.uri || f.name);
+    const uri = resolveTrackUri(id);
     if (seen.has(id)) continue;
     seen.add(id);
 
-    const lrcUri = f.uri.replace(/\.[^/.]+$/, '.lrc');
+    const lrcUri = uri.replace(/\.[^/.]+$/, '.lrc');
     const hasLrc = lrcSet.has(lrcUri);
 
     const cached = cacheMap.get(id);
@@ -218,7 +228,8 @@ async function doScan(): Promise<ScanResult> {
       if (!changed && cached.tagged) {
         tracks.push({
           ...cached,
-          uri: f.uri,
+          id,
+          uri,
           lrcUri: hasLrc ? lrcUri : undefined,
           size: f.size ?? cached.size,
           mtime: f.mtime ?? cached.mtime,
@@ -228,7 +239,8 @@ async function doScan(): Promise<ScanResult> {
       if (!changed && cached.tagged === false) {
         tracks.push({
           ...cached,
-          uri: f.uri,
+          id,
+          uri,
           lrcUri: hasLrc ? lrcUri : undefined,
           size: f.size ?? cached.size,
           mtime: f.mtime ?? cached.mtime,

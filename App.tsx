@@ -58,7 +58,10 @@ function Root() {
       return known && known.tagged && t.tagged === false ? { ...known, uri: t.uri, lrcUri: t.lrcUri } : t;
     });
     const prev = libRef.current;
-    const same = prev.size === merged.length && merged.every((t) => prev.has(t.id));
+    const same = prev.size === merged.length && merged.every((t) => {
+      const cur = prev.get(t.id);
+      return cur && cur.uri === t.uri;
+    });
     const lrcChanged = same ? merged.filter((t) => prev.get(t.id)?.lrcUri !== t.lrcUri) : [];
     libRef.current = new Map(merged.map((t) => [t.id, t]));
     bpmService.registerTags(merged);
@@ -143,7 +146,7 @@ function Root() {
         // Фоновая проверка библиотеки без задержки первого кадра
         setTimeout(() => {
           rescan().catch(() => {});
-        }, 1200);
+        }, 250);
       }
     })();
 

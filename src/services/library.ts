@@ -38,19 +38,44 @@ export interface PersistedState {
   lyricsOffset?: Record<string, number>;
 }
 
-const docRoot = FileSystem.documentDirectory ?? '';
+export function getDocRoot(): string {
+  const dir = FileSystem.documentDirectory ?? '';
+  if (!dir) return '';
+  return dir.endsWith('/') ? dir : `${dir}/`;
+}
+
+/** Нормализует id трека к относительному пути внутри Documents (например, 'Music/Track.mp3') */
+export function normalizeTrackId(idOrUri: string): string {
+  if (!idOrUri) return '';
+  let clean = idOrUri;
+  if (clean.includes('/Documents/')) {
+    clean = clean.split('/Documents/')[1];
+  } else if (clean.startsWith('file://')) {
+    clean = clean.replace(/^file:\/\//, '');
+  }
+  return clean.replace(/^\.?\/+/, '');
+}
+
+/** Строит абсолютный file:// URI для трека от ТЕКУЩЕГО контейнера приложения */
+export function resolveTrackUri(idOrUri: string): string {
+  const root = getDocRoot();
+  if (!idOrUri) return root;
+  const relId = normalizeTrackId(idOrUri);
+  return `${root}${relId}`;
+}
 
 function resolveDataDir(): string {
-  if (/\/Documents\/$/.test(docRoot)) return docRoot.replace(/\/Documents\/$/, '/Library/Application Support/WouFY/');
-  return `${docRoot}.woufy/`;
+  const doc = getDocRoot();
+  if (/\/Documents\/$/.test(doc)) return doc.replace(/\/Documents\/$/, '/Library/Application Support/WouFY/');
+  return `${doc}.woufy/`;
 }
 
 export const DATA_DIR = resolveDataDir();
-export const LEGACY_DIR = `${docRoot}.woufy/`;
+export const LEGACY_DIR = `${getDocRoot()}.woufy/`;
 const FILE = `${DATA_DIR}state.json`;
 const TRACKS_CACHE_FILE = `${DATA_DIR}library_cache.json`;
-/** версия формата кэша треков: при смене старый кэш игнорируется и библиотека перечитывается */
-const TRACKS_CACHE_VERSION = 3;
+/** версия формата кэша треков: при смене старый кэш перепроверяется и пересохраняется в новом формате */
+const TRACKS_CACHE_VERSION = 4;
 
 let cache: PersistedState = {};
 let loaded = false;
@@ -125,15 +150,24 @@ export async function flushState() {
 /** Загрузка закэшированного списка треков с метаданными (мгновенно при старте) */
 export async function loadCachedTracks(): Promise<TrackFile[]> {
   try {
-    const parsed = (await readJson<{ v: number; tracks: TrackFile[] }>(TRACKS_CACHE_FILE)) ?? undefined;
-    if (parsed && parsed.v === TRACKS_CACHE_VERSION && Array.isArray(parsed.tracks)) {
-      // абсолютные пути (контейнер приложения может смениться при обновлении) пересобираем от текущих корней
-      return parsed.tracks.map((t) => {
-        const uri = `${docRoot}${t.id}`;
+    const raw = await readJson<{ v?: number; tracks?: TrackFile[] } | TrackFile[]>(TRACKS_CACHE_FILE);
+    let tracks: TrackFile[] = [];
+    if (raw && !Array.isArray(raw) && Array.isArray(raw.tracks)) {
+      tracks = raw.tracks;
+    } else if (Array.isArray(raw)) {
+      tracks = raw;
+    }
+    if (tracks.length > 0) {
+      const dataDir = resolveDataDir();
+      return tracks.map((t) => {
+        const id = normalizeTrackId(t.id || t.uri || t.filename);
+        const uri = resolveTrackUri(id);
+        const coverName = t.artworkUri ? t.artworkUri.split('/').pop() : undefined;
         return {
           ...t,
+          id,
           uri,
-          artworkUri: t.artworkUri ? `${DATA_DIR}covers/${t.artworkUri.split('/').pop()}` : undefined,
+          artworkUri: coverName ? `${dataDir}covers/${coverName}` : undefined,
           lrcUri: t.lrcUri ? uri.replace(/\.[^/.]+$/, '.lrc') : undefined,
         };
       });
@@ -148,8 +182,18 @@ export async function loadCachedTracks(): Promise<TrackFile[]> {
 export async function saveCachedTracks(tracks: TrackFile[]): Promise<void> {
   try {
     await ensureDataDir();
-    await FileSystem.writeAsStringAsync(TRACKS_CACHE_FILE, JSON.stringify({ v: TRACKS_CACHE_VERSION, tracks }));
+    const cleanTracks = tracks.map((t) => {
+      const id = normalizeTrackId(t.id || t.uri || t.filename);
+      const uri = resolveTrackUri(id);
+      return {
+        ...t,
+        id,
+        uri,
+      };
+    });
+    await FileSystem.writeAsStringAsync(TRACKS_CACHE_FILE, JSON.stringify({ v: TRACKS_CACHE_VERSION, tracks: cleanTracks }));
   } catch (e) {
     console.warn('[library] failed to save cached tracks:', e);
   }
 }
+

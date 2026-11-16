@@ -16,6 +16,13 @@
       "tintColor": "1ED760",
       "versions": [
         {
+          "version": "1.2.4",
+          "date": "2026-11-16",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.4/woufy.ipa",
+          "localizedDescription": "Исправлен баг воспроизведения треков и слёта очереди: динамическое построение путей файлов от текущего контейнера, защита от пролистывания очереди при ошибках чтения, автоматическая перезагрузка по кнопке Play.",
+          "size": 12940689
+        },
+        {
           "version": "1.2.3",
           "date": "2026-11-16",
           "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.3/woufy.ipa",

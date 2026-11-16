@@ -7,6 +7,7 @@ import type { PlayerLike, PlayerStatus } from './playerLike';
 import { createFxPlayer, fxNativeAvailable, fxRemote, setRemoteHandler, WoufyFX } from './fxPlayer';
 import { SortOption, applySort, matchesQuery, normQuery } from './queueOrder';
 import { statsService } from './statsService';
+import { resolveTrackUri } from './library';
 
 type AudioPlayer = PlayerLike;
 type AudioStatus = PlayerStatus;
@@ -190,6 +191,7 @@ export class AudioEngine {
   private audioSessionConfigured = false;
   private lastSeekTarget: { time: number; requestedAt: number } | null = null;
   private lastPrevTapTime = 0;
+  private trackStartedAt = 0;
 
   constructor() {
     configureAudioSession(true).then(() => {
@@ -385,8 +387,9 @@ export class AudioEngine {
     if (cur) {
       const a = this.A;
       const token = ++this.playToken;
+      const uri = resolveTrackUri(cur.uri || cur.id);
       safe(() => {
-        this.load(a, cur.uri);
+        this.load(a, uri);
         a.volume = this.master();
         a.muted = false;
       });
@@ -593,8 +596,9 @@ export class AudioEngine {
   private prepare(index: number) {
     const t = this.state.queue[index];
     if (!t) return;
+    const uri = resolveTrackUri(t.uri || t.id);
     safe(() => {
-      this.load(this.A, t.uri);
+      this.load(this.A, uri);
       this.A.volume = 1;
     });
     this.applyFx(this.A);
@@ -814,11 +818,13 @@ export class AudioEngine {
 
   private performLoadAndPlay(t: TrackFile, seekTo: number | undefined, token: number) {
     if (token !== this.playToken || !this.playIntent) return;
+    this.trackStartedAt = Date.now();
     this.applyPendingMode(false);
     const a = this.A;
+    const uri = resolveTrackUri(t.uri || t.id);
     safe(() => {
       this.B.pause();
-      this.load(a, t.uri);
+      this.load(a, uri);
       if (typeof seekTo === 'number' && seekTo > 0) {
         a.seekTo(seekTo);
       }
@@ -876,6 +882,14 @@ export class AudioEngine {
       const token = ++this.playToken;
       const a = this.A;
       const to = this.trans?.to;
+      const cur = this.currentTrack;
+
+      // Если плеер пуст или еще не был готов: загружаем текущий трек с гарантированным URI
+      if (cur && !(safe(() => a.isLoaded) ?? false)) {
+        this.performLoadAndPlay(cur, this.getPosition(), token);
+        return;
+      }
+
       const doPlay = () => {
         if (token !== this.playToken || !this.playIntent) return;
         safe(() => {
@@ -997,27 +1011,48 @@ export class AudioEngine {
     if (Object.keys(patch).length) this.set(patch);
 
     if (s.error && this.playIntent) {
-      if (this.errorSkips < 3 && this.state.queue.length > 1) {
-        this.errorSkips++;
-        const nextIdx = (this.state.index + 1) % this.state.queue.length;
-        setTimeout(() => {
-          if (this.playIntent) {
-            this.playIndex(nextIdx, undefined, true);
-          }
-        }, 150);
-      } else {
-        this.errorSkips = 0;
-        this.playIntent = false;
-        safe(() => {
-          this.A.pause();
-          this.B.pause();
-        });
-        this.set({ isPlaying: false });
-      }
+      this.handleTrackError();
       return;
     }
 
-    if (s.didJustFinish && !this.trans) this.onEnded();
+    if (s.didJustFinish && !this.trans) {
+      if (!this.playIntent) return;
+
+      // Защита от бесконечного пролистывания треков:
+      // если трек только что запустился (< 1.2 с) и позиция у нуля (< 1 с),
+      // а плеер уже рапортует didJustFinish — файл пустой/не читается, это ошибка,
+      // а не естественное окончание воспроизведения.
+      const curPos = typeof pos === 'number' ? pos : 0;
+      const justStarted = Date.now() - this.trackStartedAt < 1200;
+      if (justStarted && curPos < 1.0) {
+        console.warn('[engine] abrupt finish on track:', this.currentTrack?.id);
+        this.handleTrackError();
+        return;
+      }
+
+      this.onEnded();
+    }
+  }
+
+  private handleTrackError() {
+    if (!this.playIntent) return;
+    if (this.errorSkips < 3 && this.state.queue.length > 1) {
+      this.errorSkips++;
+      const nextIdx = (this.state.index + 1) % this.state.queue.length;
+      setTimeout(() => {
+        if (this.playIntent) {
+          this.playIndex(nextIdx, undefined, true);
+        }
+      }, 180);
+    } else {
+      this.errorSkips = 0;
+      this.playIntent = false;
+      safe(() => {
+        this.A.pause();
+        this.B.pause();
+      });
+      this.set({ isPlaying: false });
+    }
   }
 
   private nextIndexAuto(): number | null {
@@ -1029,6 +1064,7 @@ export class AudioEngine {
   }
 
   private onEnded() {
+    if (!this.playIntent) return;
     this.errorSkips = 0;
     const { repeat } = this.state;
     if (repeat === 'one') {
@@ -1087,9 +1123,10 @@ export class AudioEngine {
     const idle = this.B;
     const startPos = plan.beatSync ? plan.bStartPos : 0;
     if (!this.prep || this.prep.id !== nxt.id) {
+      const uri = resolveTrackUri(nxt.uri || nxt.id);
       safe(() => {
         idle.pause();
-        this.load(idle, nxt.uri);
+        this.load(idle, uri);
         idle.volume = 0;
       });
       this.applyFx(idle);
