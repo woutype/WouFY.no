@@ -6,6 +6,7 @@ import {
   LayoutAnimation,
   Modal,
   PanResponder,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -23,6 +24,7 @@ import { Glass, PressableScale } from './ui';
 import { fxDiagnostics } from '../services/fxPlayer';
 import { getStorageStats, purgeStorage, formatBytes, StorageInfo } from '../services/storageService';
 import { loadCachedTracks } from '../services/library';
+import { CURRENT_VERSION, installUpdate, UpdateInfo } from '../services/updateService';
 
 interface Props {
   visible: boolean;
@@ -38,6 +40,8 @@ interface Props {
   trackCount: number;
   /** возвращает короткий итог («Найдено 1300 треков · новых: 12») */
   onRescan: () => Promise<string>;
+  updateInfo?: UpdateInfo | null;
+  onCheckUpdate?: () => Promise<UpdateInfo>;
 }
 
 const SHEET_H = 760;
@@ -121,6 +125,8 @@ export const SettingsModal: React.FC<Props> = ({
   onClose,
   trackCount,
   onRescan,
+  updateInfo,
+  onCheckUpdate,
 }) => {
   const [render, setRender] = useState(visible);
   const y = useRef(new Animated.Value(SHEET_H + 100)).current;
@@ -130,6 +136,10 @@ export const SettingsModal: React.FC<Props> = ({
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [cleaningStorage, setCleaningStorage] = useState(false);
   const [storageCleanNote, setStorageCleanNote] = useState('');
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updatingApp, setUpdatingApp] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [updateNote, setUpdateNote] = useState('');
 
   useEffect(() => {
     if (visible) {
@@ -231,6 +241,46 @@ export const SettingsModal: React.FC<Props> = ({
     }
   };
 
+  const handleCheckUpdate = async () => {
+    if (checkingUpdate || !onCheckUpdate) return;
+    setCheckingUpdate(true);
+    setUpdateNote('');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      const info = await onCheckUpdate();
+      if (info.hasUpdate) {
+        setUpdateNote(`Доступна новая версия v${info.latestVersion}`);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else {
+        setUpdateNote(`Установлена последняя версия (v${CURRENT_VERSION})`);
+        Haptics.selectionAsync();
+      }
+    } catch {
+      setUpdateNote('Не удалось проверить обновления');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    if (!updateInfo || updatingApp) return;
+    setUpdatingApp(true);
+    setUpdateProgress(Platform.OS === 'android' ? 0.01 : null);
+    setUpdateNote('');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    try {
+      await installUpdate(updateInfo, (p) => setUpdateProgress(p));
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch {
+      setUpdateNote('Ошибка при загрузке обновления');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setUpdatingApp(false);
+      setUpdateProgress(null);
+    }
+  };
+
   if (!render) return null;
 
   return (
@@ -257,6 +307,40 @@ export const SettingsModal: React.FC<Props> = ({
           </View>
 
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
+            {updateInfo?.hasUpdate && (
+              <Glass radius={20} style={{ marginTop: 8, marginBottom: 16 }}>
+                <View style={{ padding: 16 }}>
+                  <View style={[styles.row, { paddingVertical: 0 }]}>
+                    <View style={styles.info}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <View style={styles.updateDotInline} />
+                        <Text style={styles.rowTitle}>Доступно обновление v{updateInfo.latestVersion}</Text>
+                      </View>
+                      <Text style={styles.rowDesc}>
+                        {updatingApp && updateProgress !== null
+                          ? `Скачивание APK: ${Math.round(updateProgress * 100)}%`
+                          : updateInfo.notes || `Текущая версия: v${CURRENT_VERSION}`}
+                      </Text>
+                    </View>
+                    <PressableScale onPress={handleInstallUpdate} disabled={updatingApp} haptic="medium">
+                      <View style={styles.updateBtn}>
+                        {updatingApp ? (
+                          <ActivityIndicator size="small" color={colors.onAccent} />
+                        ) : (
+                          <Text style={styles.updateBtnText}>Обновить</Text>
+                        )}
+                      </View>
+                    </PressableScale>
+                  </View>
+                  {updatingApp && updateProgress !== null && (
+                    <View style={styles.progressTrack}>
+                      <View style={[styles.progressFill, { width: `${Math.round(updateProgress * 100)}%` }]} />
+                    </View>
+                  )}
+                </View>
+              </Glass>
+            )}
+
             {/* ───── DJ-склейка ───── */}
             <Text style={styles.section}>DJ-склейка</Text>
             <ToggleRow
@@ -423,7 +507,12 @@ export const SettingsModal: React.FC<Props> = ({
                   <Text style={styles.rowTitle}>
                     {trackCount} {trackCount % 10 === 1 && trackCount % 100 !== 11 ? 'трек' : trackCount % 10 >= 2 && trackCount % 10 <= 4 && (trackCount % 100 < 12 || trackCount % 100 > 14) ? 'трека' : 'треков'}
                   </Text>
-                  <Text style={styles.rowDesc}>{scanNote || 'Файлы → На iPhone → WouFY.no → Music'}</Text>
+                  <Text style={styles.rowDesc}>
+                    {scanNote ||
+                      (Platform.OS === 'android'
+                        ? 'Папки Music / Music/WouFY / Download'
+                        : 'Файлы → На iPhone → WouFY.no → Music')}
+                  </Text>
                 </View>
                 <PressableScale onPress={rescan} disabled={scanning} haptic="none">
                   {scanning ? <ActivityIndicator color={colors.text} /> : <Text style={styles.link}>Обновить</Text>}
@@ -433,7 +522,7 @@ export const SettingsModal: React.FC<Props> = ({
 
             {/* ───── Память и кэш ───── */}
             <Text style={[styles.section, { marginTop: 14, marginBottom: 10 }]}>Память и кэш</Text>
-            <Glass radius={20} style={{ marginBottom: 30 }}>
+            <Glass radius={20} style={{ marginBottom: 16 }}>
               <View style={[styles.row, { padding: 16 }]}>
                 <View style={styles.info}>
                   <Text style={styles.rowTitle}>
@@ -449,6 +538,48 @@ export const SettingsModal: React.FC<Props> = ({
                 <PressableScale onPress={cleanStorage} disabled={cleaningStorage} haptic="none">
                   {cleaningStorage ? <ActivityIndicator color={colors.text} /> : <Text style={styles.link}>Очистить</Text>}
                 </PressableScale>
+              </View>
+            </Glass>
+
+            {/* ───── Обновление приложения ───── */}
+            <Text style={[styles.section, { marginTop: 14, marginBottom: 10 }]}>Обновление приложения</Text>
+            <Glass radius={20} style={{ marginBottom: 30 }}>
+              <View style={{ padding: 16 }}>
+                <View style={[styles.row, { paddingVertical: 0 }]}>
+                  <View style={styles.info}>
+                    <Text style={styles.rowTitle}>
+                      WouFY.no v{CURRENT_VERSION}
+                    </Text>
+                    <Text style={styles.rowDesc}>
+                      {updatingApp && updateProgress !== null
+                        ? `Загрузка обновления: ${Math.round(updateProgress * 100)}%`
+                        : updateNote ||
+                          (updateInfo?.hasUpdate
+                            ? `Доступна новая версия v${updateInfo.latestVersion}`
+                            : 'Автопроверка обновлений при входе')}
+                    </Text>
+                  </View>
+                  {updateInfo?.hasUpdate ? (
+                    <PressableScale onPress={handleInstallUpdate} disabled={updatingApp} haptic="medium">
+                      <View style={styles.updateBtn}>
+                        {updatingApp ? (
+                          <ActivityIndicator size="small" color={colors.onAccent} />
+                        ) : (
+                          <Text style={styles.updateBtnText}>Обновить</Text>
+                        )}
+                      </View>
+                    </PressableScale>
+                  ) : (
+                    <PressableScale onPress={handleCheckUpdate} disabled={checkingUpdate} haptic="none">
+                      {checkingUpdate ? <ActivityIndicator color={colors.text} /> : <Text style={styles.link}>Проверить</Text>}
+                    </PressableScale>
+                  )}
+                </View>
+                {updatingApp && updateProgress !== null && (
+                  <View style={styles.progressTrack}>
+                    <View style={[styles.progressFill, { width: `${Math.round(updateProgress * 100)}%` }]} />
+                  </View>
+                )}
               </View>
             </Glass>
           </ScrollView>
@@ -483,4 +614,26 @@ const styles = StyleSheet.create({
   pillText: { ...type.body, fontWeight: '600', color: colors.text },
   link: { ...type.body, fontWeight: '700', color: colors.text },
   note: { ...type.caption, fontSize: 12, color: colors.text3, marginTop: 8, lineHeight: 17 },
+  updateDotInline: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#34C759' },
+  updateBtn: {
+    paddingHorizontal: 16,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  updateBtnText: { ...type.body, fontSize: 14, fontWeight: '700', color: colors.onAccent },
+  progressTrack: {
+    marginTop: 12,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.accent,
+  },
 });

@@ -28,6 +28,7 @@ interface Props {
   onShareTrack?: () => void;
   bpm?: number;
   bpmSource?: 'manual' | 'tag' | 'auto';
+  hasUpdate?: boolean;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -89,6 +90,7 @@ export const NowPlayingCard: React.FC<Props> = ({
   onShareTrack,
   bpm,
   bpmSource,
+  hasUpdate,
 }) => {
   const track = state.queue[state.index];
   const [showWave, setShowWave] = useState(false);
@@ -379,7 +381,10 @@ export const NowPlayingCard: React.FC<Props> = ({
             onPress={() => setShowWave((v) => !v)}
           />
           <View style={styles.grabber} />
-          <IconButton name="options" size={18} glass box={36} onPress={onOpenSettings} />
+          <View style={{ position: 'relative' }}>
+            <IconButton name="options" size={18} glass box={36} onPress={onOpenSettings} />
+            {hasUpdate && <View pointerEvents="none" style={styles.updateDot} />}
+          </View>
         </View>
         {/* Отступ под обложкой */}
         <View style={{ height: m.cover + 8 }} pointerEvents="none" />
@@ -575,6 +580,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   miniBtn: { width: 34, height: 38, alignItems: 'center', justifyContent: 'center' },
+  updateDot: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#34C759',
+    borderWidth: 1.5,
+    borderColor: '#0A0A0B',
+  },
 });
 
 void radius;

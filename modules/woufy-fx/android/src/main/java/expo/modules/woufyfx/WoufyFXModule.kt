@@ -34,8 +34,10 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.MediaStore
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -637,6 +639,39 @@ class WoufyFXModule : Module() {
         } catch (_: Throwable) {
           promise.resolve(null)
         }
+      }
+    }
+
+    // ── Автообновление APK внутри приложения (Android) ──
+
+    AsyncFunction("installApk") { fileUri: String ->
+      val ctx = appContext.reactContext ?: return@AsyncFunction false
+      val apkFile = parseLocalFile(fileUri)
+      if (!apkFile.exists()) return@AsyncFunction false
+      return@AsyncFunction try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !ctx.packageManager.canRequestPackageInstalls()) {
+          val permIntent = Intent(
+            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+            Uri.parse("package:${ctx.packageName}")
+          ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          }
+          ctx.startActivity(permIntent)
+        }
+        val contentUri = FileProvider.getUriForFile(
+          ctx,
+          "${ctx.packageName}.woufyfx.provider",
+          apkFile
+        )
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+          setDataAndType(contentUri, "application/vnd.android.package-archive")
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        ctx.startActivity(installIntent)
+        true
+      } catch (_: Throwable) {
+        false
       }
     }
 

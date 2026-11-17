@@ -72,6 +72,7 @@ export interface WoufyFXNative {
   nativeExtractArtwork?(uri: string, cacheDirUri: string): Promise<string | null>;
   startDirectoryWatcher(directoryUri: string): void;
   stopDirectoryWatcher(): void;
+  installApk?(fileUri: string): Promise<boolean>;
   addListener(event: 'onEnded', cb: (e: { id: string }) => void): { remove: () => void };
   addListener(event: 'onSamples', cb: (e: { id: string; frames: number[] }) => void): { remove: () => void };
   addListener(event: 'onRemote', cb: (e: { command: string; position?: number }) => void): { remove: () => void };

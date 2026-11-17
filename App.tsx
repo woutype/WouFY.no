@@ -26,6 +26,7 @@ import { TagEditorModal } from './src/components/TagEditorModal';
 import { SettingsModal } from './src/components/SettingsModal';
 import { statsService } from './src/services/statsService';
 import { splitArtists } from './src/services/queueOrder';
+import { checkForUpdate, UpdateInfo } from './src/services/updateService';
 
 function Root() {
   const m = useMetrics();
@@ -45,6 +46,8 @@ function Root() {
   const [fx, setFxState] = useState<FxSettings>(DEFAULT_FX);
   const [hapticsOn, setHapticsOn] = useState(false);
   const [sheetScrollEnabled, setSheetScrollEnabled] = useState(true);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const updatePromptShown = useRef(false);
   const libRef = useRef<Map<string, TrackFile>>(new Map());
   const lastScanAt = useRef(0);
   const progress = useRef(new Animated.Value(1)).current;
@@ -222,6 +225,34 @@ function Root() {
     setHapticsOn(on);
     patchState({ musicHaptics: on });
   };
+
+  const handleCheckUpdate = useCallback(async () => {
+    const info = await checkForUpdate(true);
+    setUpdateInfo(info);
+    return info;
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    const timer = setTimeout(() => {
+      checkForUpdate(true)
+        .then((info) => {
+          setUpdateInfo(info);
+          if (info.hasUpdate && !updatePromptShown.current) {
+            updatePromptShown.current = true;
+            const desc = info.notes
+              ? `Вышла новая версия WouFY.no v${info.latestVersion} (у вас v${info.currentVersion}).\n\n${info.notes}`
+              : `Вышла новая версия WouFY.no v${info.latestVersion} (у вас v${info.currentVersion}). Откройте настройки, чтобы обновить приложение без потери треков и настроек.`;
+            Alert.alert('Доступно обновление', desc, [
+              { text: 'Позже', style: 'cancel' },
+              { text: 'Перейти в настройки', onPress: () => setShowSettings(true) },
+            ]);
+          }
+        })
+        .catch(() => {});
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [ready]);
 
   /* ───────── карточка плеера ↔ вторичный экран ───────── */
   const settle = useCallback(
@@ -449,6 +480,7 @@ function Root() {
         onShareTrack={handleShareTrack}
         bpm={bpm}
         bpmSource={bpmSource}
+        hasUpdate={Boolean(updateInfo?.hasUpdate)}
       />
 
       <TagEditorModal
@@ -471,6 +503,8 @@ function Root() {
         onClose={() => setShowSettings(false)}
         trackCount={libCount}
         onRescan={rescan}
+        updateInfo={updateInfo}
+        onCheckUpdate={handleCheckUpdate}
       />
     </View>
   );
