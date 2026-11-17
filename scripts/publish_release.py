@@ -119,7 +119,7 @@ def update_apps_json(version, notes, ipa_size):
     data = json.loads(base64.b64decode(cur['content']))
     entry = {
         'version': version,
-        'date': datetime.date.today().isoformat(),
+        'date': datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
         'downloadURL': f'https://github.com/{PUBLIC_REPO}/releases/download/v{version}/woufy.ipa',
         'apkDownloadURL': f'https://github.com/{PUBLIC_REPO}/releases/download/v{version}/woufy.apk',
         'localizedDescription': notes,

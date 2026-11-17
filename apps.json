@@ -20,8 +20,8 @@
           "date": "2026-11-17",
           "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.0/woufy.ipa",
           "apkDownloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.0/woufy.apk",
-          "localizedDescription": "Новый WouFY Clip / генератор карточек трека и сторис, относительное скраблирование громкости с индикацией, эффект концертного реверба, тактильный отклик под ритм (Beat Haptics), комбинация фильтров библиотеки (только с текстом / обложкой), круглая стилистика обложек, плавные анимации очереди и обновленный выбор строк.",
-          "size": 12083453
+          "localizedDescription": "Исправления багов, гонок потоков и оптимизаций",
+          "size": 12080998
         },
         {
           "version": "1.2.7",
