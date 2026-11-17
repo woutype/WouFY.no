@@ -15,9 +15,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Select Xcode 26 (Swift 6.2+)
+      - name: Select Xcode 26 (Swift 6.2, prefer <= 26.2 for Expo SDK 58)
         run: |
-          XCODE_APP=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)
+          XCODE_APP=$(ls -d /Applications/Xcode_26.2*.app /Applications/Xcode_26.1*.app /Applications/Xcode_26.0*.app /Applications/Xcode_26*.app 2>/dev/null | head -n 1)
           if [ -z "$XCODE_APP" ]; then
             echo "Xcode 26 not found in /Applications:"
             ls -d /Applications/Xcode*.app
