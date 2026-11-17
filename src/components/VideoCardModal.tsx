@@ -72,6 +72,67 @@ const IMAGE_STYLE_OPTIONS: { key: ClipStyle; label: string; icon: keyof typeof I
 
 const SHEET_H = 790;
 
+type LayoutRect = { x: number; y: number; width: number; height: number };
+
+function useSlidingIndicator(activeKey: string, resetKey?: unknown) {
+  const layouts = useRef<Record<string, LayoutRect>>({});
+  const animX = useRef(new Animated.Value(0)).current;
+  const animY = useRef(new Animated.Value(0)).current;
+  const animW = useRef(new Animated.Value(0)).current;
+  const animH = useRef(new Animated.Value(0)).current;
+  const ready = useRef(false);
+
+  useEffect(() => {
+    if (!resetKey) {
+      ready.current = false;
+    }
+  }, [resetKey]);
+
+  const moveTo = (l: LayoutRect, immediate = false) => {
+    if (immediate || !ready.current) {
+      ready.current = true;
+      animX.setValue(l.x);
+      animY.setValue(l.y);
+      animW.setValue(l.width);
+      animH.setValue(l.height);
+      return;
+    }
+    Animated.parallel([
+      Animated.spring(animX, { toValue: l.x, useNativeDriver: false, tension: 115, friction: 15 }),
+      Animated.spring(animY, { toValue: l.y, useNativeDriver: false, tension: 115, friction: 15 }),
+      Animated.spring(animW, { toValue: l.width, useNativeDriver: false, tension: 115, friction: 15 }),
+      Animated.spring(animH, { toValue: l.height, useNativeDriver: false, tension: 115, friction: 15 }),
+    ]).start();
+  };
+
+  useEffect(() => {
+    const l = layouts.current[activeKey];
+    if (l) moveTo(l);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey]);
+
+  const onItemLayout =
+    (key: string) =>
+    (e: { nativeEvent: { layout: LayoutRect } }) => {
+      const l = e.nativeEvent.layout;
+      layouts.current[key] = l;
+      if (key === activeKey) {
+        moveTo(l, !ready.current);
+      }
+    };
+
+  const indicatorStyle = {
+    position: 'absolute' as const,
+    left: 0,
+    top: 0,
+    width: animW,
+    height: animH,
+    transform: [{ translateX: animX }, { translateY: animY }],
+  };
+
+  return { onItemLayout, indicatorStyle };
+}
+
 export const VideoCardModal: React.FC<Props> = ({
   visible,
   mode,
@@ -109,6 +170,71 @@ export const VideoCardModal: React.FC<Props> = ({
 
   // Анимация вращения пластинки в живом превью (только для видео)
   const spinAnim = useRef(new Animated.Value(0)).current;
+
+  // Плавные анимированные индикаторы для переключателей параметров
+  const modeIndicator = useSlidingIndicator(mode, visible);
+  const styleIndicator = useSlidingIndicator(clipStyle, visible);
+  const shapeIndicator = useSlidingIndicator(coverShape, visible);
+  const aspectIndicator = useSlidingIndicator(aspect, visible);
+
+  // Вычисляем размеры окна превью под выбранное соотношение сторон и размер экрана
+  const { width: winW, height: winH } = Dimensions.get('window');
+  const MAX_PREVIEW_H = Math.min(280, Math.max(190, Math.round(winH * 0.27)));
+  const MAX_PREVIEW_W = Math.min(340, Math.round(winW * 0.78));
+  const aspectObj = ASPECT_OPTIONS.find((a) => a.key === aspect) ?? ASPECT_OPTIONS[0];
+  let previewW = MAX_PREVIEW_H * aspectObj.ratio;
+  let previewH = MAX_PREVIEW_H;
+  if (previewW > MAX_PREVIEW_W) {
+    previewW = MAX_PREVIEW_W;
+    previewH = MAX_PREVIEW_W / aspectObj.ratio;
+  }
+  const isLandscape = aspectObj.ratio > 1.15;
+  const isSquare = Math.abs(aspectObj.ratio - 1) < 0.1;
+  const coverSize =
+    clipStyle === 'inCover'
+      ? Math.min(previewW * 0.78, previewH * 0.72)
+      : isLandscape
+      ? previewH * 0.60
+      : isSquare
+      ? previewH * 0.38
+      : previewH * 0.40;
+  const coverRadius = coverShape === 'vinyl' ? coverSize / 2 : coverSize * 0.12;
+
+  const previewWAnim = useRef(new Animated.Value(previewW)).current;
+  const previewHAnim = useRef(new Animated.Value(previewH)).current;
+  const coverRadiusAnim = useRef(new Animated.Value(coverRadius)).current;
+  const previewContentAnim = useRef(new Animated.Value(1)).current;
+  const didMountPreviewRef = useRef(false);
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.spring(previewWAnim, { toValue: previewW, useNativeDriver: false, tension: 95, friction: 14 }),
+      Animated.spring(previewHAnim, { toValue: previewH, useNativeDriver: false, tension: 95, friction: 14 }),
+    ]).start();
+  }, [previewW, previewH, previewWAnim, previewHAnim]);
+
+  useEffect(() => {
+    Animated.spring(coverRadiusAnim, {
+      toValue: coverRadius,
+      useNativeDriver: false,
+      tension: 110,
+      friction: 14,
+    }).start();
+  }, [coverRadius, coverRadiusAnim]);
+
+  useEffect(() => {
+    if (!didMountPreviewRef.current) {
+      didMountPreviewRef.current = true;
+      return;
+    }
+    previewContentAnim.setValue(0.32);
+    Animated.timing(previewContentAnim, {
+      toValue: 1,
+      duration: 240,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [clipStyle, isImage, previewContentAnim]);
 
   // При переключении режима Видео <-> Карточка корректируем стиль и форму обложки без сброса строк
   useEffect(() => {
@@ -476,20 +602,6 @@ export const VideoCardModal: React.FC<Props> = ({
 
   if (!render || !track) return null;
 
-  // Вычисляем размеры окна превью под выбранное соотношение сторон и размер экрана
-  const { width: winW, height: winH } = Dimensions.get('window');
-  const MAX_PREVIEW_H = Math.min(280, Math.max(190, Math.round(winH * 0.27)));
-  const MAX_PREVIEW_W = Math.min(340, Math.round(winW * 0.78));
-  const aspectObj = ASPECT_OPTIONS.find((a) => a.key === aspect) ?? ASPECT_OPTIONS[0];
-  let previewW = MAX_PREVIEW_H * aspectObj.ratio;
-  let previewH = MAX_PREVIEW_H;
-  if (previewW > MAX_PREVIEW_W) {
-    previewW = MAX_PREVIEW_W;
-    previewH = MAX_PREVIEW_W / aspectObj.ratio;
-  }
-  const isLandscape = aspectObj.ratio > 1.15;
-  const isSquare = Math.abs(aspectObj.ratio - 1) < 0.1;
-
   const hasVideoSelection = startIdx >= 0 && endIdx >= 0;
   const s = hasVideoSelection ? Math.min(startIdx, endIdx) : -1;
   const e = hasVideoSelection ? Math.max(startIdx, endIdx) : -1;
@@ -511,17 +623,11 @@ export const VideoCardModal: React.FC<Props> = ({
     inputRange: [0, 1],
     outputRange: ['0deg', '360deg'],
   });
+  const previewContentScale = previewContentAnim.interpolate({
+    inputRange: [0.32, 1],
+    outputRange: [0.96, 1],
+  });
 
-  const coverSize =
-    clipStyle === 'inCover'
-      ? Math.min(previewW * 0.78, previewH * 0.72)
-      : isLandscape
-      ? previewH * 0.60
-      : isSquare
-      ? previewH * 0.38
-      : previewH * 0.40;
-
-  const coverRadius = coverShape === 'vinyl' ? coverSize / 2 : coverSize * 0.12;
   const styleOptions = isImage ? IMAGE_STYLE_OPTIONS : VIDEO_STYLE_OPTIONS;
 
   return (
@@ -565,7 +671,12 @@ export const VideoCardModal: React.FC<Props> = ({
               {/* Переключатель режима прямо в шапке: Видео <-> Карточка */}
               {onModeChange && (
                 <View style={styles.modeSwitchPill}>
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[styles.modeSwitchActiveBg, modeIndicator.indicatorStyle]}
+                  />
                   <PressableScale
+                    onLayout={modeIndicator.onItemLayout('video')}
                     onPress={() => {
                       if (isImage) {
                         Haptics.selectionAsync();
@@ -575,12 +686,13 @@ export const VideoCardModal: React.FC<Props> = ({
                     }}
                     scaleTo={0.95}
                   >
-                    <View style={[styles.modeSwitchBtn, !isImage && styles.modeSwitchBtnActive]}>
+                    <View style={styles.modeSwitchBtn}>
                       <Ionicons name="film-outline" size={12} color={!isImage ? colors.onAccent : colors.text2} />
                       <Text style={[styles.modeSwitchText, !isImage && styles.modeSwitchTextActive]}>Видео</Text>
                     </View>
                   </PressableScale>
                   <PressableScale
+                    onLayout={modeIndicator.onItemLayout('image')}
                     onPress={() => {
                       if (!isImage) {
                         Haptics.selectionAsync();
@@ -590,7 +702,7 @@ export const VideoCardModal: React.FC<Props> = ({
                     }}
                     scaleTo={0.95}
                   >
-                    <View style={[styles.modeSwitchBtn, isImage && styles.modeSwitchBtnActive]}>
+                    <View style={styles.modeSwitchBtn}>
                       <Ionicons name="image-outline" size={12} color={isImage ? colors.onAccent : colors.text2} />
                       <Text style={[styles.modeSwitchText, isImage && styles.modeSwitchTextActive]}>Фото</Text>
                     </View>
@@ -603,7 +715,7 @@ export const VideoCardModal: React.FC<Props> = ({
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
             {/* 1. ЖИВОЕ ПРЕВЬЮ КАРТОЧКИ */}
             <View style={styles.previewStage}>
-              <View style={[styles.previewCard, { width: previewW, height: previewH }]}>
+              <Animated.View style={[styles.previewCard, { width: previewWAnim, height: previewHAnim }]}>
                 {/* Размытый фон из обложки трека */}
                 {track.artworkUri ? (
                   <Image
@@ -617,6 +729,15 @@ export const VideoCardModal: React.FC<Props> = ({
                 )}
                 <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(8,8,10,0.52)' }]} />
 
+                <Animated.View
+                  style={[
+                    styles.previewContentStage,
+                    {
+                      opacity: previewContentAnim,
+                      transform: [{ scale: previewContentScale }],
+                    },
+                  ]}
+                >
                 {/* Стеклянная карточка цитаты (для WouFY Card) */}
                 {clipStyle === 'glassQuote' ? (
                   <View style={styles.previewGlassQuoteBox}>
@@ -659,46 +780,48 @@ export const VideoCardModal: React.FC<Props> = ({
                         {track.title} · {track.artist}
                       </Text>
                     </View>
-                    {isImage ? (
-                      <View style={styles.previewStaticLinesCol}>
-                        {clipLines.slice(0, MAX_IMAGE_LINES).map((l, i) => (
-                          <Text
-                            key={i}
-                            style={[
-                              styles.previewStaticLineText,
-                              clipLines.length > 3 && { fontSize: 9 },
-                            ]}
-                            numberOfLines={2}
-                          >
-                            {l.text}
+                    <View style={styles.previewTextOnlyCenter}>
+                      {isImage ? (
+                        <View style={styles.previewStaticLinesCol}>
+                          {clipLines.slice(0, MAX_IMAGE_LINES).map((l, i) => (
+                            <Text
+                              key={i}
+                              style={[
+                                styles.previewStaticLineText,
+                                clipLines.length > 3 && { fontSize: 9 },
+                              ]}
+                              numberOfLines={2}
+                            >
+                              {l.text}
+                            </Text>
+                          ))}
+                        </View>
+                      ) : (
+                        <View style={styles.previewKaraokeCol}>
+                          {prevLine ? (
+                            <Text style={styles.previewLineDim} numberOfLines={1}>
+                              {prevLine}
+                            </Text>
+                          ) : null}
+                          <Text style={styles.previewLineActive} numberOfLines={2}>
+                            {curLine}
                           </Text>
-                        ))}
-                      </View>
-                    ) : (
-                      <View style={styles.previewKaraokeCol}>
-                        {prevLine ? (
-                          <Text style={styles.previewLineDim} numberOfLines={1}>
-                            {prevLine}
-                          </Text>
-                        ) : null}
-                        <Text style={styles.previewLineActive} numberOfLines={2}>
-                          {curLine}
-                        </Text>
-                        {nextLine ? (
-                          <Text style={styles.previewLineDim} numberOfLines={1}>
-                            {nextLine}
-                          </Text>
-                        ) : null}
-                      </View>
-                    )}
+                          {nextLine ? (
+                            <Text style={styles.previewLineDim} numberOfLines={1}>
+                              {nextLine}
+                            </Text>
+                          ) : null}
+                        </View>
+                      )}
+                    </View>
                   </View>
                 ) : clipStyle === 'inCover' ? (
                   <View style={styles.previewInCoverWrap}>
-                    <View
+                    <Animated.View
                       style={{
                         width: coverSize,
                         height: coverSize,
-                        borderRadius: coverRadius,
+                        borderRadius: coverRadiusAnim,
                         overflow: 'hidden',
                         alignItems: 'center',
                         justifyContent: 'center',
@@ -747,7 +870,7 @@ export const VideoCardModal: React.FC<Props> = ({
                           ) : null}
                         </View>
                       )}
-                    </View>
+                    </Animated.View>
                     <Text style={styles.previewMetaTitle} numberOfLines={1}>
                       {track.title}
                     </Text>
@@ -763,7 +886,7 @@ export const VideoCardModal: React.FC<Props> = ({
                           {
                             width: coverSize,
                             height: coverSize,
-                            borderRadius: coverRadius,
+                            borderRadius: coverRadiusAnim,
                             overflow: 'hidden',
                             borderWidth: 1,
                             borderColor: 'rgba(255,255,255,0.22)',
@@ -820,7 +943,7 @@ export const VideoCardModal: React.FC<Props> = ({
                         {
                           width: coverSize,
                           height: coverSize,
-                          borderRadius: coverRadius,
+                          borderRadius: coverRadiusAnim,
                           overflow: 'hidden',
                           borderWidth: 1,
                           borderColor: 'rgba(255,255,255,0.22)',
@@ -870,12 +993,13 @@ export const VideoCardModal: React.FC<Props> = ({
                     )}
                   </View>
                 )}
+                </Animated.View>
 
                 {/* Водяной знак снизу */}
                 <View style={styles.previewWatermark}>
                   <Text style={styles.previewWatermarkText}>{isImage ? 'WouFY Card' : 'WouFY Clip'}</Text>
                 </View>
-              </View>
+              </Animated.View>
 
               {/* Кнопка предпрослушивания отрывка (для видео) */}
               {!isImage && (
@@ -902,11 +1026,16 @@ export const VideoCardModal: React.FC<Props> = ({
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={styles.segmentedScrollRow}
               >
+                <Animated.View
+                  pointerEvents="none"
+                  style={[styles.segmentActiveBg, styleIndicator.indicatorStyle]}
+                />
                 {styleOptions.map((opt) => {
                   const active = clipStyle === opt.key;
                   return (
                     <PressableScale
                       key={opt.key}
+                      onLayout={styleIndicator.onItemLayout(opt.key)}
                       onPress={() => {
                         Haptics.selectionAsync();
                         LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -915,7 +1044,7 @@ export const VideoCardModal: React.FC<Props> = ({
                       scaleTo={0.96}
                       style={{ flexGrow: 1 }}
                     >
-                      <View style={[styles.segmentBtn, styles.segmentBtnAuto, active && styles.segmentBtnActive]}>
+                      <View style={[styles.segmentBtn, styles.segmentBtnAuto]}>
                         <Ionicons name={opt.icon} size={14} color={active ? colors.onAccent : colors.text2} />
                         <Text style={[styles.segmentBtnText, active && styles.segmentBtnTextActive]} numberOfLines={1}>
                           {opt.label}
@@ -933,6 +1062,10 @@ export const VideoCardModal: React.FC<Props> = ({
                 <Text style={styles.sectionLabel}>Форма обложки</Text>
                 <Glass radius={22} style={styles.segmentedGlass}>
                   <View style={styles.segmentedRow}>
+                    <Animated.View
+                      pointerEvents="none"
+                      style={[styles.segmentActiveBg, shapeIndicator.indicatorStyle]}
+                    />
                     {(
                       [
                         {
@@ -951,6 +1084,7 @@ export const VideoCardModal: React.FC<Props> = ({
                       return (
                         <PressableScale
                           key={opt.key}
+                          onLayout={shapeIndicator.onItemLayout(opt.key)}
                           onPress={() => {
                             Haptics.selectionAsync();
                             setCoverShape(opt.key);
@@ -958,7 +1092,7 @@ export const VideoCardModal: React.FC<Props> = ({
                           scaleTo={0.96}
                           style={{ flex: 1, minWidth: 0 }}
                         >
-                          <View style={[styles.segmentBtn, active && styles.segmentBtnActive]}>
+                          <View style={styles.segmentBtn}>
                             <Ionicons name={opt.icon} size={16} color={active ? colors.onAccent : colors.text2} />
                             <Text style={[styles.segmentBtnText, active && styles.segmentBtnTextActive]} numberOfLines={1}>
                               {opt.label}
@@ -975,11 +1109,16 @@ export const VideoCardModal: React.FC<Props> = ({
             {/* 4. СООТНОШЕНИЕ СТОРОН */}
             <Text style={styles.sectionLabel}>Соотношение сторон</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.aspectRow}>
+              <Animated.View
+                pointerEvents="none"
+                style={[styles.aspectPillActiveBg, aspectIndicator.indicatorStyle]}
+              />
               {ASPECT_OPTIONS.map((opt) => {
                 const active = aspect === opt.key;
                 return (
                   <PressableScale
                     key={opt.key}
+                    onLayout={aspectIndicator.onItemLayout(opt.key)}
                     onPress={() => {
                       Haptics.selectionAsync();
                       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -987,7 +1126,7 @@ export const VideoCardModal: React.FC<Props> = ({
                     }}
                     scaleTo={0.94}
                   >
-                    <View style={[styles.aspectPill, active && styles.aspectPillActive]}>
+                    <View style={[styles.aspectPill, active && styles.aspectPillActiveBorder]}>
                       <Text style={[styles.aspectLabel, active && styles.aspectLabelActive]}>{opt.label}</Text>
                       <Text style={[styles.aspectSub, active && styles.aspectSubActive]}>{opt.sub}</Text>
                     </View>
@@ -1157,6 +1296,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   modeSwitchPill: {
+    position: 'relative',
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.08)',
@@ -1165,6 +1305,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.14)',
   },
+  modeSwitchActiveBg: {
+    borderRadius: 999,
+    backgroundColor: colors.accent,
+  },
   modeSwitchBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1172,9 +1316,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 4,
     borderRadius: 999,
-  },
-  modeSwitchBtnActive: {
-    backgroundColor: colors.accent,
   },
   modeSwitchText: {
     ...type.caption,
@@ -1268,12 +1409,25 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     textAlign: 'center',
   },
+  previewContentStage: {
+    flex: 1,
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   previewTextOnlyWrap: {
     flex: 1,
     width: '100%',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 6,
+    justifyContent: 'flex-start',
+    paddingTop: 6,
+    paddingBottom: 14,
+  },
+  previewTextOnlyCenter: {
+    flex: 1,
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   previewHeaderPill: {
     flexDirection: 'row',
@@ -1389,15 +1543,21 @@ const styles = StyleSheet.create({
     padding: 3,
   },
   segmentedRow: {
+    position: 'relative',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
   },
   segmentedScrollRow: {
+    position: 'relative',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
     minWidth: '100%',
+  },
+  segmentActiveBg: {
+    borderRadius: 19,
+    backgroundColor: colors.accent,
   },
   segmentBtn: {
     height: 38,
@@ -1412,9 +1572,6 @@ const styles = StyleSheet.create({
   segmentBtnAuto: {
     paddingHorizontal: 13,
   },
-  segmentBtnActive: {
-    backgroundColor: colors.accent,
-  },
   segmentBtnText: {
     ...type.caption,
     fontSize: 11,
@@ -1428,6 +1585,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   aspectRow: {
+    position: 'relative',
     flexDirection: 'row',
     gap: 8,
     paddingVertical: 2,
@@ -1442,9 +1600,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     minWidth: 74,
   },
-  aspectPillActive: {
+  aspectPillActiveBg: {
+    borderRadius: 999,
     backgroundColor: colors.accent,
-    borderColor: colors.accent,
+  },
+  aspectPillActiveBorder: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
   },
   aspectLabel: {
     ...type.mono,
