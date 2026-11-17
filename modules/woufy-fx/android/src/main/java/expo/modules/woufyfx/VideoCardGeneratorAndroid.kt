@@ -455,7 +455,7 @@ internal object VideoCardGeneratorAndroid {
     var transition = 1f
     if (lines.isNotEmpty() && activeIdx < lines.size) {
       val since = max(0.0, currentTime - lines[activeIdx].time).toFloat()
-      val t = min(1f, since / 0.28f)
+      val t = min(1f, since / 0.42f)
       val inv = 1f - t
       transition = 1f - inv * inv * inv
     }
@@ -528,33 +528,40 @@ internal object VideoCardGeneratorAndroid {
           centered = false
         )
       } else {
-        val coverSize = if (isSquare) minDim * 0.42f else minDim * 0.46f
+        val coverSize = if (isSquare) minDim * 0.44f else W * 0.56f
+        val metaH = minDim * 0.095f
+        val coverToMetaGap = H * 0.020f
+        val metaToLyricsGap = H * 0.024f
+        val fontSize = minDim * 0.052f
+        val lyricsH = fontSize * 2.45f * 2.5f
+
+        val totalStackH = coverSize + coverToMetaGap + metaH + metaToLyricsGap + lyricsH
+        val topY = maxOf(H * 0.06f, (H * 0.90f - totalStackH) / 2f)
+
         val coverX = (W - coverSize) / 2f
-        val coverY = if (isSquare) H * 0.07f else H * 0.08f
-        val coverRect = RectF(coverX, coverY, coverX + coverSize, coverY + coverSize)
+        val coverRect = RectF(coverX, topY, coverX + coverSize, topY + coverSize)
 
         drawCover(canvas, coverRect, coverBmp, coverShape, elapsed, 0f)
 
-        val metaY = coverRect.bottom + H * 0.022f
-        val metaH = H * 0.075f
+        val metaY = coverRect.bottom + coverToMetaGap
         drawTrackMeta(
           canvas = canvas,
           title = title,
           artist = artist,
           rect = RectF(W * 0.08f, metaY, W * 0.92f, metaY + metaH),
-          scale = scale,
+          scale = minDim / 640f,
           centered = true
         )
 
-        val lyricsTop = metaY + metaH + H * 0.015f
-        val lyricsRect = RectF(W * 0.08f, lyricsTop, W * 0.92f, H * 0.88f)
+        val lyricsTop = metaY + metaH + metaToLyricsGap
+        val lyricsRect = RectF(W * 0.08f, lyricsTop, W * 0.92f, lyricsTop + lyricsH)
         drawLyricsBlock(
           canvas = canvas,
           rect = lyricsRect,
           lines = lines,
           activeIdx = activeIdx,
           transition = transition,
-          fontSize = minDim * 0.050f,
+          fontSize = fontSize,
           centered = true
         )
       }

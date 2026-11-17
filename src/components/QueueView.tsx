@@ -187,9 +187,33 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
           const ready = -g.dx >= SWIPE_THRESHOLD || (g.dx < -22 && g.vx < -0.35);
           if (ready && cb.current.canPlayNext) {
             cb.current.onSwipeActiveChange?.(false);
-            swipeX.setValue(0);
-            swipeProg.setValue(0);
-            cb.current.onPlayNextSwipe(cb.current.queueIndex, cb.current.track);
+            const idx = cb.current.queueIndex;
+            const tr = cb.current.track;
+            Animated.parallel([
+              Animated.timing(swipeX, {
+                toValue: -420,
+                duration: 170,
+                easing: Easing.in(Easing.cubic),
+                useNativeDriver: true,
+              }),
+              Animated.timing(swipeProg, {
+                toValue: 0,
+                duration: 140,
+                useNativeDriver: true,
+              }),
+            ]).start(() => {
+              cb.current.onPlayNextSwipe(idx, tr);
+              requestAnimationFrame(() => {
+                swipeX.setValue(-420);
+                Animated.spring(swipeX, {
+                  toValue: 0,
+                  damping: 22,
+                  stiffness: 240,
+                  mass: 0.75,
+                  useNativeDriver: true,
+                }).start();
+              });
+            });
           } else {
             resetSwipe();
           }
@@ -1524,7 +1548,7 @@ const styles = StyleSheet.create({
     height: ROW_H,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.bg,
+    backgroundColor: 'transparent',
   },
   swipeHintPill: {
     position: 'absolute',

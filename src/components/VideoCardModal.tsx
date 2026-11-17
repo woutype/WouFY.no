@@ -472,9 +472,10 @@ export const VideoCardModal: React.FC<Props> = ({
 
   if (!render || !track) return null;
 
-  // Вычисляем размеры окна превью под выбранное соотношение сторон
-  const MAX_PREVIEW_H = 222;
-  const MAX_PREVIEW_W = 304;
+  // Вычисляем размеры окна превью под выбранное соотношение сторон и размер экрана
+  const { width: winW, height: winH } = require('react-native').Dimensions.get('window');
+  const MAX_PREVIEW_H = Math.min(280, Math.max(190, Math.round(winH * 0.27)));
+  const MAX_PREVIEW_W = Math.min(340, Math.round(winW * 0.78));
   const aspectObj = ASPECT_OPTIONS.find((a) => a.key === aspect) ?? ASPECT_OPTIONS[0];
   let previewW = MAX_PREVIEW_H * aspectObj.ratio;
   let previewH = MAX_PREVIEW_H;

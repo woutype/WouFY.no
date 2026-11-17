@@ -620,7 +620,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
             style={[
               styles.bottomFloatRow,
               {
-                bottom: bottomPad + 8,
+                bottom: Math.max(12, bottomPad - 6),
                 opacity: clipBtnAnim,
                 transform: [
                   {

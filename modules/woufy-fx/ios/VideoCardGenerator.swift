@@ -566,11 +566,11 @@ final class VideoCardGenerator {
       }
     }
 
-    // Плавный сдвиг при смене строчки (за первые 0.28с от начала строчки)
+    // Плавный сдвиг при смене строчки (за первые 0.42с от начала строчки)
     var transitionProgress: CGFloat = 1.0
     if !lines.isEmpty && activeIdx < lines.count {
       let sinceLineStart = max(0.0, currentTime - lines[activeIdx].time)
-      transitionProgress = CGFloat(min(1.0, sinceLineStart / 0.28))
+      transitionProgress = CGFloat(min(1.0, sinceLineStart / 0.42))
       // easeOutCubic
       let inv = 1.0 - transitionProgress
       transitionProgress = 1.0 - inv * inv * inv
@@ -679,10 +679,18 @@ final class VideoCardGenerator {
           centered: false
         )
       } else {
-        let coverSize = isSquare ? minDim * 0.42 : minDim * 0.46
+        let coverSize = isSquare ? minDim * 0.44 : W * 0.56
+        let metaH = minDim * 0.095
+        let coverToMetaGap = H * 0.020
+        let metaToLyricsGap = H * 0.024
+        let fontSize = minDim * 0.052
+        let lyricsH = fontSize * 2.45 * 2.5
+
+        let totalStackH = coverSize + coverToMetaGap + metaH + metaToLyricsGap + lyricsH
+        let topY = max(H * 0.06, (H * 0.90 - totalStackH) / 2.0)
+
         let coverX = (W - coverSize) / 2
-        let coverY = isSquare ? H * 0.07 : H * 0.08
-        let coverRect = CGRect(x: coverX, y: coverY, width: coverSize, height: coverSize)
+        let coverRect = CGRect(x: coverX, y: topY, width: coverSize, height: coverSize)
 
         drawCover(
           in: ctx,
@@ -693,26 +701,24 @@ final class VideoCardGenerator {
           darkenOverlay: 0.0
         )
 
-        let metaY = coverRect.maxY + H * 0.022
-        let metaH = H * 0.075
+        let metaY = coverRect.maxY + coverToMetaGap
         drawTrackMeta(
           title: title,
           artist: artist,
           rect: CGRect(x: W * 0.08, y: metaY, width: W * 0.84, height: metaH),
-          scale: minDim / 720.0,
+          scale: minDim / 640.0,
           centered: true
         )
 
-        let lyricsTop = metaY + metaH + H * 0.015
-        let lyricsH = H * 0.88 - lyricsTop
-        let lyricsRect = CGRect(x: W * 0.08, y: lyricsTop, width: W * 0.84, height: max(120, lyricsH))
+        let lyricsTop = metaY + metaH + metaToLyricsGap
+        let lyricsRect = CGRect(x: W * 0.08, y: lyricsTop, width: W * 0.84, height: lyricsH)
         drawLyricsBlock(
           in: ctx,
           rect: lyricsRect,
           lines: lines,
           activeIdx: activeIdx,
           transition: transitionProgress,
-          fontSize: minDim * 0.050,
+          fontSize: fontSize,
           centered: true
         )
       }
@@ -771,17 +777,6 @@ final class VideoCardGenerator {
       let ring1 = UIBezierPath(arcCenter: center, radius: rect.width * 0.47, startAngle: 0, endAngle: .pi * 2, clockwise: true)
       ring1.lineWidth = 1.5
       ring1.stroke()
-
-      if darkenOverlay < 0.1 {
-        let holeRadius = rect.width * 0.095
-        let holeOuter = UIBezierPath(arcCenter: center, radius: holeRadius * 1.45, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-        UIColor(white: 0.06, alpha: 0.75).setFill()
-        holeOuter.fill()
-
-        let holeInner = UIBezierPath(arcCenter: center, radius: holeRadius * 0.55, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-        UIColor(white: 0.92, alpha: 0.9).setFill()
-        holeInner.fill()
-      }
     }
 
     // Тонкая стеклянная рамка
@@ -813,7 +808,7 @@ final class VideoCardGenerator {
 
     let centerY = rect.midY
     let slotStep = fontSize * 2.45
-    let slideOffset = (1.0 - transition) * (slotStep * 0.42)
+    let slideOffset = (1.0 - transition) * slotStep
 
     let indices = [activeIdx - 1, activeIdx, activeIdx + 1]
     for idx in indices {
@@ -822,8 +817,19 @@ final class VideoCardGenerator {
       let text = lines[idx].text
 
       let isCurrent = (dist == 0)
-      let scale: CGFloat = isCurrent ? (0.94 + 0.06 * transition) : 0.84
-      let alpha: CGFloat = isCurrent ? (0.55 + 0.45 * transition) : 0.34
+      let isPrev = (dist == -1)
+      let scale: CGFloat
+      let alpha: CGFloat
+      if isCurrent {
+        scale = 0.86 + 0.14 * transition
+        alpha = 0.36 + 0.64 * transition
+      } else if isPrev && activeIdx > 0 {
+        scale = 1.0 - 0.16 * transition
+        alpha = 1.0 - 0.66 * transition
+      } else {
+        scale = 0.84
+        alpha = 0.34 * transition
+      }
       let actualFont = UIFont.systemFont(ofSize: fontSize * scale, weight: isCurrent ? .heavy : .bold)
 
       let attrs: [NSAttributedString.Key: Any] = [
