@@ -15,6 +15,18 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 26 (Swift 6.2+)
+        run: |
+          XCODE_APP=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -z "$XCODE_APP" ]; then
+            echo "Xcode 26 not found in /Applications:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          echo "Using $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          swift --version
       - uses: actions/setup-node@v4
         with:
           node-version: 20
