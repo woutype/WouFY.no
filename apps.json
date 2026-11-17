@@ -16,67 +16,19 @@
       "tintColor": "1ED760",
       "versions": [
         {
+          "version": "1.3.0",
+          "date": "2026-11-17",
+          "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.0/woufy.ipa",
+          "apkDownloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.0/woufy.apk",
+          "localizedDescription": "Новый WouFY Clip / генератор карточек трека и сторис, относительное скраблирование громкости с индикацией, эффект концертного реверба, тактильный отклик под ритм (Beat Haptics), комбинация фильтров библиотеки (только с текстом / обложкой), круглая стилистика обложек, плавные анимации очереди и обновленный выбор строк.",
+          "size": 12083453
+        },
+        {
           "version": "1.2.7",
           "date": "2026-11-17",
           "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.2.7/woufy.ipa",
           "localizedDescription": "Новый скомпилированный нативный бинарник с аппаратной генерацией миниатюр и оригиналов обложек, синхронный показ обложек без мигания, точный учёт повторов и переключений в Топ-10, исправление таймингов и поиска по текстам.",
           "size": 12967080
-        },
-        {
-          "version": "1.2.6",
-          "date": "2026-11-17",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.6/woufy.ipa",
-          "localizedDescription": "Восстановлены сжатые обложки в очереди и списках, несжатый оригинал в главном плеере; надёжное чтение встроенных текстов песен (USLT, SYLT, MP4, FLAC) и локальных .lrc/.txt файлов при отсутствии в онлайн-базе.",
-          "size": 12949446
-        },
-        {
-          "version": "1.2.5",
-          "date": "2026-11-16",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.5/woufy.ipa",
-          "localizedDescription": "Оптимизация обложек (лёгкие миниатюры для списков и несжатый оригинал на главном экране), улучшенный Smart Shuffle с учётом скипов и точный подсчёт времени прослушивания без накрутки при перемотках.",
-          "size": 12946658
-        },
-        {
-          "version": "1.2.4",
-          "date": "2026-11-16",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.4/woufy.ipa",
-          "localizedDescription": "Исправлен баг воспроизведения треков и слёта очереди: динамическое построение путей файлов от текущего контейнера, защита от пролистывания очереди при ошибках чтения, автоматическая перезагрузка по кнопке Play.",
-          "size": 12940689
-        },
-        {
-          "version": "1.2.3",
-          "date": "2026-11-16",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.3/woufy.ipa",
-          "localizedDescription": "Свайп по пустому месту в Топ-10 для возврата к очереди/тексту, изолированный свайп сброса карточек, мгновенный холодный запуск плеера.",
-          "size": 12938631
-        },
-        {
-          "version": "1.2.2",
-          "date": "2026-11-16",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.2/woufy.ipa",
-          "localizedDescription": "Возвращена плавная анимация перелистывания обложек при смене трека, автоматическая чистка кэша без накопления.",
-          "size": 12951654
-        },
-        {
-          "version": "1.2.1",
-          "date": "2026-11-16",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.1/woufy.ipa",
-          "localizedDescription": "Кнопка сброса скрыта до свайпа, номера 1,2,3 вместо медалей, исправлен свайп возврата без перелистывания на Текст.",
-          "size": 12951335
-        },
-        {
-          "version": "1.2.0",
-          "date": "2026-11-16",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.0/woufy.ipa",
-          "localizedDescription": "Очистка кэша и корзины (3 ГБ), сброс в Топ-10 свайпом влево, стабильная карусель обложек, точное центрирование очереди.",
-          "size": 12951346
-        },
-        {
-          "version": "1.1.0",
-          "date": "2025-01-01",
-          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.1.0/woufy.ipa",
-          "localizedDescription": "Архитектура Spotify Local Files: мгновенное нативное обнаружение треков и 100% оригинальные обложки.",
-          "size": 13000000
         }
       ]
     }
