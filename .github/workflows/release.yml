@@ -1,0 +1,116 @@
+name: Release (APK + IPA)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    name: Build Unsigned IPA
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Prebuild iOS project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          pod install --repo-update
+
+      - name: Compile iOS App (Unsigned)
+        run: |
+          xcodebuild -workspace ios/Woufy.xcworkspace \
+            -scheme Woufy \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package into IPA
+        run: |
+          mkdir -p Payload
+          APP_PATH=$(find build -type d -name "*.app" | head -n 1)
+          cp -r "$APP_PATH" Payload/
+          zip -r woufy.ipa Payload
+          rm -rf Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: woufy-ipa
+          path: woufy.ipa
+          retention-days: 7
+
+  build-apk:
+    name: Build APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - run: npm ci
+
+      - name: Prebuild Android project
+        run: npx expo prebuild --platform android --clean
+
+      - name: Assemble release APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Collect APK
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          echo "Found APK: $APK_PATH"
+          cp "$APK_PATH" woufy.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: woufy-apk
+          path: woufy.apk
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: [build-ipa, build-apk]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: WouFY ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/woufy.ipa
+            dist/woufy.apk
