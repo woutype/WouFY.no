@@ -32,6 +32,18 @@ jobs:
           node-version: 20
           cache: 'npm'
       - run: npm ci
+      - name: Patch ExpoModulesJSI for Swift 6.2 concurrency
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "node_modules/expo-modules-jsi/apple/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptObject.swift";
+            const s = fs.readFileSync(p, "utf8");
+            const target = "    nonisolated(unsafe) let slot = buffer.baseAddress!\n    expo.emplaceUndefined(slot)\n    defer {\n      expo.destroyValues(slot, 1)\n    }\n    // The runtime can'\''t be deallocated during a call on its JavaScript thread, so it'\''s borrowed without\n    // a retain.\n    try runtime._withUnsafeGuaranteedRef { runtime in\n      try JavaScriptActor.assumeIsolated {\n        try encode(JavaScriptValue.Slot(slot), runtime)\n      }\n    }";
+            const repl = "    nonisolated(unsafe) let slot = buffer.baseAddress!\n    let slotAddress = UInt(bitPattern: slot)\n    expo.emplaceUndefined(slot)\n    defer {\n      expo.destroyValues(slot, 1)\n    }\n    // The runtime can'\''t be deallocated during a call on its JavaScript thread, so it'\''s borrowed without\n    // a retain.\n    try runtime._withUnsafeGuaranteedRef { runtime in\n      try JavaScriptActor.assumeIsolated {\n        let innerSlot = UnsafeMutablePointer<facebook.jsi.Value>(bitPattern: slotAddress)!\n        try encode(JavaScriptValue.Slot(innerSlot), runtime)\n      }\n    }";
+            if (!s.includes(target)) throw new Error("Target snippet not found in JavaScriptObject.swift");
+            fs.writeFileSync(p, s.replace(target, repl));
+            console.log("Patched JavaScriptObject.swift successfully");
+          '
       - name: Prebuild iOS project
         run: npx expo prebuild --platform ios --clean
       - name: Install CocoaPods dependencies
