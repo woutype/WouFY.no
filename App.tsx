@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, Platform, Share, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, AppState, BackHandler, Platform, Share, StyleSheet, Text, UIManager, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import { enrichTracks, scanLibrary, startLibraryWatcher } from './src/services/fileScanner';
 import { sampleBus } from './src/services/sampleBus';
 import { musicHaptics } from './src/services/musicHaptics';
@@ -238,6 +242,18 @@ function Root() {
     [progress, sheet]
   );
 
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!expanded) {
+        settle(1);
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [expanded, settle]);
+
   const openSheet = useCallback(
     (mode: SheetMode) => {
       setSheet(mode);
@@ -327,7 +343,17 @@ function Root() {
         'numeric'
       );
     } else {
-      Alert.alert('BPM трека', bpm ? `${Math.round(bpm)} BPM` : 'Определяется автоматически');
+      const cur = bpm ? Math.round(bpm) : 120;
+      Alert.alert(
+        'BPM трека',
+        `${track.title}\nТекущий темп: ${bpm ? `${Math.round(bpm)} BPM` : 'Определяется автоматически'}`,
+        [
+          { text: 'Авто (Сброс)', style: 'destructive', onPress: () => bpmService.setManual(track.id, null) },
+          { text: `${Math.max(40, cur - 1)} BPM (-1)`, onPress: () => bpmService.setManual(track.id, Math.max(40, cur - 1)) },
+          { text: `${Math.min(240, cur + 1)} BPM (+1)`, onPress: () => bpmService.setManual(track.id, Math.min(240, cur + 1)) },
+        ],
+        { cancelable: true }
+      );
     }
   }, [track, bpm]);
 

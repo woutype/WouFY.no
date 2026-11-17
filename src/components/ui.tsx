@@ -4,6 +4,7 @@ import {
   Image,
   LayoutChangeEvent,
   PanResponder,
+  Platform,
   Pressable,
   StyleProp,
   StyleSheet,
@@ -30,8 +31,19 @@ interface GlassProps {
 /** Матовое стекло: лёгкое размытие + почти невидимая заливка + идеально плавная обводка без черных засечек на iOS */
 export const Glass: React.FC<GlassProps> = ({ style, radius: r = radius.lg, intensity = 36, children }) => (
   <View style={[{ borderRadius: r, overflow: 'hidden' }, style]}>
-    <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
-    <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.glass }]} />
+    {Platform.OS === 'ios' ? (
+      <>
+        <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.glass }]} />
+      </>
+    ) : (
+      <View
+        style={[
+          StyleSheet.absoluteFill,
+          { backgroundColor: intensity >= 55 ? 'rgba(20, 20, 24, 0.92)' : 'rgba(28, 28, 34, 0.78)' },
+        ]}
+      />
+    )}
     {/* Накладная обводка поверх BlurView исключает любые черные засечки CoreAnimation на Retina экранах */}
     <View
       pointerEvents="none"

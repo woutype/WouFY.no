@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, FlatList, LayoutAnimation, PanResponder, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Animated, Easing, FlatList, LayoutAnimation, PanResponder, Platform, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -853,7 +853,9 @@ export const QueueView: React.FC<Props> = ({
                 <Text style={styles.emptyTitle}>{filtering ? 'Ничего не найдено' : 'Здесь пока пусто'}</Text>
                 {!filtering && (
                   <Text style={styles.emptyText}>
-                    Откройте «Файлы» → На iPhone → WouFY.no → Music и положите туда музыку или целую папку. Потяните список вниз, чтобы обновить.
+                    {Platform.OS === 'android'
+                      ? 'Положите музыку в папку «Music» (или «Music/WouFY» / «Download») на телефоне и потяните список вниз, чтобы обновить.'
+                      : 'Откройте «Файлы» → На iPhone → WouFY.no → Music и положите туда музыку или целую папку. Потяните список вниз, чтобы обновить.'}
                   </Text>
                 )}
               </View>

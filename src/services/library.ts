@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
 import { DJSettings, FxSettings, RepeatMode, TrackFile } from '../types';
 
 /**
@@ -61,6 +62,12 @@ export function resolveTrackUri(idOrUri: string): string {
   const root = getDocRoot();
   if (!idOrUri) return root;
   const relId = normalizeTrackId(idOrUri);
+  if (
+    Platform.OS === 'android' &&
+    (relId.startsWith('storage/') || relId.startsWith('sdcard/') || relId.startsWith('mnt/') || relId.startsWith('data/'))
+  ) {
+    return `file:///${relId}`;
+  }
   return `${root}${relId}`;
 }
 
