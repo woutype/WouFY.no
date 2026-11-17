@@ -259,9 +259,9 @@ export const LyricsSearchModal: React.FC<Props> = ({ visible, tracks, onSelectTr
                 haptic="light"
                 style={styles.matchItem}
               >
-                <Glass radius={16} style={styles.matchGlass}>
+                <Glass radius={26} style={styles.matchGlass}>
                   <View style={styles.matchRow}>
-                    <CoverArt uri={item.track.artworkUri} size={50} radius={12} />
+                    <CoverArt uri={item.track.artworkUri} size={50} radius={25} />
                     <View style={styles.matchTextCol}>
                       <Text style={styles.matchTrackTitle} numberOfLines={1}>
                         {item.track.title}
@@ -344,7 +344,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     height: 44,
-    borderRadius: 14,
+    borderRadius: 22,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
@@ -365,7 +365,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   matchGlass: {
-    padding: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
   },
   matchRow: {
     flexDirection: 'row',
@@ -393,9 +394,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     marginTop: 6,
-    paddingVertical: 3,
-    paddingHorizontal: 7,
-    borderRadius: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 9,
+    borderRadius: 12,
     backgroundColor: 'rgba(255,255,255,0.06)',
     alignSelf: 'flex-start',
     maxWidth: '100%',

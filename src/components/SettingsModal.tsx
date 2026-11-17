@@ -308,7 +308,7 @@ export const SettingsModal: React.FC<Props> = ({
 
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
             {updateInfo?.hasUpdate && (
-              <Glass radius={20} style={{ marginTop: 8, marginBottom: 16 }}>
+              <Glass radius={28} style={{ marginTop: 8, marginBottom: 16 }}>
                 <View style={{ padding: 16 }}>
                   <View style={[styles.row, { paddingVertical: 0 }]}>
                     <View style={styles.info}>
@@ -351,7 +351,7 @@ export const SettingsModal: React.FC<Props> = ({
             />
 
             {settings.crossfadeEnabled && (
-              <Glass radius={20} style={{ marginTop: 6 }}>
+              <Glass radius={26} style={{ marginTop: 6 }}>
                 <View style={{ padding: 16 }}>
                   <LiveSlider
                     label="Длительность перехода"
@@ -407,7 +407,7 @@ export const SettingsModal: React.FC<Props> = ({
             />
 
             {fx.enabled && (
-              <Glass radius={20} style={{ marginTop: 6 }}>
+              <Glass radius={26} style={{ marginTop: 6 }}>
                 <View style={{ padding: 16 }}>
                   <ToggleRow
                     title="Реверберация"
@@ -501,8 +501,8 @@ export const SettingsModal: React.FC<Props> = ({
 
             {/* ───── Библиотека ───── */}
             <Text style={[styles.section, { marginTop: 30, marginBottom: 10 }]}>Библиотека</Text>
-            <Glass radius={20} style={{ marginBottom: 16 }}>
-              <View style={[styles.row, { padding: 16 }]}>
+            <Glass radius={999} style={{ marginBottom: 16 }}>
+              <View style={[styles.row, { paddingVertical: 14, paddingHorizontal: 20 }]}>
                 <View style={styles.info}>
                   <Text style={styles.rowTitle}>
                     {trackCount} {trackCount % 10 === 1 && trackCount % 100 !== 11 ? 'трек' : trackCount % 10 >= 2 && trackCount % 10 <= 4 && (trackCount % 100 < 12 || trackCount % 100 > 14) ? 'трека' : 'треков'}
@@ -522,8 +522,8 @@ export const SettingsModal: React.FC<Props> = ({
 
             {/* ───── Память и кэш ───── */}
             <Text style={[styles.section, { marginTop: 14, marginBottom: 10 }]}>Память и кэш</Text>
-            <Glass radius={20} style={{ marginBottom: 16 }}>
-              <View style={[styles.row, { padding: 16 }]}>
+            <Glass radius={999} style={{ marginBottom: 16 }}>
+              <View style={[styles.row, { paddingVertical: 14, paddingHorizontal: 20 }]}>
                 <View style={styles.info}>
                   <Text style={styles.rowTitle}>
                     {storageInfo ? storageInfo.formattedTotal : 'Вычисление…'}
@@ -543,8 +543,8 @@ export const SettingsModal: React.FC<Props> = ({
 
             {/* ───── Обновление приложения ───── */}
             <Text style={[styles.section, { marginTop: 14, marginBottom: 10 }]}>Обновление приложения</Text>
-            <Glass radius={20} style={{ marginBottom: 30 }}>
-              <View style={{ padding: 16 }}>
+            <Glass radius={28} style={{ marginBottom: 30 }}>
+              <View style={{ paddingVertical: 14, paddingHorizontal: 20 }}>
                 <View style={[styles.row, { paddingVertical: 0 }]}>
                   <View style={styles.info}>
                     <Text style={styles.rowTitle}>

@@ -22,6 +22,7 @@ import { usePosition } from '../hooks/useAudioController';
 import { colors, formatTime, type } from '../theme';
 import { alignBySpeech, speechAlignAvailable } from '../services/lyricsAlign';
 import { Glass, PressableScale } from './ui';
+import { CardCreationMode, VideoCardModal } from './VideoCardModal';
 
 const savedCache = new Map<string, LyricsData>();
 
@@ -132,6 +133,8 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
   const [showOffset, setShowOffset] = useState(false);
   const [stamps, setStamps] = useState<number[]>([]);
   const [following, setFollowing] = useState(true);
+  const [showClipModal, setShowClipModal] = useState(false);
+  const [cardModalMode, setCardModalMode] = useState<CardCreationMode>('video');
 
   const scrollRef = useRef<React.ElementRef<typeof ScrollView>>(null);
   const viewH = useRef(500);
@@ -146,6 +149,19 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
   const { active, pin } = useActiveLine(engine, lines, visible && !syncing && lines.length > 0);
   // версия набора строк: при замене текста строки пересоздаются и заново измеряются (раньше после замены измерения терялись — текст переставал листаться)
   const ver = useMemo(() => ++verRef.current, [data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Плавное появление кнопки «WouFY Clip» над мини-плеером при переходе на вкладку «Текст»
+  const clipBtnAnim = useRef(new Animated.Value(0)).current;
+  const canShowClipBtn = visible && !syncing && lines.length > 0;
+  useEffect(() => {
+    Animated.spring(clipBtnAnim, {
+      toValue: canShowClipBtn ? 1 : 0,
+      damping: 20,
+      stiffness: 240,
+      mass: 0.8,
+      useNativeDriver: true,
+    }).start();
+  }, [canShowClipBtn, clipBtnAnim]);
 
   const setFollow = (v: boolean) => {
     follow.current = v;
@@ -506,7 +522,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     <View style={{ flex: 1 }}>
       {data && (
         <View style={styles.statusRow}>
-          <Glass radius={12} style={{ height: 26 }}>
+          <Glass radius={13} style={{ height: 26 }}>
             <View style={styles.chip}>
               {searching || (aligning && !data.synced) ? (
                 <ActivityIndicator size="small" color={colors.text} style={{ transform: [{ scale: 0.6 }] }} />
@@ -542,7 +558,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
       {/* Быстрая калибровка смещения (+/- 0.5с / 0.1с) */}
       {showOffset && data?.synced && (
         <View style={styles.offsetBar}>
-          <Glass radius={14} intensity={60}>
+          <Glass radius={999} intensity={60}>
             <View style={styles.offsetInner}>
               <Text style={styles.offsetTitle}>Сдвиг текста:</Text>
               {[-0.5, -0.1, 0.1, 0.5].map((d) => (
@@ -598,15 +614,79 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
         <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0.8)', 'rgba(8,8,8,0)']} style={styles.fadeTop} />
         <LinearGradient pointerEvents="none" colors={['rgba(8,8,8,0)', 'rgba(8,8,8,0.8)']} style={[styles.fadeBottom, { height: Math.min(bottomPad, 110) }]} />
 
-        {!syncing && !following && lines.length > 0 && (
-          <View style={[styles.followPillWrap, { bottom: bottomPad + 8 }]} pointerEvents="box-none">
-            <PressableScale onPress={resumeNow} scaleTo={0.95}>
-              <View style={styles.followPill}>
-                <Ionicons name="locate" size={15} color={colors.text} />
-                <Text style={styles.followText}>К текущей строке</Text>
-              </View>
+        {/* Плавно появляющаяся панель кнопок над мини-плеером («К текущей строке» + «WouFY Clip») */}
+        {!syncing && lines.length > 0 && (
+          <Animated.View
+            style={[
+              styles.bottomFloatRow,
+              {
+                bottom: bottomPad + 8,
+                opacity: clipBtnAnim,
+                transform: [
+                  {
+                    translateY: clipBtnAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [20, 0],
+                    }),
+                  },
+                  {
+                    scale: clipBtnAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.9, 1],
+                    }),
+                  },
+                ],
+              },
+            ]}
+            pointerEvents={canShowClipBtn ? 'box-none' : 'none'}
+          >
+            {!following && (
+              <PressableScale onPress={resumeNow} scaleTo={0.95} haptic="light">
+                <Glass radius={999} intensity={65}>
+                  <View style={styles.followPill}>
+                    <Ionicons name="locate" size={15} color={colors.text} />
+                    <Text style={styles.followText}>К строке</Text>
+                  </View>
+                </Glass>
+              </PressableScale>
+            )}
+            <PressableScale
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                setCardModalMode('video');
+                setShowClipModal(true);
+              }}
+              scaleTo={0.94}
+              haptic="medium"
+            >
+              <Glass radius={999} intensity={70} style={styles.clipBtnGlass}>
+                <View style={styles.clipBtnInner}>
+                  <View style={styles.clipIconCircle}>
+                    <Ionicons name="sparkles" size={12} color={colors.onAccent} />
+                  </View>
+                  <Text style={styles.clipBtnText}>WouFY Clip</Text>
+                </View>
+              </Glass>
             </PressableScale>
-          </View>
+            <PressableScale
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                setCardModalMode('image');
+                setShowClipModal(true);
+              }}
+              scaleTo={0.94}
+              haptic="medium"
+            >
+              <Glass radius={999} intensity={70} style={styles.clipBtnGlass}>
+                <View style={styles.clipBtnInner}>
+                  <View style={styles.cardIconCircle}>
+                    <Ionicons name="image" size={12} color={colors.text} />
+                  </View>
+                  <Text style={styles.clipBtnText}>WouFY Card</Text>
+                </View>
+              </Glass>
+            </PressableScale>
+          </Animated.View>
         )}
       </View>
 
@@ -640,6 +720,18 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
           </Glass>
         </View>
       )}
+
+      <VideoCardModal
+        visible={showClipModal}
+        mode={cardModalMode}
+        onModeChange={setCardModalMode}
+        track={track}
+        lines={lines}
+        duration={duration}
+        engine={engine}
+        initialLineIndex={active >= 0 ? active : 0}
+        onClose={() => setShowClipModal(false)}
+      />
     </View>
   );
 };
@@ -672,18 +764,74 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
     paddingHorizontal: 18,
     paddingVertical: 10,
-    borderRadius: 20,
+    borderRadius: 999,
   },
   findBtnText: { ...type.headline, color: colors.onAccent, fontSize: 14 },
-  followPillWrap: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
+  bottomFloatRow: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
   fadeTop: { position: 'absolute', top: 0, left: 0, right: 0, height: 22 },
   fadeBottom: { position: 'absolute', bottom: 0, left: 0, right: 0 },
-  followPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.12)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.16)' },
-  followText: { ...type.caption, color: colors.text, fontWeight: '600' },
+  followPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    height: 38,
+  },
+  followText: { ...type.caption, color: colors.text, fontWeight: '700' },
+  clipBtnGlass: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  clipBtnInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingLeft: 7,
+    paddingRight: 14,
+    height: 38,
+  },
+  clipIconCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardIconCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.32)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clipBtnText: {
+    ...type.caption,
+    fontSize: 12.5,
+    color: colors.text,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
   offsetBar: { paddingHorizontal: 24, paddingBottom: 6 },
-  offsetInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 6 },
+  offsetInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 6 },
   offsetTitle: { ...type.caption, color: colors.text2, fontSize: 11 },
-  offsetBtn: { backgroundColor: 'rgba(255,255,255,0.10)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+  offsetBtn: { backgroundColor: 'rgba(255,255,255,0.10)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)', paddingHorizontal: 11, paddingVertical: 5, borderRadius: 999 },
   offsetBtnText: { ...type.mono, color: colors.text, fontSize: 11, fontWeight: '600' },
   syncBar: { position: 'absolute', left: 16, right: 16 },
   syncInner: { padding: 14, gap: 10 },

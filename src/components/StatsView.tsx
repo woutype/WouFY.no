@@ -263,7 +263,7 @@ export const StatsView: React.FC<Props> = ({
     <View style={styles.container}>
       {/* 1. Селектор периода: 3 дня / Неделя / Месяц */}
       <View style={styles.periodRow}>
-        <Glass radius={18} style={styles.periodGlass}>
+        <Glass radius={19} style={styles.periodGlass}>
           <View
             style={styles.periodInner}
             onLayout={(e) => setPeriodInnerWidth(e.nativeEvent.layout.width)}
@@ -308,7 +308,7 @@ export const StatsView: React.FC<Props> = ({
 
       {/* 2. Переключатель: Трек / Артист (Сегментированная стеклянная плашка) */}
       <View style={styles.subTabRow}>
-        <Glass radius={16} style={styles.subTabGlass}>
+        <Glass radius={22} style={styles.subTabGlass}>
           <View
             style={styles.subTabInner}
             onLayout={(e) => setSubTabWidth(e.nativeEvent.layout.width)}
@@ -399,7 +399,7 @@ export const StatsView: React.FC<Props> = ({
               rawTopTracks.length > 0 ? (
                 <View style={styles.topActionHeader}>
                   <PressableScale onPress={handlePlayAllTop} scaleTo={0.96} haptic="medium">
-                    <Glass radius={14} style={styles.playAllGlass}>
+                    <Glass radius={999} style={styles.playAllGlass}>
                       <View style={styles.playAllInner}>
                         <Ionicons name="play" size={15} color={colors.accent} />
                         <Text style={styles.playAllText}>Слушать весь топ ({rawTopTracks.length})</Text>
@@ -433,10 +433,10 @@ export const StatsView: React.FC<Props> = ({
                         haptic="light"
                         style={styles.cardMargin}
                       >
-                        <Glass radius={14} style={styles.cardGlass}>
+                        <Glass radius={999} style={styles.cardGlass}>
                           <View style={styles.trackRow}>
                             <RankBadge rank={idx + 1} />
-                            <CoverArt uri={t.artworkUri} size={42} radius={9} style={styles.cover} />
+                            <CoverArt uri={t.artworkUri} size={42} radius={21} style={styles.cover} />
                             <View style={styles.trackInfo}>
                               <Text style={styles.trackTitle} numberOfLines={1}>{t.title}</Text>
                               <Text style={styles.trackArtist} numberOfLines={1}>{t.artist}</Text>
@@ -463,10 +463,10 @@ export const StatsView: React.FC<Props> = ({
                   }}
                   onActiveChange={onRowActiveChange}
                 >
-                  <Glass radius={16} style={styles.cardGlass}>
+                  <Glass radius={999} style={styles.cardGlass}>
                     <View style={styles.trackRow}>
                       <RankBadge rank={index + 1} />
-                      <CoverArt uri={liveTrack?.artworkUri ?? item.artworkUri} size={48} radius={11} style={styles.cover} />
+                      <CoverArt uri={liveTrack?.artworkUri ?? item.artworkUri} size={46} radius={23} style={styles.cover} />
                       <View style={styles.trackInfo}>
                         <Text style={styles.trackTitle} numberOfLines={1}>
                           {liveTrack?.title || item.title}
@@ -533,10 +533,10 @@ export const StatsView: React.FC<Props> = ({
                 }}
                 onActiveChange={onRowActiveChange}
               >
-                <Glass radius={16} style={styles.cardGlass}>
+                <Glass radius={999} style={styles.cardGlass}>
                   <View style={styles.trackRow}>
                     <RankBadge rank={index + 1} />
-                    <ArtistAvatar artist={item.artist} tracks={tracks} size={44} />
+                    <ArtistAvatar artist={item.artist} tracks={tracks} size={46} />
                     <View style={styles.trackInfo}>
                       <Text style={styles.artistName} numberOfLines={1}>
                         {item.artist}
@@ -587,7 +587,7 @@ const styles = StyleSheet.create({
     height: 32,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 13,
+    borderRadius: 16,
   },
   periodSlidingPill: {
     position: 'absolute',
@@ -595,7 +595,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     height: 32,
-    borderRadius: 13,
+    borderRadius: 16,
     backgroundColor: 'rgba(255, 255, 255, 0.18)',
   },
   periodBtnText: {
@@ -636,7 +636,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     height: 38,
-    borderRadius: 13,
+    borderRadius: 19,
     backgroundColor: colors.accent,
   },
   subTabBtn: {
@@ -646,7 +646,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 7,
-    borderRadius: 13,
+    borderRadius: 19,
     backgroundColor: 'transparent',
   },
   subTabBtnText: {
@@ -664,8 +664,8 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   playAllGlass: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
   playAllInner: {
     flexDirection: 'row',
@@ -686,7 +686,9 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   cardGlass: {
-    padding: 10,
+    paddingVertical: 10,
+    paddingLeft: 12,
+    paddingRight: 16,
   },
   trackRow: {
     flexDirection: 'row',
@@ -828,7 +830,7 @@ const styles = StyleSheet.create({
     width: 76,
     height: '100%',
     backgroundColor: '#FF3B30',
-    borderRadius: 16,
+    borderRadius: 999,
     justifyContent: 'center',
     alignItems: 'center',
     gap: 3,

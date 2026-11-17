@@ -227,7 +227,7 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics, onSh
           },
         ]}
       >
-        <Glass radius={16} style={[styles.tooltipGlass, shareReady && styles.tooltipGlassReady]}>
+        <Glass radius={999} style={[styles.tooltipGlass, shareReady && styles.tooltipGlassReady]}>
           <View style={styles.tooltipInner}>
             <Ionicons
               name={shareReady ? 'checkmark-circle' : 'arrow-up-circle-outline'}

@@ -3,11 +3,13 @@ import Foundation
 
 /// Один «плеер с эффектами» на AVAudioEngine.
 ///
-/// Цепочка:  playerNode → timePitch → panMix → preReverb → reverb → mainMixer
+/// Цепочка:
+///   playerNode → timePitch → panMix ──┬── (Dry: чистый сигнал) ──────────────────────────┐
+///                                      └── (Wet: wetEQ [HP 210Hz + LP 6.2kHz] → reverb) ──┴→ mainMixer
 ///
 ///  • timePitch — темп и высота тона (Slowed / Speed Up / подгон BPM при склейке) без рваного звука;
-///  • panMix — 8D: звук плавно «перетекает» из уха в ухо (панорама + лёгкая смена громкости), работает и на колонках;
-///  • reverb — реверберация (wetDryMix 0 = эффект выключен, звук проходит без изменений).
+///  • panMix — 8D: звук плавно «перетекает» из уха в ухо (панорама), работает и на колонках;
+///  • wetEQ + reverb — чистый концертный зал (параллельный посыл без грязи в басах и металлического шипения в верхах).
 final class FXPlayer {
   let id: String
 
@@ -20,8 +22,10 @@ final class FXPlayer {
   private let node = AVAudioPlayerNode()
   private let timePitch = AVAudioUnitTimePitch()
   private let panMix = AVAudioMixerNode()
-  private let preReverb = AVAudioMixerNode()
+  private let dryMix = AVAudioMixerNode()
+  private let wetEQ = AVAudioUnitEQ(numberOfBands: 2)
   private let reverb = AVAudioUnitReverb()
+  private let wetMix = AVAudioMixerNode()
 
   private var file: AVAudioFile?
   private var duration: Double = 0
@@ -71,21 +75,46 @@ final class FXPlayer {
     engine.attach(node)
     engine.attach(timePitch)
     engine.attach(panMix)
-    engine.attach(preReverb)
+    engine.attach(dryMix)
+    engine.attach(wetEQ)
     engine.attach(reverb)
+    engine.attach(wetMix)
 
     let sr = engine.outputNode.outputFormat(forBus: 0).sampleRate
     let rateForGraph = sr > 0 ? sr : 44100
     guard let stereoFmt = AVAudioFormat(standardFormatWithSampleRate: rateForGraph, channels: 2) else { return }
 
-    // panMix → preReverb: панорама (pan) действует на соединение микшера со следующим микшером
-    engine.connect(panMix, to: preReverb, format: stereoFmt)
-    engine.connect(preReverb, to: reverb, format: stereoFmt)
-    engine.connect(reverb, to: engine.mainMixerNode, format: stereoFmt)
+    // Параллельный посыл: чистый сигнал идёт через dryMix, а в зал (reverb) уходит отфильтрованная копия
+    let dryPoint = AVAudioConnectionPoint(node: dryMix, bus: 0)
+    let wetPoint = AVAudioConnectionPoint(node: wetEQ, bus: 0)
+    engine.connect(panMix, to: [dryPoint, wetPoint], fromBus: 0, format: stereoFmt)
+    engine.connect(dryMix, to: engine.mainMixerNode, format: stereoFmt)
 
-    reverb.loadFactoryPreset(.cathedral)
-    reverb.wetDryMix = 0
-    reverb.bypass = true // реверберация выключена — узел не считает ничего
+    engine.connect(wetEQ, to: reverb, format: stereoFmt)
+    engine.connect(reverb, to: wetMix, format: stereoFmt)
+    engine.connect(wetMix, to: engine.mainMixerNode, format: stereoFmt)
+
+    // Фильтруем посыл на реверберацию: убираем гулкий суб-бас (<210 Гц) и резкий шум/сибилянты (>6.2 кГц)
+    let hp = wetEQ.bands[0]
+    hp.filterType = .highPass
+    hp.frequency = 210
+    hp.bandwidth = 0.7
+    hp.bypass = false
+
+    let lp = wetEQ.bands[1]
+    lp.filterType = .lowPass
+    lp.frequency = 6200
+    lp.bandwidth = 0.7
+    lp.bypass = false
+
+    // .largeHall2 — чистый объёмный концертный зал с тёплым хвостом без металлического звона
+    reverb.loadFactoryPreset(.largeHall2)
+    reverb.wetDryMix = 100
+    reverb.bypass = true // при 0% реверберации узел полностью отключён
+
+    dryMix.outputVolume = 1.0
+    wetMix.outputVolume = 0.0
+    wetEQ.bypass = true
 
     panMix.pan = 0
     panMix.outputVolume = 1
@@ -330,14 +359,27 @@ final class FXPlayer {
     timePitch.bypass = !on
   }
 
-  /// amount: 0…100 (0 — без реверберации, 100 — почти полностью «в зале»)
+  /// amount: 0…100 (0 — без реверберации, 100 — атмосферный большой концертный зал)
   func setReverb(_ amount: Double) {
     let a = max(0, min(100, amount)) / 100.0
-    // быстро набирает слышимость уже на малых значениях; на максимуме ≈ 92% обработанного сигнала
-    reverb.wetDryMix = Float(100.0 * (1.0 - pow(1.0 - a, 1.6)) * 0.92)
-    reverb.bypass = a <= 0.001
-    // реверберация «съедает» громкость — компенсируем
-    panMix.outputVolume = Float(1.0 + 0.25 * a)
+    let active = a > 0.001
+    reverb.bypass = !active
+    wetEQ.bypass = !active
+
+    if !active {
+      dryMix.outputVolume = 1.0
+      wetMix.outputVolume = 0.0
+      panMix.outputVolume = 1.0
+      return
+    }
+
+    // Плавная кривая посыла в зал (0…0.58) и деликатное приглушение сухого сигнала на максимуме,
+    // чтобы не было перегруза/клиппинга и сохранялась кристальная читаемость трека.
+    let wetLevel = pow(a, 1.35) * 0.58
+    let dryLevel = 1.0 - 0.18 * pow(a, 1.5)
+    wetMix.outputVolume = Float(wetLevel)
+    dryMix.outputVolume = Float(dryLevel)
+    panMix.outputVolume = 1.0
   }
 
   func setSpatial(_ on: Bool) {

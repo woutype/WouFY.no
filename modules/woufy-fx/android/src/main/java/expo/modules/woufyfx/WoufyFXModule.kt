@@ -304,13 +304,13 @@ internal class AndroidFXPlayer(
       }
       reverb?.let { rev ->
         rev.preset = when {
-          reverbAmount > 65f -> PresetReverb.PRESET_LARGEHALL
-          reverbAmount > 35f -> PresetReverb.PRESET_MEDIUMHALL
-          else -> PresetReverb.PRESET_SMALLROOM
+          reverbAmount > 35f -> PresetReverb.PRESET_LARGEHALL
+          else -> PresetReverb.PRESET_MEDIUMHALL
         }
         rev.enabled = true
         player.attachAuxEffect(rev.id)
-        val sendLevel = (reverbAmount / 100f).coerceIn(0f, 1f)
+        val norm = (reverbAmount / 100f).coerceIn(0f, 1f)
+        val sendLevel = norm.pow(1.3f) * 0.65f
         player.setAuxEffectSendLevel(sendLevel)
       }
     } catch (_: Throwable) {}
@@ -364,7 +364,7 @@ class WoufyFXModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("WoufyFX")
 
-    Events("onEnded", "onSamples", "onRemote", "onLibraryChanged")
+    Events("onEnded", "onSamples", "onRemote", "onLibraryChanged", "onVideoProgress")
 
     Function("isAvailable") {
       return@Function true
@@ -477,25 +477,20 @@ class WoufyFXModule : Module() {
 
     Function("hapticTransient") { intensity: Double, sharpness: Double ->
       triggerHaptic(
-        durationMs = if (sharpness > 0.6) 14L else 22L,
-        amplitude = (intensity * 255.0).toInt().coerceIn(25, 255)
+        durationMs = if (sharpness > 0.6) 14L else 20L,
+        amplitude = (intensity * 210.0).toInt().coerceIn(30, 210)
       )
     }
 
     Function("hapticThump") { intensity: Double ->
       triggerHaptic(
-        durationMs = 34L,
-        amplitude = (intensity * 255.0).toInt().coerceIn(50, 255)
+        durationMs = 30L,
+        amplitude = (intensity * 255.0).toInt().coerceIn(60, 255)
       )
     }
 
-    Function("hapticChannel") { channel: Int, level: Double, _sharpness: Double ->
-      if (channel == 0 && level > 0.55) {
-        triggerHaptic(
-          durationMs = 18L,
-          amplitude = (level * 180.0).toInt().coerceIn(20, 200)
-        )
-      }
+    Function("hapticChannel") { _channel: Int, _level: Double, _sharpness: Double ->
+      // Непрерывные каналы на Android отключены, чтобы не вызывать спам вибрацией
     }
 
     // ── Аудиосессия, MediaSession и шторка уведомлений Android ──
@@ -669,6 +664,70 @@ class WoufyFXModule : Module() {
           addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         ctx.startActivity(installIntent)
+        true
+      } catch (_: Throwable) {
+        false
+      }
+    }
+
+    AsyncFunction("generateVideoCard") { params: Map<String, Any>, promise: Promise ->
+      val ctx = appContext.reactContext
+      if (ctx == null) {
+        promise.reject("E_VIDEO", "Контекст недоступен", null)
+        return@AsyncFunction
+      }
+      Thread {
+        try {
+          val uri = VideoCardGeneratorAndroid.generate(ctx, params) { p ->
+            sendEvent("onVideoProgress", mapOf("progress" to p))
+          }
+          promise.resolve(uri)
+        } catch (t: Throwable) {
+          promise.reject("E_VIDEO", t.message ?: "Ошибка генерации видео", t)
+        }
+      }.start()
+    }
+
+    AsyncFunction("generateImageCard") { params: Map<String, Any>, promise: Promise ->
+      val ctx = appContext.reactContext
+      if (ctx == null) {
+        promise.reject("E_IMAGE", "Контекст недоступен", null)
+        return@AsyncFunction
+      }
+      Thread {
+        try {
+          val uri = VideoCardGeneratorAndroid.generateImage(ctx, params)
+          promise.resolve(uri)
+        } catch (t: Throwable) {
+          promise.reject("E_IMAGE", t.message ?: "Ошибка генерации карточки", t)
+        }
+      }.start()
+    }
+
+    AsyncFunction("shareFile") { fileUri: String ->
+      val ctx = appContext.reactContext ?: return@AsyncFunction false
+      val file = parseLocalFile(fileUri)
+      if (!file.exists()) return@AsyncFunction false
+      return@AsyncFunction try {
+        val contentUri = FileProvider.getUriForFile(
+          ctx,
+          "${ctx.packageName}.woufyfx.provider",
+          file
+        )
+        val mime = if (file.name.endsWith(".png", ignoreCase = true) || file.name.endsWith(".jpg", ignoreCase = true)) {
+          "image/png"
+        } else {
+          "video/mp4"
+        }
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+          type = mime
+          putExtra(Intent.EXTRA_STREAM, contentUri)
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(shareIntent, "Поделиться WouFY").apply {
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        ctx.startActivity(chooser)
         true
       } catch (_: Throwable) {
         false

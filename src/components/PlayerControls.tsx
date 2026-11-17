@@ -162,7 +162,7 @@ export const PlayerControls: React.FC<Props> = ({
       <View style={styles.volumeRow}>
         <Ionicons name="volume-low" size={16} color={colors.text3} />
         <View style={{ flex: 1, marginHorizontal: 10 }}>
-          <Scrubber value={state.volume} max={1} height={4} onScrub={(v) => engine.setVolume(v)} onCommit={(v) => engine.setVolume(v)} />
+          <Scrubber value={state.volume} max={1} height={4} relative onScrub={(v) => engine.setVolume(v)} onCommit={(v) => engine.setVolume(v)} />
         </View>
         <Ionicons name="volume-high" size={16} color={colors.text3} />
       </View>

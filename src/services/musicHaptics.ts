@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { sampleBus } from './sampleBus';
 import { WoufyFX } from '../../modules/woufy-fx';
@@ -18,7 +19,7 @@ import { WoufyFX } from '../../modules/woufy-fx';
  *  • при известной сетке битов удары бочки «притягиваются» к долям (внедолевые — только если очень сильные);
  *  • глобальный лимитер: при плотной музыке пороги автоматически растут (никакого «жужжания» на каждую ноту);
  *  • пока бьёт толчок, гул на 80 мс приглушается, чтобы удар ощущался отчётливо.
- * Без нативного модуля — запасной режим на expo-haptics (только бочка и снейр, без непрерывных каналов).
+ * На Android / без потоковых аудио-семплов автоматически включается ритмичный режим по сетке битов (BPM + фаза) без спама вибрацией.
  */
 const HOP = 512;
 const SR = 44100;
@@ -97,6 +98,13 @@ class MusicHaptics {
   private sent0 = -1;
   private sent1 = -1;
 
+  // Запасной ритм-движок для Android (где нет потоковых PCM-семплов из expo-audio)
+  private beatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastBeatIdx = -1;
+  private lastBeatPos = -1;
+  private lastBeatAt = 0;
+  private gotRealSamples = false;
+
   configure(opts: { getPosition?: () => number; getGrid?: () => Grid | undefined }) {
     if (opts.getPosition) this.getPos = opts.getPosition;
     if (opts.getGrid) this.getGrid = opts.getGrid;
@@ -106,14 +114,22 @@ class MusicHaptics {
     if (on === this.enabled) return;
     this.enabled = on;
     if (on) {
+      this.gotRealSamples = false;
       try {
         this.native = Boolean(WoufyFX && WoufyFX.hapticsSupported());
         if (this.native) WoufyFX!.hapticsStart();
       } catch {
         this.native = false;
       }
-      this.unsub = sampleBus.subscribe((f) => this.feed(f));
+      if (Platform.OS !== 'android') {
+        this.unsub = sampleBus.subscribe((f) => {
+          this.gotRealSamples = true;
+          this.feed(f);
+        });
+      }
+      this.startBeatFallback();
     } else {
+      this.stopBeatFallback();
       this.unsub?.();
       this.unsub = null;
       this.reset();
@@ -126,6 +142,75 @@ class MusicHaptics {
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  /**
+   * Ритмичный тактильный отклик по сетке битов (BPM + фаза) для Android и устройств без PCM-потока.
+   * Срабатывает строго на сильных долях (1, 3) и лёгким щелчком на 2, 4 с защитой от частого спама.
+   */
+  private startBeatFallback() {
+    this.stopBeatFallback();
+    this.lastBeatIdx = -1;
+    this.lastBeatPos = -1;
+    this.lastBeatAt = 0;
+    const startedAt = Date.now();
+
+    this.beatTimer = setInterval(() => {
+      if (!this.enabled) return;
+      // На iOS если идут реальные аудио-семплы, этот фолбэк не вмешивается
+      if (this.gotRealSamples) return;
+      if (Platform.OS !== 'android' && Date.now() - startedAt < 500) return;
+
+      const pos = this.getPos?.();
+      if (pos === undefined || !isFinite(pos) || pos <= 0.05) return;
+      // Если позиция не движется (пауза / буферизация) — молчим
+      if (Math.abs(pos - this.lastBeatPos) < 0.005) return;
+      this.lastBeatPos = pos;
+
+      const grid = this.getGrid?.();
+      const bpm = grid && grid.bpm >= 55 && grid.bpm <= 200 ? grid.bpm : 120;
+      const phase = grid ? grid.phase : 0;
+      const period = 60 / bpm;
+
+      const beatIdx = Math.floor((pos - phase) / period + 0.06);
+      if (beatIdx === this.lastBeatIdx) return;
+      this.lastBeatIdx = beatIdx;
+
+      const now = Date.now();
+      // Минимум 230 мс между ударами, чтобы на быстрых треках не было сплошного жужжания
+      if (now - this.lastBeatAt < 230) return;
+      this.lastBeatAt = now;
+
+      const isDownbeat = Math.abs(beatIdx) % 2 === 0;
+      if (isDownbeat) {
+        if (this.native) {
+          try {
+            WoufyFX!.hapticThump(0.85);
+          } catch {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
+          }
+        } else {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
+        }
+      } else {
+        if (this.native) {
+          try {
+            WoufyFX!.hapticTransient(0.55, 0.78);
+          } catch {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+          }
+        } else {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+        }
+      }
+    }, 40);
+  }
+
+  private stopBeatFallback() {
+    if (this.beatTimer) {
+      clearInterval(this.beatTimer);
+      this.beatTimer = null;
     }
   }
 
@@ -142,6 +227,8 @@ class MusicHaptics {
     this.recent = [];
     this.lvl0 = this.lvl1 = 0;
     this.sent0 = this.sent1 = -1;
+    this.lastBeatIdx = -1;
+    this.lastBeatPos = -1;
   }
 
   private feed(frames: ArrayLike<number>) {

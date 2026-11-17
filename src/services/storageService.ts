@@ -129,6 +129,35 @@ export async function cleanupOrphanCovers(activeCoverNames: Set<string>): Promis
 }
 
 /**
+ * Удаляет кэшированные .lrc тексты из lyrics_cache/, если соответствующих треков больше нет
+ */
+export async function cleanupOrphanLyrics(activeLrcNames: Set<string>): Promise<number> {
+  let freedBytes = 0;
+  try {
+    const dir = `${DATA_DIR}lyrics_cache/`;
+    const info = await FileSystem.getInfoAsync(dir);
+    if (!info.exists) return 0;
+    const files = await FileSystem.readDirectoryAsync(dir);
+    for (const file of files) {
+      if (!activeLrcNames.has(file)) {
+        try {
+          const fInfo = await FileSystem.getInfoAsync(`${dir}${file}`);
+          if (fInfo.exists) {
+            freedBytes += fInfo.size ?? 0;
+            await FileSystem.deleteAsync(`${dir}${file}`, { idempotent: true });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[storageService] cleanupOrphanLyrics error:', e);
+  }
+  return freedBytes;
+}
+
+/**
  * Очистка корзины iOS (.Trash), куда «Файлы» отправляют удалённую музыку
  */
 export async function cleanupTrash(): Promise<number> {

@@ -11,7 +11,9 @@ import { sampleBus } from './src/services/sampleBus';
 import { musicHaptics } from './src/services/musicHaptics';
 import { bpmService } from './src/services/bpm';
 import { volumeService } from './src/services/volumeService';
-import { flushState, getState, loadCachedTracks, loadState, patchState, saveCachedTracks } from './src/services/library';
+import { flushState, getState, loadCachedTracks, loadState, patchState, resolveTrackUri, saveCachedTracks } from './src/services/library';
+import { deriveFx } from './src/services/audioEngine';
+import { WoufyFX } from './src/services/fxPlayer';
 import { useAudioEngine, useEngineState } from './src/hooks/useAudioController';
 import { useMetrics } from './src/layout';
 import { DEFAULT_DJ, DEFAULT_FX, DJSettings, FxSettings, TrackFile } from './src/types';
@@ -40,12 +42,15 @@ function Root() {
   const [expanded, setExpanded] = useState(true);
   const [search, setSearch] = useState('');
   const [searchLyrics, setSearchLyrics] = useState(false);
+  const [onlyWithLyrics, setOnlyWithLyrics] = useState(false);
+  const [onlyWithArtwork, setOnlyWithArtwork] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showTagEditor, setShowTagEditor] = useState(false);
   const [dj, setDj] = useState<DJSettings>(DEFAULT_DJ);
   const [fx, setFxState] = useState<FxSettings>(DEFAULT_FX);
   const [hapticsOn, setHapticsOn] = useState(false);
   const [sheetScrollEnabled, setSheetScrollEnabled] = useState(true);
+  const [exportingFx, setExportingFx] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const updatePromptShown = useRef(false);
   const libRef = useRef<Map<string, TrackFile>>(new Map());
@@ -205,11 +210,14 @@ function Root() {
     musicHaptics.setEnabled(hapticsOn && state.isPlaying);
   }, [hapticsOn, state.isPlaying]);
 
-  // поиск применяется к самой очереди (с небольшой задержкой, чтобы не пересобирать её на каждую букву)
+  // поиск и фильтры применяются к самой очереди (с небольшой задержкой, чтобы не пересобирать её на каждую букву)
   useEffect(() => {
-    const t = setTimeout(() => engine.setFilter({ query: search, searchLyrics }), search ? 160 : 0);
+    const t = setTimeout(
+      () => engine.setFilter({ query: search, searchLyrics, onlyWithLyrics, onlyWithArtwork }),
+      search ? 160 : 0
+    );
     return () => clearTimeout(t);
-  }, [engine, search, searchLyrics]);
+  }, [engine, search, searchLyrics, onlyWithLyrics, onlyWithArtwork]);
 
   const updateDj = (s: DJSettings) => {
     setDj(s);
@@ -332,21 +340,83 @@ function Root() {
     [engine]
   );
 
+  const shareFileUri = useCallback(async (uri: string, target: TrackFile, suffix = '') => {
+    try {
+      const label = `${target.artist} — ${target.title}${suffix}`;
+      await Share.share(
+        Platform.OS === 'ios'
+          ? { url: uri, title: label }
+          : { message: label, title: target.title }
+      );
+    } catch (e) {
+      console.warn('Share error:', e);
+    }
+  }, []);
+
   const handleShareTrack = useCallback(
     async (t?: TrackFile) => {
       const target = t ?? state.queue[state.index];
       if (!target) return;
-      try {
-        await Share.share(
-          Platform.OS === 'ios'
-            ? { url: target.uri, title: `${target.artist} — ${target.title}` }
-            : { message: `${target.artist} — ${target.title}`, title: target.title }
-        );
-      } catch (e) {
-        console.warn('Share error:', e);
+
+      const derived = deriveFx(fx);
+      const activeLabels: string[] = [];
+      if (fx.enabled) {
+        if (fx.slowed) activeLabels.push(fx.slowedReverb ? 'Slowed + Reverb' : 'Slowed');
+        else if (fx.speedUp) activeLabels.push('Speed Up');
+        if (fx.reverb && !fx.slowed) activeLabels.push('Реверберация');
+        if (fx.spatial8d) activeLabels.push('8D аудио');
       }
+      const hasActiveFx =
+        fx.enabled && (derived.speed !== 1 || derived.reverb > 0 || derived.spatial);
+
+      if (!hasActiveFx) {
+        await shareFileUri(resolveTrackUri(target.uri || target.id), target);
+        return;
+      }
+
+      const fxName = activeLabels.join(' · ') || 'Звуковые эффекты';
+      Alert.alert(
+        'Поделиться треком',
+        `${target.artist} — ${target.title}\nВключён эффект: ${fxName}`,
+        [
+          {
+            text: `С эффектом (${fxName})`,
+            onPress: async () => {
+              const nativeFx = WoufyFX;
+              if (!nativeFx || typeof nativeFx.exportTrackWithFx !== 'function') {
+                Alert.alert(
+                  'Экспорт с эффектом',
+                  'Рендер аудиофайла с эффектами доступен в нативной сборке iOS (.ipa). Отправляем оригинальный файл.',
+                  [{ text: 'ОК', onPress: () => shareFileUri(resolveTrackUri(target.uri || target.id), target) }]
+                );
+                return;
+              }
+              setExportingFx(true);
+              try {
+                const outUri = await nativeFx.exportTrackWithFx({
+                  uri: resolveTrackUri(target.uri || target.id),
+                  title: `${target.artist} - ${target.title}`,
+                  speed: derived.speed,
+                  reverbAmount: derived.reverb,
+                  spatial8d: derived.spatial,
+                });
+                setExportingFx(false);
+                await shareFileUri(outUri, target, ` (${fxName})`);
+              } catch (e: any) {
+                setExportingFx(false);
+                Alert.alert('Ошибка обработки', e?.message || 'Не удалось применить эффект к файлу');
+              }
+            },
+          },
+          {
+            text: 'Без эффекта (оригинал)',
+            onPress: () => shareFileUri(resolveTrackUri(target.uri || target.id), target),
+          },
+          { text: 'Отмена', style: 'cancel' },
+        ]
+      );
     },
-    [state.queue, state.index]
+    [state.queue, state.index, fx, shareFileUri]
   );
 
   /* ───────── BPM ───────── */
@@ -435,7 +505,13 @@ function Root() {
             onSortChange={(m) => engine.setFilter({ sort: m })}
             searchLyrics={searchLyrics}
             onSearchLyricsChange={setSearchLyrics}
+            onlyWithLyrics={onlyWithLyrics}
+            onOnlyWithLyricsChange={setOnlyWithLyrics}
+            onlyWithArtwork={onlyWithArtwork}
+            onOnlyWithArtworkChange={setOnlyWithArtwork}
             pinned={state.pinned}
+            customReordered={state.customReordered}
+            onResetCustomReorder={() => engine.resetCustomReorder()}
             onPlay={(i, track) => (track ? engine.playTrack(track) : engine.playIndex(i))}
             onPlayTrackWithSeek={(track, seekTime) => engine.playTrack(track, seekTime)}
             onMove={(a, b) => engine.moveQueueItem(a, b)}
@@ -444,6 +520,7 @@ function Root() {
             }}
             bottomPad={bottomPad}
             scrollToCurrentTrigger={scrollToCurrentTrigger}
+            onGestureActiveChange={(active) => setSheetScrollEnabled(!active)}
           />
           <LyricsView
             engine={engine}
@@ -506,6 +583,15 @@ function Root() {
         updateInfo={updateInfo}
         onCheckUpdate={handleCheckUpdate}
       />
+
+      {exportingFx && (
+        <View style={styles.fxExportOverlay} pointerEvents="auto">
+          <View style={styles.fxExportPill}>
+            <ActivityIndicator size="small" color={colors.text} />
+            <Text style={styles.fxExportText}>Применяем звуковой эффект…</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -522,4 +608,27 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   loading: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 12 },
   loadingText: { color: colors.text2, fontSize: 14, fontWeight: '500' },
+  fxExportOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 999,
+  },
+  fxExportPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 999,
+    backgroundColor: 'rgba(24,24,28,0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  fxExportText: { color: colors.text, fontSize: 14, fontWeight: '700' },
 });

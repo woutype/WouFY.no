@@ -275,11 +275,11 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
             >
               {/* Обложка */}
               <View style={styles.coverSection}>
-                <CoverArt uri={artworkUri} size={110} radius={18} style={styles.coverPreview} />
+                <CoverArt uri={artworkUri} size={110} radius={55} style={styles.coverPreview} />
                 <View style={styles.coverActions}>
                   {/* Выбрать из галереи */}
                   <PressableScale onPress={handlePickDeviceImage} scaleTo={0.96} haptic="light">
-                    <Glass radius={14} style={styles.actionGlass}>
+                    <Glass radius={19} style={styles.actionGlass}>
                       <View style={styles.actionBtnInner}>
                         <Ionicons name="images-outline" size={17} color={colors.accent} />
                         <Text style={styles.actionBtnText}>Выбрать из галереи</Text>
@@ -294,7 +294,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
                     haptic="light"
                     disabled={searching || downloading}
                   >
-                    <Glass radius={14} style={styles.actionGlass}>
+                    <Glass radius={19} style={styles.actionGlass}>
                       <View style={styles.actionBtnInner}>
                         {searching ? (
                           <ActivityIndicator size="small" color={colors.accent} />
@@ -353,7 +353,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
                 {/* Название */}
                 <View style={styles.fieldBlock}>
                   <Text style={styles.fieldLabel}>Название трека</Text>
-                  <Glass radius={14} style={styles.inputGlass}>
+                  <Glass radius={23} style={styles.inputGlass}>
                     <View style={styles.inputRow}>
                       <TextInput
                         style={styles.input}
@@ -375,7 +375,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
                 {/* Артист */}
                 <View style={styles.fieldBlock}>
                   <Text style={styles.fieldLabel}>Артист / Исполнители</Text>
-                  <Glass radius={14} style={styles.inputGlass}>
+                  <Glass radius={23} style={styles.inputGlass}>
                     <View style={styles.inputRow}>
                       <TextInput
                         style={styles.input}
@@ -405,7 +405,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
                 {/* Альбом */}
                 <View style={styles.fieldBlock}>
                   <Text style={styles.fieldLabel}>Альбом</Text>
-                  <Glass radius={14} style={styles.inputGlass}>
+                  <Glass radius={23} style={styles.inputGlass}>
                     <View style={styles.inputRow}>
                       <TextInput
                         style={styles.input}
@@ -428,7 +428,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
                 <View style={styles.rowTwoCols}>
                   <View style={[styles.fieldBlock, { flex: 1 }]}>
                     <Text style={styles.fieldLabel}>Год выпуска</Text>
-                    <Glass radius={14} style={styles.inputGlass}>
+                    <Glass radius={23} style={styles.inputGlass}>
                       <TextInput
                         style={styles.input}
                         value={year}
@@ -443,7 +443,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
 
                   <View style={[styles.fieldBlock, { flex: 1.4 }]}>
                     <Text style={styles.fieldLabel}>Жанр</Text>
-                    <Glass radius={14} style={styles.inputGlass}>
+                    <Glass radius={23} style={styles.inputGlass}>
                       <TextInput
                         style={styles.input}
                         value={genre}
@@ -458,7 +458,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
                 {/* Номер дорожки */}
                 <View style={styles.fieldBlock}>
                   <Text style={styles.fieldLabel}>Номер дорожки в альбоме</Text>
-                  <Glass radius={14} style={styles.inputGlass}>
+                  <Glass radius={23} style={styles.inputGlass}>
                     <TextInput
                       style={styles.input}
                       value={trackNumber}
@@ -506,7 +506,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
                       )}
                     </View>
                   </View>
-                  <Glass radius={16} style={styles.lyricsGlass}>
+                  <Glass radius={22} style={styles.lyricsGlass}>
                     <TextInput
                       style={styles.lyricsInput}
                       value={lyrics}
@@ -576,9 +576,9 @@ const styles = StyleSheet.create({
   },
   saveBtn: {
     backgroundColor: colors.accent,
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     paddingVertical: 7,
-    borderRadius: 16,
+    borderRadius: 999,
   },
   saveBtnText: {
     ...type.headline,
@@ -660,7 +660,7 @@ const styles = StyleSheet.create({
   onlineThumb: {
     width: 84,
     height: 84,
-    borderRadius: 12,
+    borderRadius: 16,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
@@ -733,9 +733,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.08)',
   },
   lyricsChipText: {

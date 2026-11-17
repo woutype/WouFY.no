@@ -1,8 +1,9 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { DATA_DIR, ensureDataDir } from './library';
 import { TrackFile } from '../types';
+import { splitArtists } from './queueOrder';
 
-const AVATARS_FILE = `${DATA_DIR}artist_avatars_v3.json`;
+const AVATARS_FILE = `${DATA_DIR}artist_avatars_v4.json`;
 
 // Официальные проверенные портреты артистов из Apple Music Connect (мгновенная загрузка без задержек)
 const VERIFIED_ARTIST_AVATARS: Record<string, string> = {
@@ -29,11 +30,54 @@ function normalizeArtist(artist: string): string {
     .toLowerCase();
 }
 
+function findArtistTracks(artistNorm: string, tracks?: TrackFile[]): TrackFile[] {
+  if (!tracks || tracks.length === 0) return [];
+  return tracks.filter(
+    (t) =>
+      normalizeArtist(t.artist) === artistNorm ||
+      splitArtists(t.artist).some((a) => a.trim().toLowerCase() === artistNorm)
+  );
+}
+
+async function fetchWithTimeout(url: string, timeoutMs = 6000, headers?: Record<string, string>): Promise<Response> {
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { headers, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function extractAppleMusicPortrait(artistLinkUrl: string): Promise<string | null> {
+  try {
+    const res = await fetchWithTimeout(artistLinkUrl, 6000, { 'User-Agent': 'Mozilla/5.0' });
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    const ogMatch =
+      html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    const imgUrl = ogMatch?.[1];
+
+    if (
+      imgUrl &&
+      !imgUrl.includes('apple-music-share') &&
+      !imgUrl.includes('default_') &&
+      (imgUrl.includes('AMCArtistImages') || imgUrl.includes('Features') || imgUrl.includes('image/thumb/'))
+    ) {
+      return imgUrl.replace(/\/\d+x\d+.*?(\.(jpg|png|webp))$/i, '/500x500bb.jpg');
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 export async function initArtistAvatars(): Promise<void> {
   if (isLoaded) return;
   isLoaded = true;
 
-  // Инициализируем проверенными официальными портретами
   for (const [k, v] of Object.entries(VERIFIED_ARTIST_AVATARS)) {
     memoryCache.set(k, v);
   }
@@ -45,18 +89,17 @@ export async function initArtistAvatars(): Promise<void> {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
         for (const [k, v] of Object.entries(parsed)) {
-          if (typeof v === 'string' && !VERIFIED_ARTIST_AVATARS[k]) {
+          if (typeof v === 'string' && v.length > 0 && !VERIFIED_ARTIST_AVATARS[k]) {
             memoryCache.set(k, v);
           }
         }
       }
     }
-  } catch (e) {
+  } catch {
     // игнорируем ошибку чтения
   }
 }
 
-// Запускаем асинхронную инициализацию сразу при импорте
 initArtistAvatars().catch(() => {});
 
 function scheduleSave(): void {
@@ -66,10 +109,10 @@ function scheduleSave(): void {
       await ensureDataDir();
       const obj: Record<string, string> = {};
       for (const [k, v] of memoryCache.entries()) {
-        obj[k] = v;
+        if (v && v.length > 0) obj[k] = v;
       }
       await FileSystem.writeAsStringAsync(AVATARS_FILE, JSON.stringify(obj));
-    } catch (e) {
+    } catch {
       // игнорируем ошибку сохранения
     }
   }, 800);
@@ -88,10 +131,12 @@ export function getCachedArtistAvatar(artist: string): string | null {
 }
 
 /**
- * Загрузить официальную аватарку артиста из проверенного источника (Apple Music Connect)
- * Без фолбэка на обложки треков — только официальные портреты исполнителей!
+ * Загрузить официальную аватарку артиста:
+ * 1) Apple Music Connect (с уточнением по трекам библиотеки, чтобы исключить тёзок и чужие фото)
+ * 2) Запасной источник: Deezer API (строгий поиск по артисту + треку)
+ * 3) Локальный фолбэк: обложка трека артиста из библиотеки, если официального портрета нет
  */
-export async function getArtistAvatar(artist: string, _tracks?: TrackFile[]): Promise<string | null> {
+export async function getArtistAvatar(artist: string, tracks?: TrackFile[]): Promise<string | null> {
   const norm = normalizeArtist(artist);
   if (!norm) return null;
 
@@ -102,85 +147,104 @@ export async function getArtistAvatar(artist: string, _tracks?: TrackFile[]): Pr
 
   if (memoryCache.has(norm)) {
     const val = memoryCache.get(norm);
-    return val && val.length > 0 ? val : null;
+    if (val && val.length > 0) return val;
   }
 
   const clean = artist.split(/[\/,&]|(?:\b(?:feat|ft)\.?\b)/i)[0].trim();
-  if (!clean) {
-    memoryCache.set(norm, '');
-    return null;
-  }
+  if (!clean) return null;
 
-  // 1. Поиск официального портрета через Apple Music Connect (iTunes Search RU + профиль артиста)
+  const artistTracks = findArtistTracks(norm, tracks);
+  const sampleTitle = artistTracks.find((t) => t.title && t.title.trim().length > 0)?.title?.trim();
+
+  // 1. Основной источник: Apple Music Connect
   try {
-    const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(clean)}&entity=musicArtist&country=RU&limit=10`;
-    const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 6000);
-    const res = await fetch(itunesUrl, { signal: ctrl.signal });
-    clearTimeout(timeout);
+    let artistLinkUrl: string | undefined;
 
-    if (res.ok) {
-      const data = await res.json();
-      const results: any[] = data?.results || [];
-      const match =
-        results.find((r) => r.artistName === clean) ||
-        results.find(
-          (r) =>
-            r.artistName?.toLowerCase() === clean.toLowerCase() &&
-            (r.primaryGenreName?.includes('Хип') || r.primaryGenreName?.includes('Hip') || r.primaryGenreName?.includes('Поп'))
-        ) ||
-        results.find((r) => r.artistName?.toLowerCase() === clean.toLowerCase()) ||
-        results.find((r) => r.artistName?.toLowerCase().includes(clean.toLowerCase())) ||
-        results[0];
+    // Если есть трек этого артиста — сначала пробуем найти точного артиста через его песню (защита от однофамильцев и чужих фото)
+    if (sampleTitle) {
+      try {
+        const songUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(`${clean} ${sampleTitle}`)}&entity=song&country=RU&limit=5`;
+        const songRes = await fetchWithTimeout(songUrl, 5000);
+        if (songRes.ok) {
+          const songData = await songRes.json();
+          const songs: any[] = songData?.results || [];
+          const songMatch = songs.find(
+            (s) => s.artistName && s.artistName.trim().toLowerCase() === clean.toLowerCase() && s.artistViewUrl
+          );
+          if (songMatch?.artistViewUrl) {
+            artistLinkUrl = songMatch.artistViewUrl;
+          }
+        }
+      } catch {
+        // переходим к обычному поиску артиста
+      }
+    }
 
-      if (match?.artistLinkUrl) {
-        const pageCtrl = new AbortController();
-        const pageTimeout = setTimeout(() => pageCtrl.abort(), 6000);
-        const html = await fetch(match.artistLinkUrl, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: pageCtrl.signal,
-        }).then((r) => r.text());
-        clearTimeout(pageTimeout);
+    if (!artistLinkUrl) {
+      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(clean)}&entity=musicArtist&country=RU&limit=10`;
+      const res = await fetchWithTimeout(itunesUrl, 6000);
+      if (res.ok) {
+        const data = await res.json();
+        const results: any[] = data?.results || [];
+        // Только строгое совпадение имени артиста (никакого случайного results[0]!)
+        const exactMatches = results.filter(
+          (r) => r.artistName && r.artistName.trim().toLowerCase() === clean.toLowerCase()
+        );
+        const match =
+          exactMatches.find((r) => r.artistName === clean) ||
+          exactMatches.find(
+            (r) =>
+              r.primaryGenreName?.includes('Хип') ||
+              r.primaryGenreName?.includes('Hip') ||
+              r.primaryGenreName?.includes('Поп') ||
+              r.primaryGenreName?.includes('Рок')
+          ) ||
+          exactMatches[0];
 
-        const ogMatch = html.match(/<meta property=["']og:image["'] content=["']([^"']+)["']/i);
-        let imgUrl = ogMatch?.[1];
-
-        // Отсекаем стандартные заглушки без фото
-        if (
-          imgUrl &&
-          !imgUrl.includes('apple-music-share') &&
-          !imgUrl.includes('default_') &&
-          (imgUrl.includes('AMCArtistImages') || imgUrl.includes('Features') || imgUrl.includes('image/thumb/'))
-        ) {
-          // Получаем квадратный HD-портрет артиста 500x500
-          const squareUrl = imgUrl.replace(/\/\d+x\d+.*?(\.(jpg|png|webp))$/i, '/500x500bb.jpg');
-          memoryCache.set(norm, squareUrl);
-          scheduleSave();
-          return squareUrl;
+        if (match?.artistLinkUrl) {
+          artistLinkUrl = match.artistLinkUrl;
         }
       }
     }
-  } catch (e) {
+
+    if (artistLinkUrl) {
+      const squareUrl = await extractAppleMusicPortrait(artistLinkUrl);
+      if (squareUrl) {
+        memoryCache.set(norm, squareUrl);
+        scheduleSave();
+        return squareUrl;
+      }
+    }
+  } catch {
     // сетевая ошибка Apple Music
   }
 
-  // 2. Дополнительный источник: Deezer API (только при строгом совпадении имени артиста)
+  // 2. Запасной источник: Deezer API (строгий поиск по имени + поиск по треку)
   try {
-    const deezerUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(clean)}`;
-    const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 5000);
-    const res = await fetch(deezerUrl, { signal: ctrl.signal });
-    clearTimeout(timeout);
-
+    const deezerUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(clean)}&limit=10`;
+    const res = await fetchWithTimeout(deezerUrl, 5000);
     if (res.ok) {
       const json = await res.json();
-      const first = json.data?.[0];
-      if (
-        first &&
-        first.name &&
-        first.name.toLowerCase() === clean.toLowerCase()
-      ) {
-        const pic = first.picture_big || first.picture_medium;
+      const list: any[] = json?.data || [];
+      const exact = list.find((item) => item?.name && item.name.trim().toLowerCase() === clean.toLowerCase());
+      const pic = exact?.picture_xl || exact?.picture_big || exact?.picture_medium;
+      if (pic && !pic.includes('2e018122cb56986277102d2041a592c8')) {
+        memoryCache.set(norm, pic);
+        scheduleSave();
+        return pic;
+      }
+    }
+
+    if (sampleTitle) {
+      const dzTrackUrl = `https://api.deezer.com/search?q=${encodeURIComponent(`artist:"${clean}" track:"${sampleTitle}"`)}&limit=5`;
+      const trRes = await fetchWithTimeout(dzTrackUrl, 5000);
+      if (trRes.ok) {
+        const trJson = await trRes.json();
+        const trList: any[] = trJson?.data || [];
+        const matched = trList.find(
+          (item) => item?.artist?.name && item.artist.name.trim().toLowerCase() === clean.toLowerCase()
+        );
+        const pic = matched?.artist?.picture_xl || matched?.artist?.picture_big || matched?.artist?.picture_medium;
         if (pic && !pic.includes('2e018122cb56986277102d2041a592c8')) {
           memoryCache.set(norm, pic);
           scheduleSave();
@@ -188,13 +252,15 @@ export async function getArtistAvatar(artist: string, _tracks?: TrackFile[]): Pr
         }
       }
     }
-  } catch (e) {
+  } catch {
     // игнорируем
   }
 
-  // Если официальный портрет не найден — НЕ подставляем случайные обложки треков!
-  // Запоминаем пустую строку, чтобы рендерить стильный монохромный силуэт
-  memoryCache.set(norm, '');
-  scheduleSave();
+  // 3. Финальный запасной вариант: обложка трека этого артиста из библиотеки пользователя
+  const localArt = artistTracks.find((t) => t.artworkUri && t.artworkUri.length > 0)?.artworkUri;
+  if (localArt) {
+    return localArt;
+  }
+
   return null;
 }

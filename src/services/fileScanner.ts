@@ -1,11 +1,13 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { parseAudioTags } from './id3Parser';
-import { loadCachedTracks, saveCachedTracks, DATA_DIR, LEGACY_DIR, ensureDataDir, normalizeTrackId, resolveTrackUri } from './library';
+import { loadCachedTracks, saveCachedTracks, pruneDeletedTrackState, DATA_DIR, LEGACY_DIR, ensureDataDir, normalizeTrackId, resolveTrackUri } from './library';
 import { AudioExtension, TrackFile } from '../types';
 import { WoufyFX } from '../../modules/woufy-fx';
-import { cleanupOrphanCovers, cleanupTrash, cleanupTempCache } from './storageService';
+import { cleanupOrphanCovers, cleanupOrphanLyrics, cleanupTrash, cleanupTempCache } from './storageService';
+import { cachePathFor } from './lyrics';
 import { statsService } from './statsService';
 import { needsThumb, THUMB_PX } from './artwork';
+import { seedExpoGoTestTracks } from './devTestTracks';
 
 /** Основная папка для музыки (пользователь может класть треки и сюда, и прямо в корень WouFY.no) */
 export const MUSIC_DIR_NAME = 'Music';
@@ -167,6 +169,9 @@ function quickTrack(f: RawFoundFile, id: string, ext: AudioExtension, lrcUri?: s
 
 async function doScan(): Promise<ScanResult> {
   await ensureAppFolders();
+  if (__DEV__ && !WoufyFX) {
+    await seedExpoGoTestTracks(musicDir());
+  }
 
   const cachedTracks = await loadCachedTracks();
   const cacheMap = new Map<string, TrackFile>(cachedTracks.map((t) => [t.id, t]));
@@ -271,9 +276,18 @@ async function doScan(): Promise<ScanResult> {
   // а корзина .Trash и временные кэши очищаются без бесконечного накопления
   // (сиротские обложки чистит enrichTracks после того, как миниатюры дописаны — иначе свежие файлы попали бы под удаление)
   setTimeout(() => {
+    const validIds = new Set(tracks.map((t) => t.id));
+    const activeLrcNames = new Set(
+      tracks.map((t) => cachePathFor(t).split('/').pop()).filter((n): n is string => Boolean(n))
+    );
     cleanupTrash().catch(() => {});
     cleanupTempCache().catch(() => {});
-    statsService.cleanupOrphanSessions(new Set(tracks.map((t) => t.id)));
+    cleanupOrphanLyrics(activeLrcNames).catch(() => {});
+    if (removed > 0) {
+      gcCovers(tracks);
+    }
+    pruneDeletedTrackState(validIds).catch(() => {});
+    statsService.cleanupOrphanSessions(validIds);
   }, 4000);
 
   return { tracks, added, removed, untagged };

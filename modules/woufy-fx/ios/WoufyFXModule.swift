@@ -53,7 +53,7 @@ public class WoufyFXModule: Module {
   public func definition() -> ModuleDefinition {
     Name("WoufyFX")
 
-    Events("onEnded", "onSamples", "onRemote", "onLibraryChanged")
+    Events("onEnded", "onSamples", "onRemote", "onLibraryChanged", "onVideoProgress")
 
     Function("isAvailable") { () -> Bool in
       return true
@@ -305,6 +305,82 @@ public class WoufyFXModule: Module {
           objc_setAssociatedObject(picker, &pickerKey, handler, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
           rootVC.present(picker, animated: true)
         }
+      }
+    }
+
+    AsyncFunction("generateVideoCard") { (params: [String: Any], promise: Promise) -> Void in
+      VideoCardGenerator.generate(
+        params: params,
+        onProgress: { [weak self] p in
+          self?.sendEvent("onVideoProgress", ["progress": p])
+        },
+        completion: { result in
+          switch result {
+          case .success(let uri):
+            promise.resolve(uri)
+          case .failure(let err):
+            promise.reject("E_VIDEO", err.localizedDescription)
+          }
+        }
+      )
+    }
+
+    AsyncFunction("generateImageCard") { (params: [String: Any], promise: Promise) -> Void in
+      VideoCardGenerator.generateImage(
+        params: params,
+        completion: { result in
+          switch result {
+          case .success(let uri):
+            promise.resolve(uri)
+          case .failure(let err):
+            promise.reject("E_IMAGE", err.localizedDescription)
+          }
+        }
+      )
+    }
+
+    AsyncFunction("exportTrackWithFx") { (params: [String: Any], promise: Promise) -> Void in
+      let uri = params["uri"] as? String ?? ""
+      let title = params["title"] as? String ?? "WouFY_FX"
+      let speed = params["speed"] as? Double ?? 1.0
+      let reverbAmount = params["reverbAmount"] as? Double ?? 0.0
+      let spatial8d = params["spatial8d"] as? Bool ?? false
+      FxExporter.export(
+        uri: uri,
+        title: title,
+        speed: speed,
+        reverbAmount: reverbAmount,
+        spatial8d: spatial8d
+      ) { result in
+        switch result {
+        case .success(let outUri):
+          promise.resolve(outUri)
+        case .failure(let err):
+          promise.reject("E_FX_EXPORT", err.localizedDescription)
+        }
+      }
+    }
+
+    AsyncFunction("shareFile") { (uri: String) -> Bool in
+      return await MainActor.run {
+        let fileURL = parseLocalFileURL(uri)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return false }
+        guard let rootVC = UIApplication.shared.connectedScenes
+          .compactMap({ ($0 as? UIWindowScene)?.keyWindow?.rootViewController })
+          .first ?? UIApplication.shared.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+          return false
+        }
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+          topVC = presented
+        }
+        let activityVC = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+        if let pop = activityVC.popoverPresentationController {
+          pop.sourceView = topVC.view
+          pop.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.maxY - 60, width: 1, height: 1)
+        }
+        topVC.present(activityVC, animated: true)
+        return true
       }
     }
 

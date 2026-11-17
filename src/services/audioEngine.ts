@@ -35,6 +35,8 @@ export interface EngineState {
   filtered: boolean;
   /** играющий сейчас трек не подходит под фильтр: он закреплён первым в очереди и в списке не показывается */
   pinned: boolean;
+  /** очередь вручную переставлялась поверх активного фильтра/сортировки */
+  customReordered: boolean;
 }
 
 interface Transition {
@@ -187,6 +189,8 @@ export class AudioEngine {
   private query = '';
   private sortMode: SortOption = 'default';
   private searchLyrics = false;
+  private onlyWithLyrics = false;
+  private onlyWithArtwork = false;
   /** порядок перемешивания ВСЕЙ библиотеки (очередь = он же, отфильтрованный) */
   private shufflePerm: string[] = [];
 
@@ -216,6 +220,7 @@ export class AudioEngine {
       sort: 'default',
       filtered: false,
       pinned: false,
+      customReordered: false,
     };
     this.attachPlayers();
     this.timer = setInterval(this.tick, this.tickMs);
@@ -428,7 +433,7 @@ export class AudioEngine {
     if (updated.length === 0) return;
     const map = new Map(updated.map((t) => [t.id, t]));
     this.library = this.library.map((t) => map.get(t.id) ?? t);
-    if (this.query || this.sortMode !== 'default') {
+    if ((this.query || this.sortMode !== 'default') && !this.state.customReordered) {
       // сортировка/поиск зависят от тегов: пока они дочитываются, очередь пересобирается
       const d = this.deriveQueue();
       this.set({ queue: d.queue, index: d.index, pinned: d.pinned });
@@ -521,6 +526,12 @@ export class AudioEngine {
     }
     const q = this.query;
     if (q) list = list.filter((t) => matchesQuery(t, q, this.searchLyrics));
+    if (this.onlyWithLyrics) {
+      list = list.filter((t) => Boolean(t.lyrics?.trim() || t.syncedLyrics?.length));
+    }
+    if (this.onlyWithArtwork) {
+      list = list.filter((t) => Boolean(t.artworkUri));
+    }
     if (isCustomSort) {
       list = applySort(list, this.sortMode);
     }
@@ -652,8 +663,6 @@ export class AudioEngine {
   }
 
   moveQueueItem(from: number, to: number) {
-    // ручная перестановка имеет смысл только в «чистой» очереди: при поиске/сортировке порядок задаёт фильтр
-    if (this.query || this.sortMode !== 'default') return;
     const q = [...this.state.queue];
     if (from < 0 || from >= q.length || to < 0 || to >= q.length || from === to) return;
     const [item] = q.splice(from, 1);
@@ -662,12 +671,57 @@ export class AudioEngine {
     if (from === index) index = to;
     else if (from < index && to >= index) index -= 1;
     else if (from > index && to <= index) index += 1;
-    const ids = q.map((t) => t.id);
-    if (this.state.shuffle) this.shufflePerm = ids;
-    else this.baseOrder = ids;
+
+    const isFilteredOrSorted = Boolean(this.query) || this.sortMode !== 'default' || this.searchLyrics;
+    if (!isFilteredOrSorted) {
+      const ids = q.map((t) => t.id);
+      if (this.state.shuffle) this.shufflePerm = ids;
+      else this.baseOrder = ids;
+    } else {
+      // Перестановка внутри отфильтрованного/отсортированного списка:
+      // также обновляем позиции этих треков в базовом порядке, сохраняя остальные треки на своих местах
+      const visibleIds = new Set(q.map((t) => t.id));
+      const newVisibleOrder = q.map((t) => t.id);
+      let vIdx = 0;
+      const updateOrder = (arr: string[]) =>
+        arr.map((id) => (visibleIds.has(id) ? newVisibleOrder[vIdx++] : id));
+      if (this.state.shuffle) this.shufflePerm = updateOrder(this.shufflePerm);
+      else {
+        vIdx = 0;
+        this.baseOrder = updateOrder(this.baseOrder);
+      }
+    }
+
     this.prep = null;
-    this.set({ queue: q, index });
+    this.set({ queue: q, index, customReordered: isFilteredOrSorted ? true : this.state.customReordered });
     setTimeout(() => this.persist(), 50);
+    this.onTrackChange(this.currentTrack, this.upcoming());
+  }
+
+  /** Переносит выбранный трек сразу после играющего («играть следующим») и возвращает новый индекс */
+  playNext(fromIndex: number): number {
+    const q = this.state.queue;
+    if (fromIndex < 0 || fromIndex >= q.length) return fromIndex;
+    const curIdx = this.state.index >= 0 ? this.state.index : 0;
+    if (fromIndex === curIdx) return fromIndex;
+    const targetIdx = fromIndex < curIdx ? curIdx : Math.min(q.length - 1, curIdx + 1);
+    if (fromIndex !== targetIdx) {
+      this.moveQueueItem(fromIndex, targetIdx);
+    }
+    return targetIdx;
+  }
+
+  /** Сбрасывает ручные перестановки треков и возвращает очередь к порядку текущего фильтра/сортировки */
+  resetCustomReorder() {
+    this.settleTransition();
+    const d = this.deriveQueue();
+    this.prep = null;
+    this.set({
+      queue: d.queue,
+      index: d.index,
+      pinned: d.pinned,
+      customReordered: false,
+    });
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
 
@@ -685,7 +739,7 @@ export class AudioEngine {
     }
     const d = this.deriveQueue(cur?.id, on);
     this.prep = null;
-    this.set({ shuffle: on, sort: this.sortMode, queue: d.queue, index: d.index, pinned: d.pinned });
+    this.set({ shuffle: on, sort: this.sortMode, queue: d.queue, index: d.index, pinned: d.pinned, customReordered: false });
     this.persist();
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
@@ -694,16 +748,36 @@ export class AudioEngine {
    * Поиск и сортировка очереди. Очередь пересобирается целиком: «следующий трек» — всегда следующий в том списке,
    * который показан на экране. С включённым перемешиванием перемешиваются только найденные треки.
    */
-  setFilter(patch: { query?: string; sort?: SortOption; searchLyrics?: boolean }) {
+  setFilter(patch: {
+    query?: string;
+    sort?: SortOption;
+    searchLyrics?: boolean;
+    onlyWithLyrics?: boolean;
+    onlyWithArtwork?: boolean;
+  }) {
     const nq = patch.query !== undefined ? normQuery(patch.query) : this.query;
     const ns = patch.sort ?? this.sortMode;
     const nsl = patch.searchLyrics !== undefined ? patch.searchLyrics : this.searchLyrics;
+    const nol = patch.onlyWithLyrics !== undefined ? patch.onlyWithLyrics : this.onlyWithLyrics;
+    const noa = patch.onlyWithArtwork !== undefined ? patch.onlyWithArtwork : this.onlyWithArtwork;
     const isSortExplicit = patch.sort !== undefined;
-    if (!isSortExplicit && nq === this.query && ns === this.sortMode && nsl === this.searchLyrics) return;
+    if (
+      !isSortExplicit &&
+      nq === this.query &&
+      ns === this.sortMode &&
+      nsl === this.searchLyrics &&
+      nol === this.onlyWithLyrics &&
+      noa === this.onlyWithArtwork &&
+      !this.state.customReordered
+    ) {
+      return;
+    }
     this.settleTransition();
     this.query = nq;
     this.sortMode = ns;
     this.searchLyrics = nsl;
+    this.onlyWithLyrics = nol;
+    this.onlyWithArtwork = noa;
     // При явном выборе режима сортировки (не default) отключаем shuffle
     const shuffle = ns !== 'default' ? false : this.state.shuffle;
     const d = this.deriveQueue(undefined, shuffle);
@@ -714,7 +788,8 @@ export class AudioEngine {
       index: d.index,
       pinned: d.pinned,
       sort: ns,
-      filtered: nq.length > 0 || nsl,
+      filtered: nq.length > 0 || nsl || nol || noa,
+      customReordered: false,
     });
     this.onTrackChange(this.currentTrack, this.upcoming());
   }
@@ -758,7 +833,7 @@ export class AudioEngine {
       if (libIdx >= 0) {
         this.query = '';
         const d = this.deriveQueue(id, false);
-        this.set({ queue: d.queue, index: d.index, filtered: false });
+        this.set({ queue: d.queue, index: d.index, filtered: false, customReordered: false });
         if (d.index >= 0) this.playIndex(d.index, seekTo);
       }
     }
@@ -784,7 +859,7 @@ export class AudioEngine {
     this.sortMode = 'default';
     const d = this.deriveQueue(selectedId, false);
     this.prep = null;
-    this.set({ queue: d.queue, index: d.index, sort: 'default', filtered: false, shuffle: false, pinned: d.pinned });
+    this.set({ queue: d.queue, index: d.index, sort: 'default', filtered: false, shuffle: false, pinned: d.pinned, customReordered: false });
     this.playIndex(d.index);
   }
 

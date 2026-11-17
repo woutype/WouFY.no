@@ -73,10 +73,41 @@ export interface WoufyFXNative {
   startDirectoryWatcher(directoryUri: string): void;
   stopDirectoryWatcher(): void;
   installApk?(fileUri: string): Promise<boolean>;
+  generateVideoCard?(params: {
+    audioUri: string;
+    artworkUri?: string | null;
+    title: string;
+    artist: string;
+    startSec: number;
+    endSec: number;
+    style: 'inCover' | 'underCover' | 'textOnly';
+    coverShape: 'vinyl' | 'square';
+    aspect: '16:9' | '9:16' | '1:1' | '4:3' | '3:4';
+    lines: { time: number; text: string }[];
+  }): Promise<string>;
+  generateImageCard?(params: {
+    audioUri: string;
+    artworkUri?: string | null;
+    title: string;
+    artist: string;
+    style: 'glassQuote' | 'inCover' | 'underCover' | 'textOnly';
+    coverShape: 'vinyl' | 'square';
+    aspect: '16:9' | '9:16' | '1:1' | '4:3' | '3:4';
+    lines: string[];
+  }): Promise<string>;
+  exportTrackWithFx?(params: {
+    uri: string;
+    title: string;
+    speed: number;
+    reverbAmount: number;
+    spatial8d: boolean;
+  }): Promise<string>;
+  shareFile?(fileUri: string): Promise<boolean>;
   addListener(event: 'onEnded', cb: (e: { id: string }) => void): { remove: () => void };
   addListener(event: 'onSamples', cb: (e: { id: string; frames: number[] }) => void): { remove: () => void };
   addListener(event: 'onRemote', cb: (e: { command: string; position?: number }) => void): { remove: () => void };
   addListener(event: 'onLibraryChanged', cb: () => void): { remove: () => void };
+  addListener(event: 'onVideoProgress', cb: (e: { progress: number }) => void): { remove: () => void };
 }
 
 export const WoufyFX: WoufyFXNative | null = requireOptionalNativeModule<WoufyFXNative>('WoufyFX');

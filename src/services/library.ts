@@ -49,11 +49,17 @@ export function getDocRoot(): string {
 export function normalizeTrackId(idOrUri: string): string {
   if (!idOrUri) return '';
   let clean = idOrUri;
-  if (clean.includes('/Documents/')) {
+  const root = getDocRoot();
+  if (root && clean.startsWith(root)) {
+    clean = clean.slice(root.length);
+  } else if (clean.includes('/Documents/')) {
     clean = clean.split('/Documents/')[1];
   } else if (clean.startsWith('file://')) {
     clean = clean.replace(/^file:\/\//, '');
   }
+  // В Expo Go documentDirectory заканчивается на ExponentExperienceData/<scope>/<slug>/ —
+  // убираем этот префикс, если он остался от старого кэша или другого контейнера
+  clean = clean.replace(/^ExponentExperienceData\/[^/]+\/[^/]+\//, '');
   return clean.replace(/^\.?\/+/, '');
 }
 
@@ -208,4 +214,53 @@ export async function saveCachedTracks(tracks: TrackFile[]): Promise<void> {
     console.warn('[library] failed to save cached tracks:', e);
   }
 }
+
+/** Удаляет из state.json записи (bpm, lyricsOffset, order, lastTrackId) для треков, которых больше нет */
+export async function pruneDeletedTrackState(validIds: Set<string>): Promise<void> {
+  try {
+    const state = await loadState();
+    const patch: Partial<PersistedState> = {};
+    let changed = false;
+
+    if (state.bpm) {
+      const nextBpm: Record<string, BpmRecord> = {};
+      for (const [id, rec] of Object.entries(state.bpm)) {
+        if (validIds.has(id)) nextBpm[id] = rec;
+        else changed = true;
+      }
+      if (changed) patch.bpm = nextBpm;
+    }
+
+    if (state.lyricsOffset) {
+      let offChanged = false;
+      const nextOff: Record<string, number> = {};
+      for (const [id, off] of Object.entries(state.lyricsOffset)) {
+        if (validIds.has(id)) nextOff[id] = off;
+        else offChanged = true;
+      }
+      if (offChanged) {
+        patch.lyricsOffset = nextOff;
+        changed = true;
+      }
+    }
+
+    if (state.order) {
+      const nextOrder = state.order.filter((id) => validIds.has(id));
+      if (nextOrder.length !== state.order.length) {
+        patch.order = nextOrder;
+        changed = true;
+      }
+    }
+
+    if (state.lastTrackId && !validIds.has(state.lastTrackId)) {
+      patch.lastTrackId = undefined;
+      changed = true;
+    }
+
+    if (changed) patchState(patch);
+  } catch (e) {
+    console.warn('[library] pruneDeletedTrackState failed:', e);
+  }
+}
+
 

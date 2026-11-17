@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, FlatList, LayoutAnimation, PanResponder, Platform, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Animated, Easing, FlatList, LayoutAnimation, PanResponder, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -81,7 +81,7 @@ const RowContent: React.FC<{
 }> = React.memo(({ track, isCurrent, isPlaying, isPast }) => (
   <>
     <View style={{ opacity: isPast && !isCurrent ? 0.55 : 1 }}>
-      <CoverArt uri={track.artworkUri} size={44} radius={10} />
+      <CoverArt uri={track.artworkUri} size={44} radius={22} />
       {isCurrent && (
         <View style={styles.playingBadge}>
           <MiniEq playing={isPlaying} />
@@ -107,6 +107,7 @@ interface RowProps {
   isPlaying: boolean;
   isPast: boolean;
   canDrag: boolean;
+  canPlayNext: boolean;
   /** строку сейчас несёт палец: вместо неё в списке пустое место, а сама она нарисована поверх (оверлей) */
   hidden: boolean;
   hasActiveDrag: boolean;
@@ -114,39 +115,187 @@ interface RowProps {
   onDragStart: (index: number) => void;
   onDragMove: (dy: number) => void;
   onDragEnd: () => void;
+  onPlayNextSwipe: (index: number, track: TrackFile) => void;
+  onSwipeActiveChange?: (active: boolean) => void;
 }
+
+const SWIPE_THRESHOLD = 46;
 
 const QueueRow = React.memo(function QueueRow(p: RowProps) {
   const cb = useRef(p);
   cb.current = p;
+
+  const swipeX = useRef(new Animated.Value(0)).current;
+  const swipeProg = useRef(new Animated.Value(0)).current;
+  const gestureMode = useRef<'none' | 'drag' | 'swipe'>('none');
+  const triggeredHaptic = useRef(false);
+
+  const resetSwipe = useCallback(() => {
+    cb.current.onSwipeActiveChange?.(false);
+    Animated.parallel([
+      Animated.spring(swipeX, { toValue: 0, damping: 20, stiffness: 280, mass: 0.7, useNativeDriver: true }),
+      Animated.spring(swipeProg, { toValue: 0, damping: 20, stiffness: 280, mass: 0.7, useNativeDriver: true }),
+    ]).start();
+  }, [swipeX, swipeProg]);
+
   const handlePan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => cb.current.canDrag,
-      onMoveShouldSetPanResponder: (_, g) => cb.current.canDrag && Math.abs(g.dy) > 2,
+      onMoveShouldSetPanResponder: (_, g) =>
+        cb.current.canDrag && (Math.abs(g.dy) > 2 || (cb.current.canPlayNext && g.dx < -3)),
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: () => cb.current.onDragStart(cb.current.queueIndex),
-      onPanResponderMove: (_, g) => cb.current.onDragMove(g.dy),
-      onPanResponderRelease: () => cb.current.onDragEnd(),
-      onPanResponderTerminate: () => cb.current.onDragEnd(),
+      onPanResponderGrant: () => {
+        gestureMode.current = 'none';
+        triggeredHaptic.current = false;
+        cb.current.onSwipeActiveChange?.(true);
+      },
+      onPanResponderMove: (_, g) => {
+        if (gestureMode.current === 'none') {
+          if (cb.current.canPlayNext && g.dx < -6 && Math.abs(g.dx) > Math.abs(g.dy) * 1.15) {
+            gestureMode.current = 'swipe';
+            Haptics.selectionAsync();
+          } else if (Math.abs(g.dy) > 5) {
+            gestureMode.current = 'drag';
+            cb.current.onDragStart(cb.current.queueIndex);
+          } else {
+            return;
+          }
+        }
+        if (gestureMode.current === 'drag') {
+          cb.current.onDragMove(g.dy);
+        } else if (gestureMode.current === 'swipe') {
+          const clampedX = Math.max(-124, Math.min(0, g.dx));
+          const prog = Math.min(1, Math.max(0, -clampedX / SWIPE_THRESHOLD));
+          swipeX.setValue(clampedX * 0.86);
+          swipeProg.setValue(prog);
+          if (prog >= 1 && !triggeredHaptic.current) {
+            triggeredHaptic.current = true;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          } else if (prog < 0.85 && triggeredHaptic.current) {
+            triggeredHaptic.current = false;
+            Haptics.selectionAsync();
+          }
+        }
+      },
+      onPanResponderRelease: (_, g) => {
+        const mode = gestureMode.current;
+        gestureMode.current = 'none';
+        if (mode === 'drag') {
+          cb.current.onSwipeActiveChange?.(false);
+          cb.current.onDragEnd();
+        } else if (mode === 'swipe') {
+          const ready = -g.dx >= SWIPE_THRESHOLD || (g.dx < -22 && g.vx < -0.35);
+          if (ready && cb.current.canPlayNext) {
+            cb.current.onSwipeActiveChange?.(false);
+            swipeX.setValue(0);
+            swipeProg.setValue(0);
+            cb.current.onPlayNextSwipe(cb.current.queueIndex, cb.current.track);
+          } else {
+            resetSwipe();
+          }
+        } else {
+          cb.current.onSwipeActiveChange?.(false);
+        }
+      },
+      onPanResponderTerminate: () => {
+        const mode = gestureMode.current;
+        gestureMode.current = 'none';
+        if (mode === 'drag') {
+          cb.current.onSwipeActiveChange?.(false);
+          cb.current.onDragEnd();
+        } else {
+          resetSwipe();
+        }
+      },
     })
   ).current;
 
+  const spin = swipeProg.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '-360deg'],
+  });
+  const linesOpacity = swipeProg.interpolate({
+    inputRange: [0, 0.45, 0.8],
+    outputRange: [1, 0.25, 0],
+  });
+  const linesScale = swipeProg.interpolate({
+    inputRange: [0, 0.8],
+    outputRange: [1, 0.4],
+  });
+  const arrowOpacity = swipeProg.interpolate({
+    inputRange: [0.15, 0.6, 1],
+    outputRange: [0, 0.85, 1],
+  });
+  const arrowScale = swipeProg.interpolate({
+    inputRange: [0, 0.6, 1],
+    outputRange: [0.3, 0.95, 1.12],
+  });
+  const dropScaleX = swipeProg.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.6, 1.08, 1],
+  });
+  const dropScaleY = swipeProg.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.6, 0.92, 1],
+  });
+  const hintOpacity = swipeProg.interpolate({
+    inputRange: [0, 0.70, 1],
+    outputRange: [0, 0, 1],
+  });
+  const hintTranslateX = swipeProg.interpolate({
+    inputRange: [0, 1],
+    outputRange: [10, 0],
+  });
+
   return (
     <View style={[styles.row, p.hidden && styles.rowHidden]}>
-      <PressableScale
-        onPress={() => cb.current.onPlay(cb.current.queueIndex, p.track)}
-        scaleTo={0.98}
-        style={styles.rowMain}
-        haptic="light"
-        disabled={p.hasActiveDrag}
+      {/* Капсула-подсказка «Следующим» справа при свайпе влево */}
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.swipeHintPill,
+          {
+            opacity: hintOpacity,
+            transform: [{ translateX: hintTranslateX }, { scale: dropScaleY }],
+          },
+        ]}
       >
-        <RowContent track={p.track} isCurrent={p.isCurrent} isPlaying={p.isPlaying} isPast={p.isPast} />
-      </PressableScale>
-      {p.canDrag && (
-        <View style={styles.handle} {...handlePan.panHandlers} hitSlop={{ top: 8, bottom: 8, left: 12, right: 12 }}>
-          <Ionicons name="reorder-three" size={26} color={colors.text3} />
-        </View>
-      )}
+        <Text style={styles.swipeHintText}>Следующим</Text>
+      </Animated.View>
+
+      <Animated.View style={[styles.rowSwipeInner, { transform: [{ translateX: swipeX }] }]}>
+        <PressableScale
+          onPress={() => cb.current.onPlay(cb.current.queueIndex, p.track)}
+          scaleTo={0.98}
+          style={styles.rowMain}
+          haptic="light"
+          disabled={p.hasActiveDrag}
+        >
+          <RowContent track={p.track} isCurrent={p.isCurrent} isPlaying={p.isPlaying} isPast={p.isPast} />
+        </PressableScale>
+        {p.canDrag && (
+          <View style={styles.handle} {...handlePan.panHandlers} hitSlop={{ top: 8, bottom: 8, left: 14, right: 12 }}>
+            {/* Каплевидная подложка под крутящейся кнопкой */}
+            <Animated.View
+              style={[
+                styles.handleDropletBg,
+                {
+                  opacity: arrowOpacity,
+                  transform: [{ scaleX: dropScaleX }, { scaleY: dropScaleY }],
+                },
+              ]}
+            />
+            <Animated.View style={[styles.handleIconWrap, { transform: [{ rotate: spin }] }]}>
+              <Animated.View style={[styles.iconAbsolute, { opacity: linesOpacity, transform: [{ scale: linesScale }] }]}>
+                <Ionicons name="reorder-three" size={26} color={colors.text3} />
+              </Animated.View>
+              <Animated.View style={[styles.iconAbsolute, { opacity: arrowOpacity, transform: [{ scale: arrowScale }] }]}>
+                <Ionicons name="arrow-up" size={20} color={colors.onAccent} />
+              </Animated.View>
+            </Animated.View>
+          </View>
+        )}
+      </Animated.View>
     </View>
   );
 });
@@ -157,11 +306,27 @@ const SortMenu: React.FC<{
   visible: boolean;
   sortMode: SortOption;
   searchLyrics: boolean;
+  onlyWithLyrics: boolean;
+  onlyWithArtwork: boolean;
   onSelect: (m: SortOption) => void;
   onToggleSearchLyrics: () => void;
+  onToggleOnlyWithLyrics: () => void;
+  onToggleOnlyWithArtwork: () => void;
   onOpenLyricsSearch: () => void;
   onClose: () => void;
-}> = ({ visible, sortMode, searchLyrics, onSelect, onToggleSearchLyrics, onOpenLyricsSearch, onClose }) => {
+}> = ({
+  visible,
+  sortMode,
+  searchLyrics,
+  onlyWithLyrics,
+  onlyWithArtwork,
+  onSelect,
+  onToggleSearchLyrics,
+  onToggleOnlyWithLyrics,
+  onToggleOnlyWithArtwork,
+  onOpenLyricsSearch,
+  onClose,
+}) => {
   const [mounted, setMounted] = useState(visible);
   const t = useRef(new Animated.Value(0)).current;
 
@@ -195,7 +360,7 @@ const SortMenu: React.FC<{
           },
         ]}
       >
-        <Glass radius={18} intensity={70} style={styles.menuGlass}>
+        <Glass radius={24} intensity={70} style={styles.menuGlass}>
           <View style={styles.filterInner}>
             <Text style={styles.menuSectionTitle}>Сортировка</Text>
             {(['recent', 'title', 'artist', 'album', 'default'] as const).map((opt) => {
@@ -213,7 +378,54 @@ const SortMenu: React.FC<{
 
             <View style={styles.menuDivider} />
 
-            <Text style={styles.menuSectionTitle}>Поиск по тексту</Text>
+            <Text style={styles.menuSectionTitle}>Фильтры (можно совмещать)</Text>
+            <PressableScale onPress={onToggleOnlyWithLyrics} scaleTo={0.97} haptic="selection">
+              <View style={[styles.filterOption, onlyWithLyrics && styles.filterOptionActive]}>
+                <Ionicons name="musical-note-outline" size={17} color={onlyWithLyrics ? colors.onAccent : colors.text} />
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={[styles.filterOptionText, onlyWithLyrics && styles.filterOptionTextActive]}>
+                    С текстом песни
+                  </Text>
+                </View>
+                <View style={[styles.toggleBox, onlyWithLyrics && styles.toggleBoxActive]}>
+                  {onlyWithLyrics && <Ionicons name="checkmark" size={13} color="#FFFFFF" />}
+                </View>
+              </View>
+            </PressableScale>
+
+            <PressableScale onPress={onToggleOnlyWithArtwork} scaleTo={0.97} haptic="selection">
+              <View style={[styles.filterOption, onlyWithArtwork && styles.filterOptionActive]}>
+                <Ionicons name="image-outline" size={17} color={onlyWithArtwork ? colors.onAccent : colors.text} />
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={[styles.filterOptionText, onlyWithArtwork && styles.filterOptionTextActive]}>
+                    С обложкой
+                  </Text>
+                </View>
+                <View style={[styles.toggleBox, onlyWithArtwork && styles.toggleBoxActive]}>
+                  {onlyWithArtwork && <Ionicons name="checkmark" size={13} color="#FFFFFF" />}
+                </View>
+              </View>
+            </PressableScale>
+
+            <PressableScale onPress={onToggleSearchLyrics} scaleTo={0.97} haptic="selection">
+              <View style={[styles.filterOption, searchLyrics && styles.filterOptionActive]}>
+                <Ionicons name="document-text-outline" size={17} color={searchLyrics ? colors.onAccent : colors.text} />
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={[styles.filterOptionText, searchLyrics && styles.filterOptionTextActive]}>
+                    Искать в текстах
+                  </Text>
+                  <Text style={[styles.filterOptionSub, searchLyrics && styles.filterOptionSubActive]}>
+                    Учитывать слова в поиске очереди
+                  </Text>
+                </View>
+                <View style={[styles.toggleBox, searchLyrics && styles.toggleBoxActive]}>
+                  {searchLyrics && <Ionicons name="checkmark" size={13} color="#FFFFFF" />}
+                </View>
+              </View>
+            </PressableScale>
+
+            <View style={styles.menuDivider} />
+
             <PressableScale
               onPress={() => {
                 onClose();
@@ -233,23 +445,6 @@ const SortMenu: React.FC<{
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={15} color={colors.accent} />
-              </View>
-            </PressableScale>
-
-            <PressableScale onPress={onToggleSearchLyrics} scaleTo={0.97} haptic="selection">
-              <View style={[styles.filterOption, searchLyrics && styles.filterOptionActive]}>
-                <Ionicons name="document-text-outline" size={17} color={searchLyrics ? colors.onAccent : colors.text} />
-                <View style={{ flex: 1, paddingRight: 8 }}>
-                  <Text style={[styles.filterOptionText, searchLyrics && styles.filterOptionTextActive]}>
-                    Быстрый фильтр очереди
-                  </Text>
-                  <Text style={[styles.filterOptionSub, searchLyrics && styles.filterOptionSubActive]}>
-                    Искать в строке поиска очереди
-                  </Text>
-                </View>
-                <View style={[styles.toggleBox, searchLyrics && styles.toggleBoxActive]}>
-                  {searchLyrics && <Ionicons name="checkmark" size={13} color="#FFFFFF" />}
-                </View>
               </View>
             </PressableScale>
           </View>
@@ -305,17 +500,30 @@ interface Props {
   onSortChange: (m: SortOption) => void;
   searchLyrics?: boolean;
   onSearchLyricsChange?: (v: boolean) => void;
+  onlyWithLyrics?: boolean;
+  onOnlyWithLyricsChange?: (v: boolean) => void;
+  onlyWithArtwork?: boolean;
+  onOnlyWithArtworkChange?: (v: boolean) => void;
   /** играющий трек не подходит под фильтр: он первый в очереди, но в списке не показывается */
   pinned: boolean;
+  /** очередь вручную переставлялась при активном фильтре/сортировке */
+  customReordered?: boolean;
+  onResetCustomReorder?: () => void;
   onPlay: (index: number, track?: TrackFile) => void;
   onPlayTrackWithSeek?: (track: TrackFile, seekTime?: number) => void;
   onMove: (from: number, to: number) => void;
   onRefresh: () => Promise<void>;
   bottomPad: number;
   scrollToCurrentTrigger?: number;
+  onGestureActiveChange?: (active: boolean) => void;
 }
 
 interface DragState {
+  id: string;
+}
+
+interface DropletFlight {
+  track: TrackFile;
   id: string;
 }
 
@@ -331,13 +539,20 @@ export const QueueView: React.FC<Props> = ({
   onSortChange,
   searchLyrics = false,
   onSearchLyricsChange,
+  onlyWithLyrics = false,
+  onOnlyWithLyricsChange,
+  onlyWithArtwork = false,
+  onOnlyWithArtworkChange,
   pinned,
+  customReordered = false,
+  onResetCustomReorder,
   onPlay,
   onPlayTrackWithSeek,
   onMove,
   onRefresh,
   bottomPad,
   scrollToCurrentTrigger,
+  onGestureActiveChange,
 }) => {
   const listRef = useRef<FlatList<{ track: TrackFile; qi: number }>>(null);
   const [listH, setListH] = useState(600);
@@ -350,23 +565,31 @@ export const QueueView: React.FC<Props> = ({
   const guardUntil = useRef(0);
   const [refreshing, setRefreshing] = useState(false);
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [droplet, setDroplet] = useState<DropletFlight | null>(null);
   const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [showLyricsSearch, setShowLyricsSearch] = useState(false);
+
+  // Анимационные параметры «капли» при свайпе трека в следующие
+  const dropY = useRef(new Animated.Value(0)).current;
+  const dropX = useRef(new Animated.Value(0)).current;
+  const dropScaleX = useRef(new Animated.Value(1)).current;
+  const dropScaleY = useRef(new Animated.Value(1)).current;
+  const dropSplash = useRef(new Animated.Value(0)).current;
 
   // Локальная копия очереди: перестановка и сброс сдвигов применяются одним обновлением
   const [localTracks, setLocalTracks] = useState(tracks);
   useEffect(() => {
-    if (drag) return;
+    if (drag || droplet) return;
     const wait = guardUntil.current - Date.now();
     if (wait > 0) {
       const t = setTimeout(() => setLocalTracks(tracks), wait + 20);
       return () => clearTimeout(t);
     }
     setLocalTracks(tracks);
-  }, [tracks, drag]);
+  }, [tracks, drag, droplet]);
 
   const sortActive = sortMode !== 'default';
-  const filtering = searchQuery.trim().length > 0 || sortActive || searchLyrics;
+  const filtering = searchQuery.trim().length > 0 || sortActive || searchLyrics || onlyWithLyrics || onlyWithArtwork;
 
   const handleSelectSort = (mode: SortOption) => {
     setShowFilterMenu(false);
@@ -379,9 +602,18 @@ export const QueueView: React.FC<Props> = ({
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     onSearchChange('');
     onSearchLyricsChange?.(false);
+    onOnlyWithLyricsChange?.(false);
+    onOnlyWithArtworkChange?.(false);
     setShowFilterMenu(false);
     if (sortMode !== 'default') onSortChange('default');
-  }, [onSearchChange, onSearchLyricsChange, onSortChange, sortMode]);
+    else onResetCustomReorder?.();
+  }, [onSearchChange, onSearchLyricsChange, onOnlyWithLyricsChange, onOnlyWithArtworkChange, onSortChange, sortMode, onResetCustomReorder]);
+
+  const handleResetReorder = useCallback(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    onResetCustomReorder?.();
+  }, [onResetCustomReorder]);
 
   // очередь уже отфильтрована и отсортирована движком; закреплённый (не подходящий под фильтр) играющий трек не показываем
   const data = useMemo(() => {
@@ -418,11 +650,16 @@ export const QueueView: React.FC<Props> = ({
   tracksLen.current = localTracks.length;
   const localRef = useRef(localTracks);
   localRef.current = localTracks;
+  const pinnedRef = useRef(pinned);
+  pinnedRef.current = pinned;
   const bottomRef = useRef(bottomPad);
   bottomRef.current = bottomPad;
   const cbs = useRef({ onMove, onPlay });
   cbs.current = { onMove, onPlay };
   const LIST_TOP = 4; // paddingTop списка
+
+  const qiToVisual = (qi: number) => (pinnedRef.current ? Math.max(0, qi - 1) : qi);
+  const visualToQi = (vis: number) => (pinnedRef.current ? vis + 1 : vis);
 
   const updateHover = useCallback(() => {
     const d = dragInfo.current;
@@ -434,7 +671,10 @@ export const QueueView: React.FC<Props> = ({
     overlayY.setValue(top);
 
     const contentY = top + scrollY.current;
-    const hover = Math.max(0, Math.min(tracksLen.current - 1, Math.round((contentY - LIST_TOP) / ROW_H)));
+    const minQi = pinnedRef.current ? 1 : 0;
+    const maxVis = Math.max(0, tracksLen.current - 1 - minQi);
+    const visHover = Math.max(0, Math.min(maxVis, Math.round((contentY - LIST_TOP) / ROW_H)));
+    const hover = visualToQi(visHover);
     if (hover !== d.hover) {
       d.hover = hover;
       Haptics.selectionAsync();
@@ -468,7 +708,8 @@ export const QueueView: React.FC<Props> = ({
       else if (top > visibleH - ROW_H - ZONE) k = Math.min(1, (top - (visibleH - ROW_H - ZONE)) / ZONE);
       if (k !== 0) {
         const eased = Math.sign(k) * Math.pow(Math.abs(k), 1.6);
-        const maxScroll = Math.max(0, tracksLen.current * ROW_H + LIST_TOP + bottomRef.current - d.listH);
+        const visCount = Math.max(0, tracksLen.current - (pinnedRef.current ? 1 : 0));
+        const maxScroll = Math.max(0, visCount * ROW_H + LIST_TOP + bottomRef.current - d.listH);
         const next = Math.max(0, Math.min(maxScroll, scrollY.current + eased * MAX_SPEED));
         if (next !== scrollY.current) {
           scrollY.current = next;
@@ -486,7 +727,8 @@ export const QueueView: React.FC<Props> = ({
       const list = localRef.current;
       if (from < 0 || from >= list.length) return;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      const startTop = LIST_TOP + from * ROW_H - scrollY.current;
+      const visFrom = qiToVisual(from);
+      const startTop = LIST_TOP + visFrom * ROW_H - scrollY.current;
       dragInfo.current = { ...dragInfo.current, active: true, from, hover: from, startTop, dy: 0, top: startTop, base: list };
       overlayY.stopAnimation();
       overlayY.setValue(startTop);
@@ -516,7 +758,8 @@ export const QueueView: React.FC<Props> = ({
     d.active = false;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const { from, hover } = d;
-    const finalTop = LIST_TOP + hover * ROW_H - scrollY.current;
+    const visHover = qiToVisual(hover);
+    const finalTop = LIST_TOP + visHover * ROW_H - scrollY.current;
 
     // Раньше оверлей убирался по окончании пружины (spring) — она «доезжает» до порога покоя 1–2 секунды,
     // поэтому рамка активного трека висела после отпускания. Теперь анимация посадки — короткая, с фиксированной
@@ -549,6 +792,81 @@ export const QueueView: React.FC<Props> = ({
   useEffect(() => stopAuto, []);
 
   const dragTrack = useMemo(() => (drag ? localTracks.find((t) => t.id === drag.id) : undefined), [drag, localTracks]);
+
+  const currentTrackIndex = useMemo(
+    () => (currentTrackId ? localTracks.findIndex((t) => t.id === currentTrackId) : currentIndex),
+    [localTracks, currentTrackId, currentIndex]
+  );
+
+  /* ───────── Каплевидный перелёт трека на место «следующего» при свайпе влево ───────── */
+  const handlePlayNextSwipe = useCallback(
+    (fromQi: number, track: TrackFile) => {
+      const list = localRef.current;
+      if (fromQi < 0 || fromQi >= list.length) return;
+      const curIdx = currentTrackIndex >= 0 ? currentTrackIndex : Math.max(0, currentIndex);
+      if (fromQi === curIdx) return;
+      const targetQi = fromQi < curIdx ? curIdx : Math.min(list.length - 1, curIdx + 1);
+      if (fromQi === targetQi) return;
+
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+      const visFrom = qiToVisual(fromQi);
+      const visTo = qiToVisual(targetQi);
+      const startTop = LIST_TOP + visFrom * ROW_H - scrollY.current;
+      const rawEndTop = LIST_TOP + visTo * ROW_H - scrollY.current;
+      // Ограничиваем конечную точку в пределах видимого окна, чтобы капля красиво вливалась даже если играющий трек далеко за экраном
+      const clampedEndTop = Math.max(LIST_TOP, Math.min(dragInfo.current.listH - ROW_H - 12, rawEndTop));
+
+      dropY.stopAnimation();
+      dropX.stopAnimation();
+      dropScaleX.stopAnimation();
+      dropScaleY.stopAnimation();
+      dropSplash.stopAnimation();
+
+      dropY.setValue(startTop);
+      dropX.setValue(0);
+      dropScaleX.setValue(1.03);
+      dropScaleY.setValue(1.03);
+      dropSplash.setValue(0);
+
+      setDroplet({ track, id: track.id });
+
+      const next = [...list];
+      const [mv] = next.splice(fromQi, 1);
+      next.splice(targetQi, 0, mv);
+      setLocalTracks(next);
+
+      const dist = Math.abs(clampedEndTop - startTop);
+      const flightMs = Math.round(Math.min(540, Math.max(360, 290 + dist * 0.36)));
+
+      Animated.parallel([
+        Animated.timing(dropY, {
+          toValue: clampedEndTop,
+          duration: flightMs,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(dropScaleX, {
+          toValue: 1,
+          duration: flightMs,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(dropScaleY, {
+          toValue: 1,
+          duration: flightMs,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        guardUntil.current = Date.now() + 600;
+        cbs.current.onMove(fromQi, targetQi);
+        setDroplet(null);
+      });
+    },
+    [currentTrackIndex, currentIndex, dropY, dropX, dropScaleX, dropScaleY, dropSplash]
+  );
 
   /* ───────── ползунок: потянул вниз — пролистал до самого последнего трека ───────── */
   const contentH = LIST_TOP + data.length * ROW_H + bottomPad;
@@ -667,19 +985,17 @@ export const QueueView: React.FC<Props> = ({
     }
   }, [scrollToCurrentTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const currentTrackIndex = useMemo(
-    () => (currentTrackId ? localTracks.findIndex((t) => t.id === currentTrackId) : currentIndex),
-    [localTracks, currentTrackId, currentIndex]
-  );
-
   const playAt = useCallback((i: number, track: TrackFile) => {
     cbs.current.onPlay(i, track);
   }, []);
 
   const renderItem = useCallback(
     ({ item }: { item: { track: TrackFile; qi: number } }) => {
+      const curIdx = currentTrackIndex >= 0 ? currentTrackIndex : currentIndex;
       const isCurrent = currentTrackId ? item.track.id === currentTrackId : item.qi === currentIndex;
-      const isPast = item.qi < (currentTrackIndex >= 0 ? currentTrackIndex : currentIndex);
+      const isPast = item.qi < curIdx;
+      const nextTarget = item.qi < curIdx ? curIdx : curIdx + 1;
+      const canPlayNext = !isCurrent && item.qi !== nextTarget && localTracks.length > 1;
       return (
         <QueueRow
           track={item.track}
@@ -687,33 +1003,51 @@ export const QueueView: React.FC<Props> = ({
           isCurrent={isCurrent}
           isPlaying={isPlaying}
           isPast={isPast}
-          canDrag={!filtering}
-          hidden={drag?.id === item.track.id}
-          hasActiveDrag={drag !== null}
+          canDrag={localTracks.length > 1}
+          canPlayNext={canPlayNext}
+          hidden={drag?.id === item.track.id || droplet?.id === item.track.id}
+          hasActiveDrag={drag !== null || droplet !== null}
           onPlay={playAt}
           onDragStart={onDragStart}
           onDragMove={onDragMove}
           onDragEnd={onDragEnd}
+          onPlayNextSwipe={handlePlayNextSwipe}
+          onSwipeActiveChange={onGestureActiveChange}
         />
       );
     },
-    [drag, currentTrackId, currentIndex, currentTrackIndex, isPlaying, filtering, playAt, onDragStart, onDragMove, onDragEnd]
+    [
+      drag,
+      droplet,
+      currentTrackId,
+      currentIndex,
+      currentTrackIndex,
+      isPlaying,
+      localTracks.length,
+      playAt,
+      onDragStart,
+      onDragMove,
+      onDragEnd,
+      handlePlayNextSwipe,
+      onGestureActiveChange,
+    ]
   );
 
-  // Плавное появление блока «фильтр + сбросить»
-  const chipAnim = useRef(new Animated.Value(sortActive ? 1 : 0)).current;
-  useEffect(() => {
-    Animated.timing(chipAnim, { toValue: sortActive ? 1 : 0, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
-  }, [sortActive, chipAnim]);
-
-  const funnelActive = sortActive || searchLyrics || showFilterMenu;
+  const activeChipCount =
+    (sortActive ? 1 : 0) +
+    (onlyWithLyrics ? 1 : 0) +
+    (onlyWithArtwork ? 1 : 0) +
+    (searchLyrics ? 1 : 0) +
+    (customReordered ? 1 : 0);
+  const hasActiveChips = activeChipCount > 0;
+  const funnelActive = sortActive || searchLyrics || onlyWithLyrics || onlyWithArtwork || showFilterMenu;
 
   return (
     <View style={{ flex: 1 }}>
       <View style={styles.searchWrap}>
         <View style={styles.searchRow}>
           <View style={{ flex: 1 }}>
-            <Glass radius={14} style={{ height: 40 }}>
+            <Glass radius={20} style={{ height: 40 }}>
               <View style={styles.searchInner}>
                 <Ionicons name="search" size={16} color={colors.text3} />
                 <TextInput
@@ -747,37 +1081,101 @@ export const QueueView: React.FC<Props> = ({
         </View>
 
         <View style={styles.metaRow}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <Text style={styles.count}>
-              {filtering ? `Найдено: ${data.length}` : `${localTracks.length} ${plural(localTracks.length)}`}
-            </Text>
-            {searchLyrics && (
-              <PressableScale onPress={() => onSearchLyricsChange?.(false)} hitSlop={6}>
-                <View style={styles.lyricsPill}>
-                  <Ionicons name="document-text" size={11} color={colors.accent} />
-                  <Text style={styles.lyricsPillText}>В текстах</Text>
-                  <Ionicons name="close" size={11} color={colors.accent} />
-                </View>
-              </PressableScale>
-            )}
-          </View>
-          <Animated.View
-            pointerEvents={sortActive ? 'auto' : 'none'}
-            style={[styles.metaRight, { opacity: chipAnim, transform: [{ translateX: chipAnim.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }] }]}
-          >
-            <View style={styles.activePill}>
-              <Text style={styles.activePillText} numberOfLines={1}>
-                {SORT_LABELS[sortMode].label}
-              </Text>
-            </View>
+          <Text style={styles.count}>
+            {filtering ? `Найдено: ${data.length}` : `${localTracks.length} ${plural(localTracks.length)}`}
+          </Text>
+          {activeChipCount >= 2 && (
             <PressableScale onPress={handleReset} scaleTo={0.92}>
               <View style={styles.resetBtn}>
                 <Ionicons name="close" size={13} color={colors.accent} />
-                <Text style={styles.resetBtnText}>Сбросить</Text>
+                <Text style={styles.resetBtnText}>Сбросить всё</Text>
               </View>
             </PressableScale>
-          </Animated.View>
+          )}
         </View>
+
+        {hasActiveChips && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.activeFiltersRow}
+            style={styles.activeFiltersScroll}
+          >
+            {sortActive && (
+              <PressableScale
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  onSortChange('default');
+                }}
+                scaleTo={0.94}
+              >
+                <View style={styles.activeFilterChip}>
+                  <Ionicons name={SORT_LABELS[sortMode].icon} size={12} color={colors.text} />
+                  <Text style={styles.activeFilterChipText}>{SORT_LABELS[sortMode].label}</Text>
+                  <Ionicons name="close" size={12} color={colors.text2} />
+                </View>
+              </PressableScale>
+            )}
+            {onlyWithLyrics && (
+              <PressableScale
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  onOnlyWithLyricsChange?.(false);
+                }}
+                scaleTo={0.94}
+              >
+                <View style={styles.activeFilterChip}>
+                  <Ionicons name="musical-note-outline" size={12} color={colors.accent} />
+                  <Text style={styles.activeFilterChipText}>С текстом</Text>
+                  <Ionicons name="close" size={12} color={colors.text2} />
+                </View>
+              </PressableScale>
+            )}
+            {onlyWithArtwork && (
+              <PressableScale
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  onOnlyWithArtworkChange?.(false);
+                }}
+                scaleTo={0.94}
+              >
+                <View style={styles.activeFilterChip}>
+                  <Ionicons name="image-outline" size={12} color={colors.accent} />
+                  <Text style={styles.activeFilterChipText}>С обложкой</Text>
+                  <Ionicons name="close" size={12} color={colors.text2} />
+                </View>
+              </PressableScale>
+            )}
+            {searchLyrics && (
+              <PressableScale
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  onSearchLyricsChange?.(false);
+                }}
+                scaleTo={0.94}
+              >
+                <View style={styles.activeFilterChip}>
+                  <Ionicons name="document-text" size={12} color={colors.accent} />
+                  <Text style={styles.activeFilterChipText}>В текстах</Text>
+                  <Ionicons name="close" size={12} color={colors.text2} />
+                </View>
+              </PressableScale>
+            )}
+            {customReordered && (
+              <PressableScale onPress={handleResetReorder} scaleTo={0.94}>
+                <View style={styles.activeFilterChip}>
+                  <Ionicons name="refresh" size={12} color={colors.accent} />
+                  <Text style={styles.activeFilterChipText}>Сбросить порядок</Text>
+                  <Ionicons name="close" size={12} color={colors.text2} />
+                </View>
+              </PressableScale>
+            )}
+          </ScrollView>
+        )}
       </View>
 
       <View style={styles.dividerWrap} pointerEvents="none">
@@ -795,7 +1193,7 @@ export const QueueView: React.FC<Props> = ({
             data={data}
             keyExtractor={(i) => i.track.id}
             renderItem={renderItem}
-            extraData={drag}
+            extraData={drag ?? droplet}
             getItemLayout={(_, i) => ({ length: ROW_H, offset: ROW_H * i, index: i })}
             onScrollToIndexFailed={(info) => {
               const offset = Math.max(0, info.index * ROW_H);
@@ -810,7 +1208,7 @@ export const QueueView: React.FC<Props> = ({
                 }
               }, 60);
             }}
-            scrollEnabled={!drag}
+            scrollEnabled={!drag && !droplet}
             initialNumToRender={16}
             windowSize={7}
             maxToRenderPerBatch={12}
@@ -866,17 +1264,50 @@ export const QueueView: React.FC<Props> = ({
             pointerEvents="none"
             style={[styles.overlayRow, { transform: [{ translateY: overlayY }, { scale: overlayScale }] }]}
           >
-            <View style={styles.rowMain}>
-              <RowContent
-                track={dragTrack}
-                isCurrent={dragTrack.id === currentTrackId}
-                isPlaying={isPlaying}
-                isPast={false}
-              />
-            </View>
-            <View style={styles.handle}>
-              <Ionicons name="reorder-three" size={26} color={colors.text} />
-            </View>
+            <Glass radius={ROW_H / 2} intensity={58} style={styles.overlayGlass}>
+              <View style={styles.rowMain}>
+                <RowContent
+                  track={dragTrack}
+                  isCurrent={dragTrack.id === currentTrackId}
+                  isPlaying={isPlaying}
+                  isPast={false}
+                />
+              </View>
+              <View style={styles.handle}>
+                <Ionicons name="reorder-three" size={26} color={colors.text} />
+              </View>
+            </Glass>
+          </Animated.View>
+        )}
+        {droplet && (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.overlayRow,
+              {
+                transform: [
+                  { translateY: dropY },
+                  { translateX: dropX },
+                  { scaleX: dropScaleX },
+                  { scaleY: dropScaleY },
+                ],
+              },
+            ]}
+          >
+            <Glass radius={ROW_H / 2} intensity={58} style={styles.overlayGlass}>
+              <View style={styles.rowMain}>
+                <RowContent
+                  track={droplet.track}
+                  isCurrent={droplet.track.id === currentTrackId}
+                  isPlaying={isPlaying}
+                  isPast={false}
+                />
+              </View>
+              <View style={styles.dropletBadge}>
+                <Ionicons name="arrow-up" size={16} color={colors.onAccent} />
+                <Text style={styles.dropletBadgeText}>Следующим</Text>
+              </View>
+            </Glass>
           </Animated.View>
         )}
         <LinearGradient
@@ -885,7 +1316,7 @@ export const QueueView: React.FC<Props> = ({
           style={[styles.fadeBottom, { height: Math.min(bottomPad, 96) }]}
         />
         {/* ползунок быстрой прокрутки: тянем вдоль правого края — список едет до самого последнего трека */}
-        {scrollable && !drag && (
+        {scrollable && !drag && !droplet && (
           <>
             <Animated.View pointerEvents="none" style={[styles.thumb, { opacity: thumbOpacity, transform: [{ translateY: thumbY }] }]} />
             <View style={[styles.scrollStrip, { height: Math.max(0, listH - bottomPad + 8) }]} {...scrollerPan.panHandlers} />
@@ -912,8 +1343,12 @@ export const QueueView: React.FC<Props> = ({
         visible={showFilterMenu}
         sortMode={sortMode}
         searchLyrics={searchLyrics}
+        onlyWithLyrics={onlyWithLyrics}
+        onlyWithArtwork={onlyWithArtwork}
         onSelect={handleSelectSort}
         onToggleSearchLyrics={() => onSearchLyricsChange?.(!searchLyrics)}
+        onToggleOnlyWithLyrics={() => onOnlyWithLyricsChange?.(!onlyWithLyrics)}
+        onToggleOnlyWithArtwork={() => onOnlyWithArtworkChange?.(!onlyWithArtwork)}
         onOpenLyricsSearch={() => setShowLyricsSearch(true)}
         onClose={() => setShowFilterMenu(false)}
       />
@@ -932,12 +1367,12 @@ function plural(n: number) {
 const styles = StyleSheet.create({
   searchWrap: { paddingHorizontal: 16, paddingBottom: 4 },
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  searchInner: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 8 },
+  searchInner: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 8 },
   searchInput: { flex: 1, color: colors.text, fontSize: 15, paddingVertical: 0 },
   filterBtn: {
     width: 40,
     height: 40,
-    borderRadius: 14,
+    borderRadius: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.15)',
@@ -960,8 +1395,8 @@ const styles = StyleSheet.create({
     elevation: 12,
   },
   menuGlass: { borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.16)' },
-  filterInner: { padding: 6, gap: 2 },
-  filterOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, paddingHorizontal: 12, borderRadius: 12, gap: 10 },
+  filterInner: { padding: 8, gap: 3 },
+  filterOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, paddingHorizontal: 14, borderRadius: 999, gap: 10 },
   filterOptionActive: { backgroundColor: colors.accent },
   filterOptionText: { ...type.body, fontSize: 14, color: colors.text, fontWeight: '500' },
   filterOptionTextActive: { color: colors.onAccent, fontWeight: '700' },
@@ -995,7 +1430,7 @@ const styles = StyleSheet.create({
   toggleBox: {
     width: 20,
     height: 20,
-    borderRadius: 6,
+    borderRadius: 10,
     borderWidth: 1.5,
     borderColor: 'rgba(255, 255, 255, 0.35)',
     alignItems: 'center',
@@ -1009,9 +1444,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingVertical: 3,
-    paddingHorizontal: 7,
-    borderRadius: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 9,
+    borderRadius: 999,
     backgroundColor: 'rgba(255, 255, 255, 0.12)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255, 255, 255, 0.25)',
@@ -1023,11 +1458,38 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10, paddingHorizontal: 4, minHeight: 28 },
-  metaRight: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },
+  activeFiltersScroll: {
+    marginTop: 8,
+    marginHorizontal: -16,
+  },
+  activeFiltersRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+  },
+  activeFilterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingVertical: 6,
+    paddingHorizontal: 11,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  activeFilterChipText: {
+    ...type.caption,
+    fontSize: 11,
+    color: colors.text,
+    fontWeight: '600',
+  },
+  metaRight: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
   activePill: {
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 12,
+    paddingVertical: 5,
+    paddingHorizontal: 12,
+    borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.2)',
@@ -1038,9 +1500,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 12,
+    paddingVertical: 5,
+    paddingHorizontal: 12,
+    borderRadius: 999,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.16)',
@@ -1052,9 +1514,36 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 8,
-    borderRadius: 16,
+    borderRadius: ROW_H / 2,
     borderWidth: 1.5,
     borderColor: 'transparent',
+    position: 'relative',
+  },
+  rowSwipeInner: {
+    flex: 1,
+    height: ROW_H,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.bg,
+  },
+  swipeHintPill: {
+    position: 'absolute',
+    right: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 7,
+    paddingHorizontal: 11,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  swipeHintText: {
+    ...type.caption,
+    fontSize: 11,
+    color: colors.text,
+    fontWeight: '700',
   },
   rowHidden: { opacity: 0 },
   overlayRow: {
@@ -1063,19 +1552,69 @@ const styles = StyleSheet.create({
     right: 16,
     top: 0,
     height: ROW_H,
+    borderRadius: ROW_H / 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.48,
+    shadowRadius: 18,
+    elevation: 16,
+    zIndex: 50,
+  },
+  overlayGlass: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    borderRadius: 16,
+    paddingHorizontal: 10,
+  },
+  dropletOverlayRow: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    top: 0,
+    height: ROW_H,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    borderRadius: ROW_H / 2,
+    borderTopRightRadius: 14,
+    borderBottomRightRadius: ROW_H / 2,
     borderWidth: 1.5,
-    backgroundColor: 'rgba(40,40,44,0.96)',
-    borderColor: 'rgba(255,255,255,0.28)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 14,
-    elevation: 14,
-    zIndex: 50,
+    backgroundColor: 'rgba(46,46,52,0.97)',
+    borderColor: 'rgba(255,255,255,0.45)',
+    shadowColor: '#FFFFFF',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 18,
+    elevation: 16,
+    zIndex: 55,
+  },
+  dropletSplashGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: ROW_H / 2,
+    borderWidth: 2,
+    borderColor: colors.accent,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  dropletBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 18,
+    borderTopLeftRadius: 5,
+    backgroundColor: colors.accent,
+    marginRight: 4,
+  },
+  dropletBadgeText: {
+    ...type.caption,
+    fontSize: 11,
+    color: colors.onAccent,
+    fontWeight: '800',
   },
   thumb: { position: 'absolute', top: 0, right: 5, width: 5, height: THUMB_H, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.55)', zIndex: 15 },
   scrollStrip: { position: 'absolute', top: 0, right: 0, width: STRIP_W, zIndex: 16 },
@@ -1085,9 +1624,9 @@ const styles = StyleSheet.create({
     right: 30,
     minWidth: 90,
     maxWidth: 220,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 14,
+    borderRadius: 999,
     backgroundColor: 'rgba(40,40,44,0.96)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.2)',
@@ -1103,8 +1642,27 @@ const styles = StyleSheet.create({
   rowText: { flex: 1, marginLeft: 12 },
   rowTitle: { ...type.headline, fontSize: 16, color: colors.text, fontWeight: '600' },
   rowArtist: { ...type.body, fontSize: 13, color: colors.text3, marginTop: 2 },
-  playingBadge: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.42)', alignItems: 'center', justifyContent: 'center' },
-  handle: { width: 48, height: ROW_H, alignItems: 'center', justifyContent: 'center' },
+  playingBadge: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 22, backgroundColor: 'rgba(0,0,0,0.42)', alignItems: 'center', justifyContent: 'center' },
+  handle: { width: 48, height: ROW_H, alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  handleDropletBg: {
+    position: 'absolute',
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderTopLeftRadius: 5,
+    backgroundColor: colors.accent,
+  },
+  handleIconWrap: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconAbsolute: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   empty: { alignItems: 'center', paddingTop: 60, paddingHorizontal: 32, gap: 10 },
   emptyTitle: { ...type.title, color: colors.text },
   emptyText: { ...type.body, color: colors.text2, textAlign: 'center', lineHeight: 21 },
