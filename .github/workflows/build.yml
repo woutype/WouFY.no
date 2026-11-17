@@ -90,6 +90,16 @@ jobs:
       - run: npm ci
       - name: Prebuild Android project
         run: npx expo prebuild --platform android --clean
+      - name: Cache Gradle caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            android/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/build.gradle*', 'android/**/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
       - name: Assemble release APK
         run: |
           cd android
