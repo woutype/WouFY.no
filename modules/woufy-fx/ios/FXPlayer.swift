@@ -18,6 +18,9 @@ final class FXPlayer {
   /// Блок моно-семплов (для визуализатора и тактильного отклика)
   var onSamples: (([Double]) -> Void)?
 
+  private let tapLock = NSLock()
+  private var sampleBuffer = [Double](repeating: 0, count: 1024)
+
   private let engine = AVAudioEngine()
   private let node = AVAudioPlayerNode()
   private let timePitch = AVAudioUnitTimePitch()
@@ -148,7 +151,7 @@ final class FXPlayer {
     engineIdlePaused = false
     startEngineIfNeeded()
     schedule(from: pos)
-    if was { beginPlayback() }
+    if was && wantsPlay { beginPlayback() }
   }
 
   // MARK: - Загрузка и воспроизведение
@@ -224,6 +227,13 @@ final class FXPlayer {
     schedStartPos = anchorPos
     guard remaining > 1 else {
       anchorPos = duration
+      if wantsPlay {
+        wantsPlay = false
+        stopSpatialTimer()
+        DispatchQueue.main.async { [weak self] in
+          self?.onEnded?()
+        }
+      }
       return
     }
     node.scheduleSegment(
@@ -261,7 +271,7 @@ final class FXPlayer {
       startEngineIfNeeded()
       schedule(from: anchorPos)
     }
-    beginPlayback()
+    if wantsPlay { beginPlayback() }
   }
 
   func pause() {
@@ -279,8 +289,7 @@ final class FXPlayer {
     let was = wantsPlay
     needsReschedule = false
     schedule(from: seconds)
-    if was {
-      wantsPlay = true
+    if was && wantsPlay {
       beginPlayback()
     }
   }
@@ -432,14 +441,24 @@ final class FXPlayer {
     let mixer = engine.mainMixerNode
     if samplingWanted && !tapInstalled && engine.isRunning {
       mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
-        guard let self = self, let cb = self.onSamples else { return }
-        guard let ch = buffer.floatChannelData else { return }
+        guard let self = self, let ch = buffer.floatChannelData else { return }
         let n = Int(buffer.frameLength)
         if n == 0 { return }
-        var out = [Double](repeating: 0, count: n)
+        self.tapLock.lock()
+        guard let cb = self.onSamples else {
+          self.tapLock.unlock()
+          return
+        }
+        if self.sampleBuffer.count != n {
+          self.sampleBuffer = [Double](repeating: 0, count: n)
+        }
         let p = ch[0]
-        for i in 0..<n { out[i] = Double(p[i]) }
-        cb(out)
+        for i in 0..<n { self.sampleBuffer[i] = Double(p[i]) }
+        let frames = self.sampleBuffer
+        self.tapLock.unlock()
+        DispatchQueue.main.async {
+          cb(frames)
+        }
       }
       tapInstalled = true
     } else if !samplingWanted && tapInstalled {
@@ -462,6 +481,8 @@ final class FXPlayer {
     if engine.isRunning { engine.stop() }
     file = nil
     onEnded = nil
+    tapLock.lock()
     onSamples = nil
+    tapLock.unlock()
   }
 }

@@ -150,7 +150,6 @@ class BpmService {
   /** Поставить трек в очередь анализа (если сетка битов ещё неизвестна). urgent — в начало очереди. */
   request(track: TrackFile | undefined, urgent = false) {
     if (!track) return;
-    if (this.tags.has(track.id) || track.bpmTag) return;
     const rec = getState().bpm?.[track.id];
     if ((rec?.grid && (rec.source === 'manual' || rec.algo === ALGO)) || this.failed.has(track.id)) return;
     if (this.queued.has(track.id)) {
@@ -182,7 +181,7 @@ class BpmService {
           console.warn('[bpm] analyze failed', t.title, e);
         }
         if (res === PAUSED) continue; // трек остаётся в очереди — повторим после склейки
-        this.queue.shift();
+        this.queue = this.queue.filter((x) => x.id !== t.id);
         this.queued.delete(t.id);
         if (res) this.setAuto(t.id, res);
         else this.failed.add(t.id);

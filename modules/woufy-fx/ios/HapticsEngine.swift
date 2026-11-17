@@ -3,6 +3,7 @@ import Foundation
 
 /// Core Haptics: настоящие вибрации Taptic Engine (удары, «толчки» и непрерывный гул баса), а не только лёгкие щелчки.
 final class HapticsEngine {
+  private let lock = NSLock()
   private var engine: CHHapticEngine?
   private var channels: [Int: CHHapticAdvancedPatternPlayer] = [:]
   private var started = false
@@ -12,38 +13,66 @@ final class HapticsEngine {
   }
 
   func start() {
-    guard HapticsEngine.supported, !started else { return }
+    guard HapticsEngine.supported else { return }
+    lock.lock()
+    if started {
+      lock.unlock()
+      return
+    }
     do {
       let e = try CHHapticEngine()
       e.playsHapticsOnly = true
       e.isAutoShutdownEnabled = false
       e.stoppedHandler = { [weak self] _ in
-        self?.started = false
-        self?.channels.removeAll()
+        guard let self = self else { return }
+        self.lock.lock()
+        self.started = false
+        self.channels.removeAll()
+        self.lock.unlock()
       }
       e.resetHandler = { [weak self] in
-        self?.channels.removeAll()
-        try? self?.engine?.start()
-        self?.started = true
+        guard let self = self else { return }
+        self.lock.lock()
+        self.channels.removeAll()
+        do {
+          try self.engine?.start()
+          self.started = true
+        } catch {
+          self.started = false
+        }
+        self.lock.unlock()
       }
       try e.start()
       engine = e
       started = true
+      lock.unlock()
     } catch {
+      lock.unlock()
       NSLog("[WoufyFX] haptics start failed: \(error)")
     }
   }
 
   func stop() {
-    stopRumble()
-    engine?.stop(completionHandler: nil)
+    lock.lock()
+    for (_, r) in channels {
+      try? r.stop(atTime: CHHapticTimeImmediate)
+    }
+    channels.removeAll()
+    let eng = engine
     engine = nil
     started = false
+    lock.unlock()
+    eng?.stop(completionHandler: nil)
   }
 
   /// Короткий удар. intensity/sharpness: 0…1 (низкая резкость — глубокий «бум», высокая — сухой «щелчок»)
   func transient(intensity: Float, sharpness: Float) {
-    guard started, let e = engine else { return }
+    lock.lock()
+    guard started, let e = engine else {
+      lock.unlock()
+      return
+    }
+    lock.unlock()
     let ev = CHHapticEvent(
       eventType: .hapticTransient,
       parameters: [
@@ -57,7 +86,12 @@ final class HapticsEngine {
 
   /// Сильный «толчок»: удар + короткая плотная вибрация (для самых мощных ударов бочки / дропов)
   func thump(intensity: Float) {
-    guard started, let e = engine else { return }
+    lock.lock()
+    guard started, let e = engine else {
+      lock.unlock()
+      return
+    }
+    lock.unlock()
     let i = max(0, min(1, intensity))
     let hit = CHHapticEvent(
       eventType: .hapticTransient,
@@ -93,10 +127,14 @@ final class HapticsEngine {
   /// Непрерывные каналы вибрации (как два мотора у DualSense): 0 — глубокий гул баса, 1 — тонкая «текстура» верхов.
   /// level 0…1 (0 — выключено), sharpness 0…1. Уровень меняется «на лету» без перезапуска.
   func setChannel(_ channel: Int, level: Float, sharpness: Float) {
-    guard started, let e = engine else { return }
     let l = max(0, min(1, level))
     if l < 0.03 {
       stopChannel(channel)
+      return
+    }
+    lock.lock()
+    guard started, let e = engine else {
+      lock.unlock()
       return
     }
     do {
@@ -126,19 +164,24 @@ final class HapticsEngine {
     } catch {
       channels[channel] = nil
     }
+    lock.unlock()
   }
 
   func stopChannel(_ channel: Int) {
+    lock.lock()
     if let r = channels[channel] {
       try? r.stop(atTime: CHHapticTimeImmediate)
     }
     channels[channel] = nil
+    lock.unlock()
   }
 
   func stopRumble() {
+    lock.lock()
     for (_, r) in channels {
       try? r.stop(atTime: CHHapticTimeImmediate)
     }
     channels.removeAll()
+    lock.unlock()
   }
 }

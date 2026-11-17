@@ -20,6 +20,8 @@ const VERIFIED_ARTIST_AVATARS: Record<string, string> = {
 // В памяти кэш: нормализованное имя артиста -> URL аватарки
 const memoryCache = new Map<string, string>();
 let isLoaded = false;
+let initPromise: Promise<void> | null = null;
+const inFlight = new Map<string, Promise<string | null>>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 function normalizeArtist(artist: string): string {
@@ -74,30 +76,36 @@ async function extractAppleMusicPortrait(artistLinkUrl: string): Promise<string 
   return null;
 }
 
-export async function initArtistAvatars(): Promise<void> {
-  if (isLoaded) return;
-  isLoaded = true;
+export function initArtistAvatars(): Promise<void> {
+  if (isLoaded) return Promise.resolve();
+  if (initPromise) return initPromise;
 
-  for (const [k, v] of Object.entries(VERIFIED_ARTIST_AVATARS)) {
-    memoryCache.set(k, v);
-  }
+  initPromise = (async () => {
+    for (const [k, v] of Object.entries(VERIFIED_ARTIST_AVATARS)) {
+      memoryCache.set(k, v);
+    }
 
-  try {
-    const info = await FileSystem.getInfoAsync(AVATARS_FILE);
-    if (info.exists) {
-      const raw = await FileSystem.readAsStringAsync(AVATARS_FILE);
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        for (const [k, v] of Object.entries(parsed)) {
-          if (typeof v === 'string' && v.length > 0 && !VERIFIED_ARTIST_AVATARS[k]) {
-            memoryCache.set(k, v);
+    try {
+      const info = await FileSystem.getInfoAsync(AVATARS_FILE);
+      if (info.exists) {
+        const raw = await FileSystem.readAsStringAsync(AVATARS_FILE);
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          for (const [k, v] of Object.entries(parsed)) {
+            if (typeof v === 'string' && v.length > 0 && !VERIFIED_ARTIST_AVATARS[k]) {
+              memoryCache.set(k, v);
+            }
           }
         }
       }
+    } catch {
+      // игнорируем ошибку чтения
+    } finally {
+      isLoaded = true;
     }
-  } catch {
-    // игнорируем ошибку чтения
-  }
+  })();
+
+  return initPromise;
 }
 
 initArtistAvatars().catch(() => {});
@@ -150,117 +158,127 @@ export async function getArtistAvatar(artist: string, tracks?: TrackFile[]): Pro
     if (val && val.length > 0) return val;
   }
 
-  const clean = artist.split(/[\/,&]|(?:\b(?:feat|ft)\.?\b)/i)[0].trim();
-  if (!clean) return null;
+  const existing = inFlight.get(norm);
+  if (existing) return existing;
 
-  const artistTracks = findArtistTracks(norm, tracks);
-  const sampleTitle = artistTracks.find((t) => t.title && t.title.trim().length > 0)?.title?.trim();
+  const task = (async (): Promise<string | null> => {
+    const clean = artist.split(/[\/,&]|(?:\b(?:feat|ft)\.?\b)/i)[0].trim();
+    if (!clean) return null;
 
-  // 1. Основной источник: Apple Music Connect
-  try {
-    let artistLinkUrl: string | undefined;
+    const artistTracks = findArtistTracks(norm, tracks);
+    const sampleTitle = artistTracks.find((t) => t.title && t.title.trim().length > 0)?.title?.trim();
 
-    // Если есть трек этого артиста — сначала пробуем найти точного артиста через его песню (защита от однофамильцев и чужих фото)
-    if (sampleTitle) {
-      try {
-        const songUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(`${clean} ${sampleTitle}`)}&entity=song&country=RU&limit=5`;
-        const songRes = await fetchWithTimeout(songUrl, 5000);
-        if (songRes.ok) {
-          const songData = await songRes.json();
-          const songs: any[] = songData?.results || [];
-          const songMatch = songs.find(
-            (s) => s.artistName && s.artistName.trim().toLowerCase() === clean.toLowerCase() && s.artistViewUrl
+    // 1. Основной источник: Apple Music Connect
+    try {
+      let artistLinkUrl: string | undefined;
+
+      // Если есть трек этого артиста — сначала пробуем найти точного артиста через его песню (защита от однофамильцев и чужих фото)
+      if (sampleTitle) {
+        try {
+          const songUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(`${clean} ${sampleTitle}`)}&entity=song&country=RU&limit=5`;
+          const songRes = await fetchWithTimeout(songUrl, 5000);
+          if (songRes.ok) {
+            const songData = await songRes.json();
+            const songs: any[] = songData?.results || [];
+            const songMatch = songs.find(
+              (s) => s.artistName && s.artistName.trim().toLowerCase() === clean.toLowerCase() && s.artistViewUrl
+            );
+            if (songMatch?.artistViewUrl) {
+              artistLinkUrl = songMatch.artistViewUrl;
+            }
+          }
+        } catch {
+          // переходим к обычному поиску артиста
+        }
+      }
+
+      if (!artistLinkUrl) {
+        const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(clean)}&entity=musicArtist&country=RU&limit=10`;
+        const res = await fetchWithTimeout(itunesUrl, 6000);
+        if (res.ok) {
+          const data = await res.json();
+          const results: any[] = data?.results || [];
+          // Только строгое совпадение имени артиста (никакого случайного results[0]!)
+          const exactMatches = results.filter(
+            (r) => r.artistName && r.artistName.trim().toLowerCase() === clean.toLowerCase()
           );
-          if (songMatch?.artistViewUrl) {
-            artistLinkUrl = songMatch.artistViewUrl;
+          const match =
+            exactMatches.find((r) => r.artistName === clean) ||
+            exactMatches.find(
+              (r) =>
+                r.primaryGenreName?.includes('Хип') ||
+                r.primaryGenreName?.includes('Hip') ||
+                r.primaryGenreName?.includes('Поп') ||
+                r.primaryGenreName?.includes('Рок')
+            ) ||
+            exactMatches[0];
+
+          if (match?.artistLinkUrl) {
+            artistLinkUrl = match.artistLinkUrl;
           }
         }
-      } catch {
-        // переходим к обычному поиску артиста
       }
-    }
 
-    if (!artistLinkUrl) {
-      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(clean)}&entity=musicArtist&country=RU&limit=10`;
-      const res = await fetchWithTimeout(itunesUrl, 6000);
-      if (res.ok) {
-        const data = await res.json();
-        const results: any[] = data?.results || [];
-        // Только строгое совпадение имени артиста (никакого случайного results[0]!)
-        const exactMatches = results.filter(
-          (r) => r.artistName && r.artistName.trim().toLowerCase() === clean.toLowerCase()
-        );
-        const match =
-          exactMatches.find((r) => r.artistName === clean) ||
-          exactMatches.find(
-            (r) =>
-              r.primaryGenreName?.includes('Хип') ||
-              r.primaryGenreName?.includes('Hip') ||
-              r.primaryGenreName?.includes('Поп') ||
-              r.primaryGenreName?.includes('Рок')
-          ) ||
-          exactMatches[0];
-
-        if (match?.artistLinkUrl) {
-          artistLinkUrl = match.artistLinkUrl;
+      if (artistLinkUrl) {
+        const squareUrl = await extractAppleMusicPortrait(artistLinkUrl);
+        if (squareUrl) {
+          memoryCache.set(norm, squareUrl);
+          scheduleSave();
+          return squareUrl;
         }
       }
+    } catch {
+      // сетевая ошибка Apple Music
     }
 
-    if (artistLinkUrl) {
-      const squareUrl = await extractAppleMusicPortrait(artistLinkUrl);
-      if (squareUrl) {
-        memoryCache.set(norm, squareUrl);
-        scheduleSave();
-        return squareUrl;
-      }
-    }
-  } catch {
-    // сетевая ошибка Apple Music
-  }
-
-  // 2. Запасной источник: Deezer API (строгий поиск по имени + поиск по треку)
-  try {
-    const deezerUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(clean)}&limit=10`;
-    const res = await fetchWithTimeout(deezerUrl, 5000);
-    if (res.ok) {
-      const json = await res.json();
-      const list: any[] = json?.data || [];
-      const exact = list.find((item) => item?.name && item.name.trim().toLowerCase() === clean.toLowerCase());
-      const pic = exact?.picture_xl || exact?.picture_big || exact?.picture_medium;
-      if (pic && !pic.includes('2e018122cb56986277102d2041a592c8')) {
-        memoryCache.set(norm, pic);
-        scheduleSave();
-        return pic;
-      }
-    }
-
-    if (sampleTitle) {
-      const dzTrackUrl = `https://api.deezer.com/search?q=${encodeURIComponent(`artist:"${clean}" track:"${sampleTitle}"`)}&limit=5`;
-      const trRes = await fetchWithTimeout(dzTrackUrl, 5000);
-      if (trRes.ok) {
-        const trJson = await trRes.json();
-        const trList: any[] = trJson?.data || [];
-        const matched = trList.find(
-          (item) => item?.artist?.name && item.artist.name.trim().toLowerCase() === clean.toLowerCase()
-        );
-        const pic = matched?.artist?.picture_xl || matched?.artist?.picture_big || matched?.artist?.picture_medium;
+    // 2. Запасной источник: Deezer API (строгий поиск по имени + поиск по треку)
+    try {
+      const deezerUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(clean)}&limit=10`;
+      const res = await fetchWithTimeout(deezerUrl, 5000);
+      if (res.ok) {
+        const json = await res.json();
+        const list: any[] = json?.data || [];
+        const exact = list.find((item) => item?.name && item.name.trim().toLowerCase() === clean.toLowerCase());
+        const pic = exact?.picture_xl || exact?.picture_big || exact?.picture_medium;
         if (pic && !pic.includes('2e018122cb56986277102d2041a592c8')) {
           memoryCache.set(norm, pic);
           scheduleSave();
           return pic;
         }
       }
+
+      if (sampleTitle) {
+        const dzTrackUrl = `https://api.deezer.com/search?q=${encodeURIComponent(`artist:"${clean}" track:"${sampleTitle}"`)}&limit=5`;
+        const trRes = await fetchWithTimeout(dzTrackUrl, 5000);
+        if (trRes.ok) {
+          const trJson = await trRes.json();
+          const trList: any[] = trJson?.data || [];
+          const matched = trList.find(
+            (item) => item?.artist?.name && item.artist.name.trim().toLowerCase() === clean.toLowerCase()
+          );
+          const pic = matched?.artist?.picture_xl || matched?.artist?.picture_big || matched?.artist?.picture_medium;
+          if (pic && !pic.includes('2e018122cb56986277102d2041a592c8')) {
+            memoryCache.set(norm, pic);
+            scheduleSave();
+            return pic;
+          }
+        }
+      }
+    } catch {
+      // игнорируем
     }
-  } catch {
-    // игнорируем
-  }
 
-  // 3. Финальный запасной вариант: обложка трека этого артиста из библиотеки пользователя
-  const localArt = artistTracks.find((t) => t.artworkUri && t.artworkUri.length > 0)?.artworkUri;
-  if (localArt) {
-    return localArt;
-  }
+    // 3. Финальный запасной вариант: обложка трека этого артиста из библиотеки пользователя
+    const localArt = artistTracks.find((t) => t.artworkUri && t.artworkUri.length > 0)?.artworkUri;
+    if (localArt) {
+      return localArt;
+    }
 
-  return null;
+    return null;
+  })().finally(() => {
+    inFlight.delete(norm);
+  });
+
+  inFlight.set(norm, task);
+  return task;
 }

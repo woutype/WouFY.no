@@ -32,23 +32,43 @@ enum SpeechAligner {
           let group = DispatchGroup()
           let lock = NSLock()
           var results: [(Double, [SFTranscriptionSegment])] = []
+          var activeTasks: [SFSpeechRecognitionTask] = []
+          var isCancelled = false
           var t = 0.0
-          while t < total {
-            let len = min(chunkLen, total - t)
-            let seg = try exportChunk(file: file, start: t, len: len)
-            let chunkStart = t
-            slots.wait()
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-              let segments = recognizeChunk(rec, url: seg)
-              try? FileManager.default.removeItem(at: seg)
-              lock.lock()
-              results.append((chunkStart, segments))
-              lock.unlock()
-              slots.signal()
-              group.leave()
+          do {
+            while t < total {
+              let len = min(chunkLen, total - t)
+              let seg = try exportChunk(file: file, start: t, len: len)
+              let chunkStart = t
+              slots.wait()
+              group.enter()
+              DispatchQueue.global(qos: .userInitiated).async {
+                let segments = recognizeChunk(rec, url: seg) { task in
+                  lock.lock()
+                  if isCancelled {
+                    task.cancel()
+                  } else {
+                    activeTasks.append(task)
+                  }
+                  lock.unlock()
+                }
+                try? FileManager.default.removeItem(at: seg)
+                lock.lock()
+                results.append((chunkStart, segments))
+                lock.unlock()
+                slots.signal()
+                group.leave()
+              }
+              t += chunkLen
             }
-            t += chunkLen
+          } catch {
+            lock.lock()
+            isCancelled = true
+            let tasksToCancel = activeTasks
+            activeTasks.removeAll()
+            lock.unlock()
+            for task in tasksToCancel { task.cancel() }
+            throw error
           }
           group.wait()
           lock.lock()
@@ -113,22 +133,47 @@ enum SpeechAligner {
     return tmp
   }
 
-  private static func recognizeChunk(_ rec: SFSpeechRecognizer, url: URL) -> [SFTranscriptionSegment] {
+  private static func recognizeChunk(
+    _ rec: SFSpeechRecognizer,
+    url: URL,
+    onTask: ((SFSpeechRecognitionTask) -> Void)? = nil
+  ) -> [SFTranscriptionSegment] {
     let sem = DispatchSemaphore(value: 0)
+    let lock = NSLock()
+    var finished = false
     var out: [SFTranscriptionSegment] = []
     let req = SFSpeechURLRecognitionRequest(url: url)
     req.shouldReportPartialResults = false
     if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
-    var task: SFSpeechRecognitionTask?
-    task = rec.recognitionTask(with: req) { result, error in
+    let task = rec.recognitionTask(with: req) { result, error in
       if let r = result, r.isFinal {
-        out = r.bestTranscription.segments
-        sem.signal()
+        lock.lock()
+        if !finished {
+          finished = true
+          out = r.bestTranscription.segments
+          sem.signal()
+        }
+        lock.unlock()
       } else if error != nil {
-        sem.signal()
+        lock.lock()
+        if !finished {
+          finished = true
+          sem.signal()
+        }
+        lock.unlock()
       }
     }
-    if sem.wait(timeout: .now() + 120) == .timedOut { task?.cancel() }
-    return out
+    onTask?(task)
+    if sem.wait(timeout: .now() + 120) == .timedOut {
+      lock.lock()
+      let shouldCancel = !finished
+      finished = true
+      lock.unlock()
+      if shouldCancel { task.cancel() }
+    }
+    lock.lock()
+    let segments = out
+    lock.unlock()
+    return segments
   }
 }

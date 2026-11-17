@@ -92,15 +92,17 @@ public class MetadataScanner {
     results.reserveCapacity(items.count)
 
     for item in items {
-      guard let uriStr = item["uri"] as? String,
-            let id = item["id"] as? String else { continue }
+      autoreleasepool {
+        guard let uriStr = item["uri"] as? String,
+              let id = item["id"] as? String else { return }
 
-      let cleanUri = uriStr.hasPrefix("file://") ? String(uriStr.dropFirst(7)) : uriStr
-      let decoded = cleanUri.removingPercentEncoding ?? cleanUri
-      let fileURL = URL(fileURLWithPath: decoded)
+        let cleanUri = uriStr.hasPrefix("file://") ? String(uriStr.dropFirst(7)) : uriStr
+        let decoded = cleanUri.removingPercentEncoding ?? cleanUri
+        let fileURL = URL(fileURLWithPath: decoded)
 
-      let meta = extractSingleFile(fileURL: fileURL, id: id, coversDirURL: coversDirURL)
-      results.append(meta)
+        let meta = extractSingleFile(fileURL: fileURL, id: id, coversDirURL: coversDirURL)
+        results.append(meta)
+      }
     }
 
     return results
@@ -421,30 +423,31 @@ public class DirectoryWatcher {
   }
 
   public func start() {
-    stop()
-    let fd = open(url.path, O_EVTONLY)
-    guard fd != -1 else { return }
-    self.fileDescriptor = fd
+    queue.async { [weak self] in
+      guard let self = self else { return }
+      self.stopLocked()
+      let fd = open(self.url.path, O_EVTONLY)
+      guard fd != -1 else { return }
+      self.fileDescriptor = fd
 
-    let src = DispatchSource.makeFileSystemObjectSource(
-      fileDescriptor: fd,
-      eventMask: [.write, .extend, .rename, .delete],
-      queue: queue
-    )
+      let src = DispatchSource.makeFileSystemObjectSource(
+        fileDescriptor: fd,
+        eventMask: [.write, .extend, .rename, .delete],
+        queue: self.queue
+      )
 
-    src.setEventHandler { [weak self] in
-      self?.debounceNotify()
-    }
-
-    src.setCancelHandler { [weak self] in
-      if let fd = self?.fileDescriptor, fd != -1 {
-        close(fd)
-        self?.fileDescriptor = -1
+      src.setEventHandler { [weak self] in
+        self?.debounceNotify()
       }
-    }
 
-    self.source = src
-    src.resume()
+      let fdToClose = fd
+      src.setCancelHandler {
+        close(fdToClose)
+      }
+
+      self.source = src
+      src.resume()
+    }
   }
 
   private func debounceNotify() {
@@ -460,16 +463,24 @@ public class DirectoryWatcher {
     t.resume()
   }
 
-  public func stop() {
+  private func stopLocked() {
     timer?.cancel()
     timer = nil
     if let s = source {
       s.cancel()
       source = nil
     }
+    fileDescriptor = -1
+  }
+
+  public func stop() {
+    queue.async { [weak self] in
+      self?.stopLocked()
+    }
   }
 
   deinit {
-    stop()
+    timer?.cancel()
+    source?.cancel()
   }
 }

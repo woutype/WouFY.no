@@ -53,6 +53,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
   cbs.current = { onNext, onPrevious, onDragDownGrant, onDragDownMove, onDragDownRelease };
   const dragMode = useRef<'none' | 'horizontal' | 'vertical'>('none');
   const isAnimating = useRef(false);
+  const skipNextEffectRef = useRef(false);
   const currentTrack = n > 0 ? queue[index >= 0 && index < n ? index : 0] : undefined;
   const currentTrackId = currentTrack?.id;
   const prevIndexRef = useRef(index);
@@ -64,10 +65,13 @@ export const ArtworkCarousel: React.FC<Props> = ({
     prevIndexRef.current = index;
     prevTrackIdRef.current = currentTrackId;
 
+    const wasSwipeCommit = skipNextEffectRef.current;
+    skipNextEffectRef.current = false;
+
     // Если играющий трек не менялся (например, включили Shuffle или переставили очередь) — не дёргаем обложку
     if (!prevId || prevId === currentTrackId) return;
 
-    if (isAnimating.current) {
+    if (wasSwipeCommit || isAnimating.current) {
       // Переключение произошло от жеста пальцем (жест уже сам анимировал смещение)
       return;
     }
@@ -246,6 +250,7 @@ export const ArtworkCarousel: React.FC<Props> = ({
               mass: 0.9,
             }).start(({ finished }) => {
               if (finished) {
+                skipNextEffectRef.current = true;
                 if (isNext) cbs.current.onNext();
                 else cbs.current.onPrevious();
               }

@@ -337,7 +337,7 @@ async function parseFlac(fileUri: string, cacheKey: string, coverDir?: string): 
 
     if (type === 4 && len > 0 && len < 8 * 1024 * 1024) {
       const d = await readRange(fileUri, body, len);
-      const dv = (o: number) => d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | ((d[o + 3] << 24) >>> 0);
+      const dv = (o: number) => (d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | (d[o + 3] << 24)) >>> 0;
       let o = 0;
       const vendorLen = dv(o);
       o += 4 + vendorLen;

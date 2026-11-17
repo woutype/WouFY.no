@@ -132,7 +132,17 @@ export const LyricsSearchModal: React.FC<Props> = ({ visible, tracks, onSelectTr
     }
   }, [visible, panY]);
 
+  useEffect(() => {
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    };
+  }, []);
+
   const handleClose = () => {
+    if (searchTimer.current) {
+      clearTimeout(searchTimer.current);
+      searchTimer.current = null;
+    }
     Animated.timing(panY, {
       toValue: 600,
       duration: 180,

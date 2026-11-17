@@ -337,6 +337,7 @@ export async function enrichTracks(
     const coversDir = `${DATA_DIR}covers/`;
     const useNative = Boolean(WoufyFX?.nativeExtractMetadata);
     const BATCH = useNative ? 32 : 8;
+    const nativeMetaOk = new Set<string>();
 
     /** Лёгкие миниатюры (JPEG ~192px, имя = хэш содержимого → общий файл на альбом). Текст к этому моменту уже на экране. */
     const thumbPass = async (list: TrackFile[]) => {
@@ -369,8 +370,11 @@ export async function enrichTracks(
         }
       }
 
-      // JS fallback для треков, у которых так и не появилась обложка/миниатюра или тексты
-      const missing = list.filter((t) => !all.get(t.id)?.artworkUri);
+      // JS fallback только для треков, для которых нативное извлечение не запускалось или завершилось ошибкой
+      const missing = list.filter((t) => {
+        const cur = all.get(t.id);
+        return !cur?.artworkUri && !cur?.thumbDone && !nativeMetaOk.has(t.id);
+      });
       if (missing.length > 0) {
         for (const t of missing) {
           if (isCancelled()) return;
@@ -413,6 +417,7 @@ export async function enrichTracks(
           const metaMap = new Map(rawMetas.map((m) => [m.id, m]));
 
           done = batch.map((t) => {
+            nativeMetaOk.add(t.id);
             const meta = metaMap.get(t.id);
             const baseName = t.filename.replace(/\.[^/.]+$/, '');
             const fb = parseName(baseName);

@@ -26,6 +26,11 @@ export function needsThumb(t: TrackFile): boolean {
 const memo = new Map<string, string | null>();
 const MEMO_MAX = 12;
 
+function memoSet(key: string, val: string | null) {
+  memo.set(key, val);
+  if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value as string);
+}
+
 /** Мгновенное синхронное получение уже прочитанного оригинала обложки (без мигания при перелистывании) */
 export function peekFullArtwork(t?: TrackFile): string | undefined {
   if (!t) return undefined;
@@ -59,8 +64,7 @@ export async function getFullArtwork(t: TrackFile): Promise<string | null> {
     try {
       const uri = await WoufyFX.nativeExtractArtwork(t.uri, originalsDir());
       if (uri) {
-        memo.set(key, uri);
-        if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value as string);
+        memoSet(key, uri);
         return uri;
       }
     } catch (e) {
@@ -72,14 +76,13 @@ export async function getFullArtwork(t: TrackFile): Promise<string | null> {
   try {
     const meta = await parseAudioTags(t.uri, t.id, t.extension, originalsDir());
     if (meta.artworkUri) {
-      memo.set(key, meta.artworkUri);
-      if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value as string);
+      memoSet(key, meta.artworkUri);
       return meta.artworkUri;
     }
   } catch (e) {
     console.warn('[artwork] JS parseAudioTags failed:', e);
   }
 
-  memo.set(key, null);
+  memoSet(key, null);
   return t.artworkUri ?? null;
 }

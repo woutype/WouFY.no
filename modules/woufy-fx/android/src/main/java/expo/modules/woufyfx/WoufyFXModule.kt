@@ -96,30 +96,39 @@ internal class AndroidFXPlayer(
 
   private val tickRunnable = object : Runnable {
     override fun run() {
-      if (!tickRunning) return
-      val player = mp
-      if (player != null && loaded && playing) {
-        if (spatial8d) {
-          phase8d += 0.045
-          val pan = sin(phase8d).toFloat() // -1..1
-          val left = volume * (if (pan > 0f) (1f - pan * 0.65f) else 1f)
-          val right = volume * (if (pan < 0f) (1f + pan * 0.65f) else 1f)
-          try {
-            player.setVolume(left.coerceIn(0f, 1f), right.coerceIn(0f, 1f))
-          } catch (_: Throwable) {}
-        }
-        if (sampling && volume > 0.01f) {
-          samplePhase += 0.35 * rate
-          val frames = ArrayList<Double>(64)
-          for (i in 0 until 64) {
-            val t = samplePhase + i * 0.19
-            val w = (sin(t * 2.3) * 0.45 + cos(t * 5.1) * 0.35 + sin(t * 11.7) * 0.2) * volume
-            frames.add(w)
+      var shouldReschedule = false
+      var framesToEmit: List<Double>? = null
+      synchronized(this@AndroidFXPlayer) {
+        if (!tickRunning) return
+        val player = mp
+        if (player != null && loaded && playing) {
+          if (spatial8d) {
+            phase8d += 0.045
+            val pan = sin(phase8d).toFloat() // -1..1
+            val left = volume * (if (pan > 0f) (1f - pan * 0.65f) else 1f)
+            val right = volume * (if (pan < 0f) (1f + pan * 0.65f) else 1f)
+            try {
+              player.setVolume(left.coerceIn(0f, 1f), right.coerceIn(0f, 1f))
+            } catch (_: IllegalStateException) {
+            } catch (_: Throwable) {}
           }
-          onSamples(id, frames)
+          if (sampling && volume > 0.01f) {
+            samplePhase += 0.35 * rate
+            val frames = ArrayList<Double>(64)
+            for (i in 0 until 64) {
+              val t = samplePhase + i * 0.19
+              val w = (sin(t * 2.3) * 0.45 + cos(t * 5.1) * 0.35 + sin(t * 11.7) * 0.2) * volume
+              frames.add(w)
+            }
+            framesToEmit = frames
+          }
         }
+        shouldReschedule = tickRunning
       }
-      handler.postDelayed(this, 45L)
+      framesToEmit?.let { onSamples(id, it) }
+      if (shouldReschedule) {
+        handler.postDelayed(this, 45L)
+      }
     }
   }
 
@@ -141,21 +150,30 @@ internal class AndroidFXPlayer(
     if (!file.exists()) return 0.0
 
     val player = MediaPlayer()
-    player.setAudioAttributes(
-      AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_MEDIA)
-        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-        .build()
-    )
-    player.setDataSource(file.absolutePath)
-    player.prepare()
+    try {
+      player.setAudioAttributes(
+        AudioAttributes.Builder()
+          .setUsage(AudioAttributes.USAGE_MEDIA)
+          .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+          .build()
+      )
+      player.setDataSource(file.absolutePath)
+      player.prepare()
+    } catch (t: Throwable) {
+      try {
+        player.release()
+      } catch (_: Throwable) {}
+      throw t
+    }
     durationSec = (player.duration.coerceAtLeast(0)) / 1000.0
     loaded = true
     playing = false
 
     player.setOnCompletionListener {
-      playing = false
-      updateTickState()
+      synchronized(this@AndroidFXPlayer) {
+        playing = false
+        updateTickState()
+      }
       onEnded(id)
     }
 
@@ -203,20 +221,26 @@ internal class AndroidFXPlayer(
     } catch (_: Throwable) {}
   }
 
+  @Synchronized
   fun getTime(): Double {
     val player = mp ?: return 0.0
     if (!loaded) return 0.0
     return try {
       (player.currentPosition.coerceAtLeast(0)) / 1000.0
+    } catch (_: IllegalStateException) {
+      0.0
     } catch (_: Throwable) {
       0.0
     }
   }
 
+  @Synchronized
   fun getDuration(): Double = durationSec
 
+  @Synchronized
   fun isPlaying(): Boolean = playing
 
+  @Synchronized
   fun isLoaded(): Boolean = loaded
 
   @Synchronized
@@ -526,20 +550,31 @@ class WoufyFXModule : Module() {
       currentAlbum = album
       currentDurationMs = (duration * 1000.0).toLong().coerceAtLeast(0L)
 
-      if (artworkPath != currentArtPath) {
-        currentArtPath = artworkPath
-        currentArtBitmap = if (!artworkPath.isNullOrEmpty()) {
-          val f = parseLocalFile(artworkPath)
-          if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
-        } else {
-          null
-        }
-      }
+      val needsDecode = artworkPath != currentArtPath
+      currentArtPath = artworkPath
 
-      mainHandler.post {
-        ensureMediaSession()
-        updateMediaSessionMetadata()
-        updateMediaNotification()
+      if (needsDecode) {
+        Thread {
+          val bmp = if (!artworkPath.isNullOrEmpty()) {
+            decodeSampledArtwork(parseLocalFile(artworkPath), 512)
+          } else {
+            null
+          }
+          mainHandler.post {
+            if (currentArtPath == artworkPath) {
+              currentArtBitmap = bmp
+            }
+            ensureMediaSession()
+            updateMediaSessionMetadata()
+            updateMediaNotification()
+          }
+        }.start()
+      } else {
+        mainHandler.post {
+          ensureMediaSession()
+          updateMediaSessionMetadata()
+          updateMediaNotification()
+        }
       }
     }
 
@@ -548,7 +583,6 @@ class WoufyFXModule : Module() {
       currentRate = rate.toFloat()
       mainHandler.post {
         updateMediaSessionPlaybackState()
-        updateMediaNotification()
       }
     }
 
@@ -597,6 +631,7 @@ class WoufyFXModule : Module() {
         promise.resolve(null)
         return@AsyncFunction
       }
+      pendingImagePromise?.reject("E_CANCELLED", "New image picker request started", null)
       pendingImagePromise = promise
       val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
         type = "image/*"
@@ -620,17 +655,13 @@ class WoufyFXModule : Module() {
         }
         val uri = payload.data!!.data!!
         try {
-          val input = activity.contentResolver.openInputStream(uri)
-          if (input != null) {
+          activity.contentResolver.openInputStream(uri)?.use { input ->
             val outFile = File(activity.cacheDir, "cover_${UUID.randomUUID()}.jpg")
             FileOutputStream(outFile).use { output ->
               input.copyTo(output)
             }
-            input.close()
             promise.resolve("file://${outFile.absolutePath}")
-          } else {
-            promise.resolve(null)
-          }
+          } ?: promise.resolve(null)
         } catch (_: Throwable) {
           promise.resolve(null)
         }
@@ -714,10 +745,15 @@ class WoufyFXModule : Module() {
           "${ctx.packageName}.woufyfx.provider",
           file
         )
-        val mime = if (file.name.endsWith(".png", ignoreCase = true) || file.name.endsWith(".jpg", ignoreCase = true)) {
-          "image/png"
-        } else {
-          "video/mp4"
+        val lowerName = file.name.lowercase()
+        val mime = when {
+          lowerName.endsWith(".png") -> "image/png"
+          lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") -> "image/jpeg"
+          lowerName.endsWith(".m4a") -> "audio/mp4"
+          lowerName.endsWith(".mp3") -> "audio/mpeg"
+          lowerName.endsWith(".aac") -> "audio/aac"
+          lowerName.endsWith(".mp4") -> "video/mp4"
+          else -> "*/*"
         }
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
           type = mime
@@ -743,6 +779,25 @@ class WoufyFXModule : Module() {
   }
 
   // MARK: - MediaSession & Notification
+
+  private fun decodeSampledArtwork(file: File, maxDim: Int): Bitmap? {
+    if (!file.exists()) return null
+    return try {
+      val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeFile(file.absolutePath, boundsOpts)
+      var sampleSize = 1
+      val maxSide = max(boundsOpts.outWidth, boundsOpts.outHeight)
+      if (maxSide > maxDim) {
+        while (maxSide / sampleSize > maxDim) {
+          sampleSize *= 2
+        }
+      }
+      val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+      BitmapFactory.decodeFile(file.absolutePath, decodeOpts)
+    } catch (_: Throwable) {
+      null
+    }
+  }
 
   private fun ensureMediaSession() {
     if (mediaSession != null) return

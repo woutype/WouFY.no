@@ -112,8 +112,11 @@ final class VideoCardGenerator {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
 
         for frameIdx in 0..<totalFrames {
-          while !writerInput.isReadyForMoreMediaData {
+          while !writerInput.isReadyForMoreMediaData && writer.status == .writing {
             Thread.sleep(forTimeInterval: 0.004)
+          }
+          if writer.status != .writing {
+            throw writer.error ?? VideoCardError.failedToStartWriter
           }
 
           autoreleasepool {
@@ -179,9 +182,12 @@ final class VideoCardGenerator {
           sema.signal()
         }
         sema.wait()
+        if writer.status == .failed {
+          throw writer.error ?? VideoCardError.exportFailed("Ошибка записи видео")
+        }
 
         // 3. Сведение с аудио-отрывком через AVMutableComposition
-        let finalURL = tempDir.appendingPathComponent("WouFY_Clip_\(Int(Date().timeIntervalSince1970)).mp4")
+        let finalURL = tempDir.appendingPathComponent("WouFY_Clip_\(Int(Date().timeIntervalSince1970))_\(UUID().uuidString.prefix(6)).mp4")
         try? FileManager.default.removeItem(at: finalURL)
 
         let audioURL = parseLocalFileURL(audioUri)
@@ -288,7 +294,7 @@ final class VideoCardGenerator {
       }
 
       let tempDir = FileManager.default.temporaryDirectory
-      let outURL = tempDir.appendingPathComponent("WouFY_Card_\(Int(Date().timeIntervalSince1970)).png")
+      let outURL = tempDir.appendingPathComponent("WouFY_Card_\(Int(Date().timeIntervalSince1970))_\(UUID().uuidString.prefix(6)).png")
       try? FileManager.default.removeItem(at: outURL)
 
       do {
@@ -343,6 +349,7 @@ final class VideoCardGenerator {
       let bound = (joinedText as NSString).boundingRect(
         with: CGSize(width: cardW - textPad * 2, height: cardMaxH - headerH - textPad * 2),
         options: [.usesLineFragmentOrigin, .usesFontLeading],
+        attributes: textAttrs,
         context: nil
       )
 

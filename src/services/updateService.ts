@@ -45,6 +45,16 @@ export function compareVersions(a: string, b: string): number {
 
 let cachedUpdate: UpdateInfo | null = null;
 
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 12000): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function checkForUpdate(force = false): Promise<UpdateInfo> {
   if (cachedUpdate && !force) return cachedUpdate;
 
@@ -56,7 +66,7 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo> {
 
   // 1. Сначала проверяем raw apps.json (мгновенно и без лимитов GitHub API)
   try {
-    const res = await fetch(`${APPS_JSON_URL}?t=${Date.now()}`, {
+    const res = await fetchWithTimeout(`${APPS_JSON_URL}?t=${Date.now()}`, {
       headers: { 'Cache-Control': 'no-cache' },
     });
     if (res.ok) {
@@ -84,7 +94,7 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo> {
 
   // 2. Дополнительно проверяем GitHub Releases API (если там опубликован ещё более свежий тег или APK)
   try {
-    const res = await fetch(GITHUB_RELEASE_API, {
+    const res = await fetchWithTimeout(GITHUB_RELEASE_API, {
       headers: { Accept: 'application/vnd.github+json' },
     });
     if (res.ok) {

@@ -433,7 +433,7 @@ export class AudioEngine {
     if (updated.length === 0) return;
     const map = new Map(updated.map((t) => [t.id, t]));
     this.library = this.library.map((t) => map.get(t.id) ?? t);
-    if ((this.query || this.sortMode !== 'default') && !this.state.customReordered) {
+    if ((this.query || this.sortMode !== 'default' || this.onlyWithLyrics || this.onlyWithArtwork) && !this.state.customReordered) {
       // сортировка/поиск зависят от тегов: пока они дочитываются, очередь пересобирается
       const d = this.deriveQueue();
       this.set({ queue: d.queue, index: d.index, pinned: d.pinned });
@@ -616,7 +616,7 @@ export class AudioEngine {
     const uri = resolveTrackUri(t.uri || t.id);
     safe(() => {
       this.load(this.A, uri);
-      this.A.volume = 1;
+      this.A.volume = this.master();
     });
     this.applyFx(this.A);
     this.updateLockScreen(this.A, t);
@@ -672,7 +672,8 @@ export class AudioEngine {
     else if (from < index && to >= index) index -= 1;
     else if (from > index && to <= index) index += 1;
 
-    const isFilteredOrSorted = Boolean(this.query) || this.sortMode !== 'default' || this.searchLyrics;
+    const isFilteredOrSorted =
+      Boolean(this.query) || this.sortMode !== 'default' || this.searchLyrics || this.onlyWithLyrics || this.onlyWithArtwork;
     if (!isFilteredOrSorted) {
       const ids = q.map((t) => t.id);
       if (this.state.shuffle) this.shufflePerm = ids;
@@ -1101,7 +1102,9 @@ export class AudioEngine {
       return;
     }
     const pos = player.currentTime;
-    if (typeof pos === 'number' && !isNaN(pos)) statsService.onTrackPosition(pos, s.duration);
+    if (typeof pos === 'number' && !isNaN(pos) && !this.trans?.uiSwitched) {
+      statsService.onTrackPosition(pos, s.duration);
+    }
     const patch: Partial<EngineState> = {};
     if (s.duration > 0 && s.duration !== this.state.duration) {
       patch.duration = s.duration;

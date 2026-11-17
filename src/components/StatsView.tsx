@@ -8,6 +8,8 @@ import { colors, type } from '../theme';
 import { CoverArt, Glass, PressableScale } from './ui';
 import { ArtistAvatar } from './ArtistAvatar';
 
+const subscribeStats = (cb: () => void) => statsService.subscribe(cb);
+
 interface Props {
   tracks: TrackFile[];
   onPlayTopTracks: (topTracks: TrackFile[], index: number) => void;
@@ -220,7 +222,7 @@ export const StatsView: React.FC<Props> = ({
   };
 
   // Реактивная подписка на обновления статистики в реальном времени
-  useSyncExternalStore(statsService.subscribe.bind(statsService), () => statsService.version);
+  useSyncExternalStore(subscribeStats, () => statsService.version);
 
   const trackMap = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
 

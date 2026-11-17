@@ -103,7 +103,7 @@ final class FxExporter {
           AVNumberOfChannelsKey: channels,
           AVEncoderBitRateKey: 256_000,
         ]
-        let outFile = try AVAudioFile(forWriting: outURL, settings: outSettings)
+        var outFile: AVAudioFile? = try AVAudioFile(forWriting: outURL, settings: outSettings)
 
         guard let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat, frameCapacity: maxFrames) else {
           throw NSError(domain: "WoufyFX", code: 500, userInfo: [NSLocalizedDescriptionKey: "Ошибка буфера рендера"])
@@ -114,8 +114,10 @@ final class FxExporter {
         let targetTotalFrames = AVAudioFramePosition(expectedOutSec * sampleRate)
         var renderedFrames: AVAudioFramePosition = 0
         var angle: Double = 0
+        var insufficientRetries = 0
+        var renderDone = false
 
-        while renderedFrames < targetTotalFrames {
+        while renderedFrames < targetTotalFrames && !renderDone {
           let framesToRender = min(maxFrames, AVAudioFrameCount(targetTotalFrames - renderedFrames))
           if spatial8d {
             let dt = Double(framesToRender) / sampleRate
@@ -126,21 +128,28 @@ final class FxExporter {
           let status = try engine.renderOffline(framesToRender, to: buffer)
           switch status {
           case .success:
-            try outFile.write(from: buffer)
+            insufficientRetries = 0
+            try outFile?.write(from: buffer)
             renderedFrames += AVAudioFramePosition(buffer.frameLength)
           case .insufficientDataFromInputNode:
-            break
+            insufficientRetries += 1
+            if insufficientRetries > 4 {
+              renderDone = true
+            } else {
+              Thread.sleep(forTimeInterval: 0.002)
+            }
           case .cannotDoInCurrentContext:
             Thread.sleep(forTimeInterval: 0.002)
           case .error:
             throw NSError(domain: "WoufyFX", code: 500, userInfo: [NSLocalizedDescriptionKey: "Ошибка рендеринга эффекта"])
           @unknown default:
-            break
+            renderDone = true
           }
         }
 
         player.stop()
         engine.stop()
+        outFile = nil
         completion(.success(outURL.absoluteString))
       } catch {
         completion(.failure(error))

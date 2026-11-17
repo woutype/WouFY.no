@@ -160,9 +160,11 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       const localUri = await downloadCoverToCache(cover.highResUrl, track.id);
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setArtworkUri(localUri);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (localUri) {
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+        setArtworkUri(localUri);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
     } catch (e) {
       console.warn('Failed to download cover:', e);
     } finally {
@@ -224,7 +226,7 @@ export const TagEditorModal: React.FC<Props> = ({ visible, track, onSave, onClos
       year: !isNaN(parsedYear) && parsedYear > 1900 && parsedYear < 2100 ? parsedYear : undefined,
       genre: genre.trim() || undefined,
       trackNumber: !isNaN(parsedTrackNo) && parsedTrackNo > 0 ? parsedTrackNo : undefined,
-      artworkUri: artworkUri || track.artworkUri,
+      artworkUri,
       thumbDone: true,
       tagged: true,
       lyrics: trimmedLyrics,

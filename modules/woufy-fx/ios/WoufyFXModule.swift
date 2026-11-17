@@ -6,20 +6,35 @@ import PhotosUI
 
 private var pickerKey: UInt8 = 0
 
-final class PHPickerHandler: NSObject, PHPickerViewControllerDelegate {
-  let completion: (String?) -> Void
+final class PHPickerHandler: NSObject, PHPickerViewControllerDelegate, UIAdaptivePresentationControllerDelegate {
+  private let lock = NSLock()
+  private var completion: ((String?) -> Void)?
+
   init(completion: @escaping (String?) -> Void) {
     self.completion = completion
   }
+
+  private func finish(_ uri: String?) {
+    lock.lock()
+    let cb = completion
+    completion = nil
+    lock.unlock()
+    cb?(uri)
+  }
+
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    finish(nil)
+  }
+
   func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
     picker.dismiss(animated: true)
     guard let provider = results.first?.itemProvider, provider.canLoadObject(ofClass: UIImage.self) else {
-      completion(nil)
+      finish(nil)
       return
     }
     provider.loadObject(ofClass: UIImage.self) { image, _ in
       guard let img = image as? UIImage else {
-        self.completion(nil)
+        self.finish(nil)
         return
       }
       let fileName = "cover_\(UUID().uuidString).jpg"
@@ -27,9 +42,9 @@ final class PHPickerHandler: NSObject, PHPickerViewControllerDelegate {
       let fileURL = dir.appendingPathComponent(fileName)
       if let data = img.jpegData(compressionQuality: 0.95) {
         try? data.write(to: fileURL)
-        self.completion(fileURL.absoluteString)
+        self.finish(fileURL.absoluteString)
       } else {
-        self.completion(nil)
+        self.finish(nil)
       }
     }
   }
@@ -45,10 +60,17 @@ internal func parseLocalFileURL(_ uri: String) -> URL {
 /// плюс собственные «Now Playing» и кнопки экрана блокировки (на время, пока работают эффекты).
 public class WoufyFXModule: Module {
   private var players: [String: FXPlayer] = [:]
+  private let playersLock = NSLock()
   private let haptics = HapticsEngine()
   private var remoteTokens: [(MPRemoteCommand, Any)] = []
   private var interruptionObserver: NSObjectProtocol?
   private var directoryWatcher: DirectoryWatcher?
+
+  private func getPlayer(_ id: String) -> FXPlayer? {
+    playersLock.lock()
+    defer { playersLock.unlock() }
+    return players[id]
+  }
 
   public func definition() -> ModuleDefinition {
     Name("WoufyFX")
@@ -60,7 +82,11 @@ public class WoufyFXModule: Module {
     }
 
     Function("create") { (id: String) -> Void in
-      if self.players[id] != nil { return }
+      self.playersLock.lock()
+      if self.players[id] != nil {
+        self.playersLock.unlock()
+        return
+      }
       let p = FXPlayer(id: id)
       p.onEnded = { [weak self] in
         self?.sendEvent("onEnded", ["id": id])
@@ -69,75 +95,76 @@ public class WoufyFXModule: Module {
         self?.sendEvent("onSamples", ["id": id, "frames": frames])
       }
       self.players[id] = p
+      self.playersLock.unlock()
     }
 
     Function("destroy") { (id: String) -> Void in
-      if let p = self.players[id] {
-        p.destroy()
-        self.players.removeValue(forKey: id)
-      }
+      self.playersLock.lock()
+      let p = self.players.removeValue(forKey: id)
+      self.playersLock.unlock()
+      p?.destroy()
     }
 
     AsyncFunction("load") { (id: String, uri: String) throws -> Double in
-      guard let p = self.players[id] else { return 0 }
+      guard let p = self.getPlayer(id) else { return 0 }
       let url = parseLocalFileURL(uri)
       return try p.load(url: url)
     }.runOnQueue(DispatchQueue.main)
 
     AsyncFunction("play") { (id: String) -> Void in
-      self.players[id]?.play()
+      self.getPlayer(id)?.play()
     }.runOnQueue(DispatchQueue.main)
 
     AsyncFunction("pause") { (id: String) -> Void in
-      self.players[id]?.pause()
+      self.getPlayer(id)?.pause()
     }.runOnQueue(DispatchQueue.main)
 
     AsyncFunction("seek") { (id: String, seconds: Double) -> Void in
-      self.players[id]?.seek(to: seconds)
+      self.getPlayer(id)?.seek(to: seconds)
     }.runOnQueue(DispatchQueue.main)
 
     Function("getTime") { (id: String) -> Double in
-      return self.players[id]?.currentTime() ?? 0
+      return self.getPlayer(id)?.currentTime() ?? 0
     }
 
     Function("getDuration") { (id: String) -> Double in
-      return self.players[id]?.getDuration() ?? 0
+      return self.getPlayer(id)?.getDuration() ?? 0
     }
 
     Function("isPlaying") { (id: String) -> Bool in
-      return self.players[id]?.isPlaying() ?? false
+      return self.getPlayer(id)?.isPlaying() ?? false
     }
 
     Function("isLoaded") { (id: String) -> Bool in
-      return self.players[id]?.isLoaded() ?? false
+      return self.getPlayer(id)?.isLoaded() ?? false
     }
 
     Function("setVolume") { (id: String, v: Double) -> Void in
-      self.players[id]?.setVolume(Float(v))
+      self.getPlayer(id)?.setVolume(Float(v))
     }
 
     Function("setRate") { (id: String, r: Double) -> Void in
-      self.players[id]?.setRate(r)
+      self.getPlayer(id)?.setRate(r)
     }
 
     Function("setPitchCents") { (id: String, c: Double) -> Void in
-      self.players[id]?.setPitchCents(c)
+      self.getPlayer(id)?.setPitchCents(c)
     }
 
     Function("setReverb") { (id: String, amount: Double) -> Void in
-      self.players[id]?.setReverb(amount)
+      self.getPlayer(id)?.setReverb(amount)
     }
 
     Function("setSpatial") { (id: String, on: Bool) -> Void in
-      self.players[id]?.setSpatial(on)
+      self.getPlayer(id)?.setSpatial(on)
     }
 
     Function("setTempoProcessing") { (id: String, on: Bool) -> Void in
-      self.players[id]?.setTempoProcessing(on)
+      self.getPlayer(id)?.setTempoProcessing(on)
     }
 
     Function("setSampling") { (id: String, on: Bool) -> Void in
-      self.players[id]?.setSampling(on)
+      self.getPlayer(id)?.setSampling(on)
     }
 
     // ── Офлайн-анализ огибающей для BPM (без воспроизведения) ──
@@ -197,27 +224,29 @@ public class WoufyFXModule: Module {
     }.runOnQueue(DispatchQueue.main)
 
     Function("setNowPlaying") { (title: String, artist: String, album: String, artworkPath: String?, duration: Double) -> Void in
-      var info: [String: Any] = [
-        MPMediaItemPropertyTitle: title,
-        MPMediaItemPropertyArtist: artist,
-        MPMediaItemPropertyAlbumTitle: album,
-        MPMediaItemPropertyPlaybackDuration: duration,
-        MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
-        MPNowPlayingInfoPropertyPlaybackRate: 1.0,
-        MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
-        MPNowPlayingInfoPropertyIsLiveStream: false,
-      ]
-      if let path = artworkPath {
-        let clean = path.hasPrefix("file://") ? String(path.dropFirst(7)) : path
-        let decoded = clean.removingPercentEncoding ?? clean
-        if let img = UIImage(contentsOfFile: decoded) {
-          info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+      DispatchQueue.global(qos: .userInitiated).async {
+        var info: [String: Any] = [
+          MPMediaItemPropertyTitle: title,
+          MPMediaItemPropertyArtist: artist,
+          MPMediaItemPropertyAlbumTitle: album,
+          MPMediaItemPropertyPlaybackDuration: duration,
+          MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
+          MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+          MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+          MPNowPlayingInfoPropertyIsLiveStream: false,
+        ]
+        if let path = artworkPath {
+          let clean = path.hasPrefix("file://") ? String(path.dropFirst(7)) : path
+          let decoded = clean.removingPercentEncoding ?? clean
+          if let img = UIImage(contentsOfFile: decoded) {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+          }
         }
-      }
-      DispatchQueue.main.async {
-        self.installRemote()
-        self.enforceLockScreenCommands()
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        DispatchQueue.main.async {
+          self.installRemote()
+          self.enforceLockScreenCommands()
+          MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        }
       }
     }
 
@@ -302,6 +331,7 @@ public class WoufyFXModule: Module {
             continuation.resume(returning: uri)
           }
           picker.delegate = handler
+          picker.presentationController?.delegate = handler
           objc_setAssociatedObject(picker, &pickerKey, handler, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
           rootVC.present(picker, animated: true)
         }
@@ -389,8 +419,11 @@ public class WoufyFXModule: Module {
       self.directoryWatcher = nil
       self.haptics.stop()
       self.removeRemote()
-      for (_, p) in self.players { p.destroy() }
+      self.playersLock.lock()
+      let allPlayers = Array(self.players.values)
       self.players.removeAll()
+      self.playersLock.unlock()
+      for p in allPlayers { p.destroy() }
     }
   }
 

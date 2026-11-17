@@ -31,23 +31,34 @@ interface Grid {
 }
 
 class Stat {
-  private a: number[] = [];
+  private buf = new Float64Array(HIST);
+  private head = 0;
+  private count = 0;
+  private sum = 0;
+  private sumSq = 0;
+
   push(v: number) {
-    this.a.push(v);
-    if (this.a.length > HIST) this.a.shift();
+    if (this.count === HIST) {
+      const old = this.buf[this.head];
+      this.sum -= old;
+      this.sumSq -= old * old;
+    } else {
+      this.count++;
+    }
+    this.buf[this.head] = v;
+    this.sum += v;
+    this.sumSq += v * v;
+    this.head = (this.head + 1) % HIST;
   }
   get n() {
-    return this.a.length;
+    return this.count;
   }
   mean() {
-    let m = 0;
-    for (const x of this.a) m += x;
-    return this.a.length ? m / this.a.length : 0;
+    return this.count ? this.sum / this.count : 0;
   }
   sd(m = this.mean()) {
-    let v = 0;
-    for (const x of this.a) v += (x - m) * (x - m);
-    return this.a.length ? Math.sqrt(v / this.a.length) : 0;
+    if (!this.count) return 0;
+    return Math.sqrt(Math.max(0, this.sumSq / this.count - m * m));
   }
 }
 
@@ -92,6 +103,7 @@ class MusicHaptics {
   private lastHat = 0;
   private lastChan = 0;
   private recent: number[] = [];
+  private recentHead = 0;
   private lvl0 = 0;
   private lvl1 = 0;
   /** последние отправленные уровни каналов: одинаковые значения в нативный модуль повторно не шлём */
@@ -225,6 +237,7 @@ class MusicHaptics {
     this.envLow = this.envMid = 0;
     this.fl1 = this.fl2 = 0;
     this.recent = [];
+    this.recentHead = 0;
     this.lvl0 = this.lvl1 = 0;
     this.sent0 = this.sent1 = -1;
     this.lastBeatIdx = -1;
@@ -294,8 +307,18 @@ class MusicHaptics {
     this.fHigh.push(fHigh);
 
     // лимитер плотности: если за последнюю секунду было много событий — пороги растут
-    this.recent = this.recent.filter((t) => now - t < 1000);
-    const density = 1 + Math.max(0, this.recent.length - 5) * 0.18;
+    while (this.recentHead < this.recent.length && now - this.recent[this.recentHead] >= 1000) {
+      this.recentHead++;
+    }
+    if (this.recentHead > 0 && this.recentHead >= this.recent.length) {
+      this.recent.length = 0;
+      this.recentHead = 0;
+    } else if (this.recentHead > 32) {
+      this.recent.splice(0, this.recentHead);
+      this.recentHead = 0;
+    }
+    const recentCount = this.recent.length - this.recentHead;
+    const density = 1 + Math.max(0, recentCount - 5) * 0.18;
 
     if (this.fLow.n > 25 && !quiet) {
       const bi = this.beatInfo();
@@ -330,7 +353,7 @@ class MusicHaptics {
       // ── 3. ХАЙ-ХЭТ: редкие тонкие тики, только когда вокруг не слишком плотно ──
       const mH = this.fHigh.mean();
       const sH = this.fHigh.sd(mH);
-      if (this.recent.length < 4 && fHigh > mH + 2.6 * sH + 0.05 && now - this.lastHat > 190 && now - this.lastKick > 60 && now - this.lastSnare > 90) {
+      if (recentCount < 4 && fHigh > mH + 2.6 * sH + 0.05 && now - this.lastHat > 190 && now - this.lastKick > 60 && now - this.lastSnare > 90) {
         this.lastHat = now;
         this.hat();
       }

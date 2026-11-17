@@ -49,8 +49,11 @@ const MiniEq: React.FC<{ playing: boolean }> = React.memo(({ playing }) => {
         ])
       );
     });
-    loops.forEach((l, i) => setTimeout(() => l.start(), i * 70));
-    return () => loops.forEach((l) => l.stop());
+    const timers = loops.map((l, i) => setTimeout(() => l.start(), i * 70));
+    return () => {
+      timers.forEach(clearTimeout);
+      loops.forEach((l) => l.stop());
+    };
   }, [playing, vals]);
   return (
     <View style={styles.eqRow}>
@@ -127,6 +130,8 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
 
   const swipeX = useRef(new Animated.Value(0)).current;
   const swipeProg = useRef(new Animated.Value(0)).current;
+  const rowHeight = useRef(new Animated.Value(ROW_H)).current;
+  const rowOpacity = useRef(new Animated.Value(1)).current;
   const gestureMode = useRef<'none' | 'drag' | 'swipe'>('none');
   const triggeredHaptic = useRef(false);
 
@@ -202,16 +207,37 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
                 useNativeDriver: true,
               }),
             ]).start(() => {
-              cb.current.onPlayNextSwipe(idx, tr);
-              requestAnimationFrame(() => {
-                swipeX.setValue(-420);
-                Animated.spring(swipeX, {
+              Animated.parallel([
+                Animated.timing(rowHeight, {
                   toValue: 0,
-                  damping: 22,
-                  stiffness: 240,
-                  mass: 0.75,
-                  useNativeDriver: true,
-                }).start();
+                  duration: 160,
+                  easing: Easing.out(Easing.cubic),
+                  useNativeDriver: false,
+                }),
+                Animated.timing(rowOpacity, {
+                  toValue: 0,
+                  duration: 120,
+                  useNativeDriver: false,
+                }),
+              ]).start(() => {
+                swipeX.setValue(0);
+                cb.current.onPlayNextSwipe(idx, tr);
+                requestAnimationFrame(() => {
+                  Animated.parallel([
+                    Animated.timing(rowHeight, {
+                      toValue: ROW_H,
+                      duration: 240,
+                      easing: Easing.out(Easing.cubic),
+                      useNativeDriver: false,
+                    }),
+                    Animated.timing(rowOpacity, {
+                      toValue: 1,
+                      duration: 220,
+                      easing: Easing.out(Easing.cubic),
+                      useNativeDriver: false,
+                    }),
+                  ]).start();
+                });
               });
             });
           } else {
@@ -272,7 +298,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
   });
 
   return (
-    <View style={[styles.row, p.hidden && styles.rowHidden]}>
+    <Animated.View style={[styles.row, { height: rowHeight, opacity: rowOpacity, overflow: 'hidden' }, p.hidden && styles.rowHidden]}>
       {/* Капсула-подсказка «Следующим» справа при свайпе влево */}
       <Animated.View
         pointerEvents="none"
@@ -320,7 +346,7 @@ const QueueRow = React.memo(function QueueRow(p: RowProps) {
           </View>
         )}
       </Animated.View>
-    </View>
+    </Animated.View>
   );
 });
 
@@ -834,62 +860,15 @@ export const QueueView: React.FC<Props> = ({
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      const visFrom = qiToVisual(fromQi);
-      const visTo = qiToVisual(targetQi);
-      const startTop = LIST_TOP + visFrom * ROW_H - scrollY.current;
-      const rawEndTop = LIST_TOP + visTo * ROW_H - scrollY.current;
-      // Ограничиваем конечную точку в пределах видимого окна, чтобы капля красиво вливалась даже если играющий трек далеко за экраном
-      const clampedEndTop = Math.max(LIST_TOP, Math.min(dragInfo.current.listH - ROW_H - 12, rawEndTop));
-
-      dropY.stopAnimation();
-      dropX.stopAnimation();
-      dropScaleX.stopAnimation();
-      dropScaleY.stopAnimation();
-      dropSplash.stopAnimation();
-
-      dropY.setValue(startTop);
-      dropX.setValue(0);
-      dropScaleX.setValue(1.03);
-      dropScaleY.setValue(1.03);
-      dropSplash.setValue(0);
-
-      setDroplet({ track, id: track.id });
-
       const next = [...list];
       const [mv] = next.splice(fromQi, 1);
       next.splice(targetQi, 0, mv);
       setLocalTracks(next);
 
-      const dist = Math.abs(clampedEndTop - startTop);
-      const flightMs = Math.round(Math.min(540, Math.max(360, 290 + dist * 0.36)));
-
-      Animated.parallel([
-        Animated.timing(dropY, {
-          toValue: clampedEndTop,
-          duration: flightMs,
-          easing: Easing.inOut(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.timing(dropScaleX, {
-          toValue: 1,
-          duration: flightMs,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.timing(dropScaleY, {
-          toValue: 1,
-          duration: flightMs,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-      ]).start(() => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        guardUntil.current = Date.now() + 600;
-        cbs.current.onMove(fromQi, targetQi);
-        setDroplet(null);
-      });
+      guardUntil.current = Date.now() + 600;
+      cbs.current.onMove(fromQi, targetQi);
     },
-    [currentTrackIndex, currentIndex, dropY, dropX, dropScaleX, dropScaleY, dropSplash]
+    [currentTrackIndex, currentIndex]
   );
 
   /* ───────── ползунок: потянул вниз — пролистал до самого последнего трека ───────── */
@@ -971,17 +950,27 @@ export const QueueView: React.FC<Props> = ({
     showThumb(); // запускает таймер скрытия
   }
 
-  // поиск изменился — список с начала; сортировка — к играющему треку
+  useEffect(() => {
+    return () => {
+      if (thumbHideTimer.current) clearTimeout(thumbHideTimer.current);
+    };
+  }, []);
+
+  // поиск изменился — список с начала; сортировка — к играющему треку после обновления data
   useEffect(() => {
     listRef.current?.scrollToOffset({ offset: 0, animated: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
+  const pendingSortScroll = useRef(false);
   useEffect(() => {
-    if (sortMode === 'default') return;
+    pendingSortScroll.current = sortMode !== 'default';
+  }, [sortMode]);
+  useEffect(() => {
+    if (!pendingSortScroll.current) return;
+    pendingSortScroll.current = false;
     const i = data.findIndex((d) => d.track.id === currentTrackId);
     listRef.current?.scrollToOffset({ offset: Math.max(0, (i < 0 ? 0 : i - 1) * ROW_H), animated: false });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortMode]);
+  }, [data, currentTrackId]);
 
   // переход в очередь по слайдеру: центрируем играющий трек
   useEffect(() => {

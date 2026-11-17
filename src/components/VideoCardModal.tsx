@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
   Easing,
   Image,
   LayoutAnimation,
@@ -248,6 +249,9 @@ export const VideoCardModal: React.FC<Props> = ({
     onClose();
   };
 
+  const handleCloseRef = useRef(handleClose);
+  handleCloseRef.current = handleClose;
+
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_, g) => g.dy > 10 && Math.abs(g.dy) > Math.abs(g.dx) * 1.3,
@@ -256,7 +260,7 @@ export const VideoCardModal: React.FC<Props> = ({
       },
       onPanResponderRelease: (_, g) => {
         if (g.dy > 120 || g.vy > 0.55) {
-          handleClose();
+          handleCloseRef.current();
         } else {
           Animated.spring(panY, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 260 }).start();
         }
@@ -473,7 +477,7 @@ export const VideoCardModal: React.FC<Props> = ({
   if (!render || !track) return null;
 
   // Вычисляем размеры окна превью под выбранное соотношение сторон и размер экрана
-  const { width: winW, height: winH } = require('react-native').Dimensions.get('window');
+  const { width: winW, height: winH } = Dimensions.get('window');
   const MAX_PREVIEW_H = Math.min(280, Math.max(190, Math.round(winH * 0.27)));
   const MAX_PREVIEW_W = Math.min(340, Math.round(winW * 0.78));
   const aspectObj = ASPECT_OPTIONS.find((a) => a.key === aspect) ?? ASPECT_OPTIONS[0];

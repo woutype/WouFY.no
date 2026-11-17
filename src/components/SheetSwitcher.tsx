@@ -39,6 +39,8 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics, onSh
   const lastHapticStep = useRef(0);
   const [shareActive, setShareActive] = useState(false);
   const [shareReady, setShareReady] = useState(false);
+  const shareActiveRef = useRef(false);
+  const shareReadyRef = useRef(false);
 
   const cbs = useRef({ onOpenQueue, onOpenLyrics, onShareTrack });
   cbs.current = { onOpenQueue, onOpenLyrics, onShareTrack };
@@ -47,6 +49,8 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics, onSh
   maxTravel.current = max;
 
   const springBack = () => {
+    shareActiveRef.current = false;
+    shareReadyRef.current = false;
     setShareActive(false);
     setShareReady(false);
     shareDetent.current = false;
@@ -75,7 +79,10 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics, onSh
       onPanResponderMove: (_, g) => {
         // Вертикальное движение вверх (жест Поделиться)
         if (g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx) * 0.7) {
-          if (!shareActive) setShareActive(true);
+          if (!shareActiveRef.current) {
+            shareActiveRef.current = true;
+            setShareActive(true);
+          }
           const clampedY = Math.max(-180, Math.min(0, g.dy));
           y.setValue(clampedY);
           x.setValue(g.dx * 0.18); // демпфирование по горизонтали — держит строго по центру
@@ -88,7 +95,10 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics, onSh
           }
 
           const isOver = clampedY <= SHARE_THRESHOLD;
-          setShareReady(isOver);
+          if (isOver !== shareReadyRef.current) {
+            shareReadyRef.current = isOver;
+            setShareReady(isOver);
+          }
           if (isOver && !shareDetent.current) {
             shareDetent.current = true;
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -99,7 +109,9 @@ export const SheetSwitcher: React.FC<Props> = ({ onOpenQueue, onOpenLyrics, onSh
         }
 
         // Горизонтальное движение (Текст / Очередь)
-        if (shareActive && g.dy >= -8) {
+        if (shareActiveRef.current && g.dy >= -8) {
+          shareActiveRef.current = false;
+          shareReadyRef.current = false;
           setShareActive(false);
           setShareReady(false);
         }

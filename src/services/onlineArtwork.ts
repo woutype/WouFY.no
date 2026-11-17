@@ -62,7 +62,7 @@ export async function searchOnlineCovers(artist: string, title: string): Promise
 /**
  * Скачивание выбранной обложки в локальный кэш приложения
  */
-export async function downloadCoverToCache(remoteUrl: string, trackId: string): Promise<string> {
+export async function downloadCoverToCache(remoteUrl: string, trackId: string): Promise<string | null> {
   const coversDir = `${DATA_DIR}covers/`;
   const info = await FileSystem.getInfoAsync(coversDir);
   if (!info.exists) {
@@ -73,5 +73,9 @@ export async function downloadCoverToCache(remoteUrl: string, trackId: string): 
   const targetPath = `${coversDir}${filename}`;
 
   const res = await FileSystem.downloadAsync(remoteUrl, targetPath);
+  if (res.status < 200 || res.status >= 300) {
+    await FileSystem.deleteAsync(targetPath, { idempotent: true }).catch(() => {});
+    return null;
+  }
   return res.uri;
 }

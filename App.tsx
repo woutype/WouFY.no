@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, BackHandler, Platform, Share, StyleSheet, Text, UIManager, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -30,6 +30,8 @@ import { statsService } from './src/services/statsService';
 import { splitArtists } from './src/services/queueOrder';
 import { checkForUpdate, UpdateInfo } from './src/services/updateService';
 
+const subscribeBpm = (cb: () => void) => bpmService.subscribe(cb);
+
 function Root() {
   const m = useMetrics();
   const engine = useAudioEngine();
@@ -58,7 +60,9 @@ function Root() {
   const progress = useRef(new Animated.Value(1)).current;
 
   // перерисовка при появлении нового BPM
-  useSyncExternalStore(bpmService.subscribe.bind(bpmService), () => bpmService.version);
+  useSyncExternalStore(subscribeBpm, () => bpmService.version);
+
+  const allTracks = useMemo(() => engine.libraryOrder(), [engine, state.queue, libCount]);
 
   /* ───────── загрузка библиотеки ───────── */
   // Список файлов показывается МГНОВЕННО (по именам файлов); теги и обложки дочитываются в фоне пачками.
@@ -495,7 +499,7 @@ function Root() {
         >
           <QueueView
             tracks={state.queue}
-            allTracks={engine.libraryOrder()}
+            allTracks={allTracks}
             currentIndex={state.index}
             currentTrackId={engine.currentTrack?.id}
             isPlaying={state.isPlaying}
@@ -532,7 +536,7 @@ function Root() {
             visible={!expanded && sheet === 'lyrics'}
           />
           <StatsView
-            tracks={engine.libraryOrder()}
+            tracks={allTracks}
             onPlayTopTracks={(topTracks, index) => engine.playTopTracks(topTracks, index)}
             onArtistPress={onArtistPress}
             bottomPad={bottomPad}

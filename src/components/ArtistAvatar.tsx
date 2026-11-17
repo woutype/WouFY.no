@@ -24,6 +24,9 @@ export const ArtistAvatar: React.FC<Props> = React.memo(({ artist, tracks, size 
       return;
     }
 
+    setUri(null);
+    fadeAnim.setValue(0);
+
     getArtistAvatar(artist, tracks).then((res) => {
       if (active && res) {
         setUri(res);

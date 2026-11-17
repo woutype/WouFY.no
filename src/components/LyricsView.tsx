@@ -313,26 +313,32 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     })();
   }, [visible, track?.id, data, searching, syncing]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const trackIdRef = useRef(track?.id);
+  trackIdRef.current = track?.id;
+
   /** Принудительный поиск в онлайн-каталоге и тегах (кнопки «обновить» / «искать») */
   const fetchOnline = useCallback(async () => {
     if (!track) return;
+    const reqTrackId = track.id;
     setSearching(true);
     try {
       const dur = durationRef.current || engine.getDuration();
       const raw = await fetchOnlineLrc(track, dur);
+      if (trackIdRef.current !== reqTrackId) return;
       const parsed = raw ? parseLrc(raw) : null;
       if (parsed) {
         const d: LyricsData = { lines: parsed, synced: true, source: 'lrclib', plain: parsed.map((l) => l.text) };
-        savedCache.set(track.id, d);
+        savedCache.set(reqTrackId, d);
         setData(d);
         ys.current = {};
         saveLrc(track, parsed).catch(() => {});
       } else {
         const fallback = await loadLyrics(track, dur, true);
+        if (trackIdRef.current !== reqTrackId) return;
         if (fallback.source !== 'none') {
           setData(fallback);
           ys.current = {};
-          if (fallback.synced) savedCache.set(track.id, fallback);
+          if (fallback.synced) savedCache.set(reqTrackId, fallback);
         } else if (!data || data.source === 'none') {
           setData({ lines: [], synced: false, source: 'none', plain: [] });
         }
@@ -340,7 +346,7 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
     } catch (e) {
       console.warn('[lyrics] fetch error:', e);
     } finally {
-      setSearching(false);
+      if (trackIdRef.current === reqTrackId) setSearching(false);
     }
   }, [track, data, engine]);
 
@@ -388,11 +394,13 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
 
   const save = async () => {
     if (!track || !data) return;
+    const reqTrackId = track.id;
     const newLines: LyricLine[] = data.plain.map((text, i) => ({ time: stamps[i] ?? 0, text, section: isSectionLine(text) }));
     try {
       await saveLrc(track, newLines);
       const d: LyricsData = { lines: newLines, synced: true, source: 'manual', plain: data.plain };
-      savedCache.set(track.id, d);
+      savedCache.set(reqTrackId, d);
+      if (trackIdRef.current !== reqTrackId) return;
       setData(d);
       setSyncing(false);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -438,15 +446,15 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
 
   /* ───────── ручная прокрутка: на время пальца автоследование выключается ───────── */
 
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const scheduleResume = (ms: number) => {
     if (resumeTimer.current) clearTimeout(resumeTimer.current);
     resumeTimer.current = setTimeout(() => {
       setFollow(true);
-      scrollToLine(active, true);
+      scrollToLine(activeRef.current, true);
     }, ms);
   };
-  const activeRef = useRef(active);
-  activeRef.current = active;
   const resumeNow = () => {
     if (resumeTimer.current) clearTimeout(resumeTimer.current);
     setFollow(true);
@@ -469,13 +477,13 @@ export const LyricsView: React.FC<Props> = ({ engine, track, duration, isPlaying
           index={i}
           line={l}
           active={i === active}
-          dist={active < 0 ? 3 : Math.abs(i - active)}
+          dist={active < 0 ? 3 : Math.min(5, Math.abs(i - active))}
           onPress={onPressLine}
           onLongPress={data && !data.synced ? calibrateLine : undefined}
           onLayoutY={onLayoutY}
         />
       )),
-    [lines, active, ver, onPressLine, onLayoutY]
+    [lines, active, ver, onPressLine, data, calibrateLine, onLayoutY]
   );
 
   if (!track) return <View style={{ flex: 1 }} />;

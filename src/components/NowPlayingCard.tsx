@@ -165,6 +165,10 @@ export const NowPlayingCard: React.FC<Props> = ({
   engineRef.current = engine;
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
+  const rangeRef = useRef(range);
+  rangeRef.current = range;
+  const onSettleRef = useRef(onSettle);
+  onSettleRef.current = onSettle;
   const miniDragMode = useRef<'none' | 'vertical' | 'horizontal'>('none');
 
   useEffect(() => {
@@ -182,15 +186,15 @@ export const NowPlayingCard: React.FC<Props> = ({
         e.stopAnimation();
         base.current = lastE.current;
       },
-      onPanResponderMove: (_, g) => e.setValue(clamp(base.current - g.dy / range, 0, 1)),
+      onPanResponderMove: (_, g) => e.setValue(clamp(base.current - g.dy / rangeRef.current, 0, 1)),
       onPanResponderRelease: (_, g) => {
-        const now = clamp(base.current - g.dy / range, 0, 1);
+        const now = clamp(base.current - g.dy / rangeRef.current, 0, 1);
         const projected = now + -g.vy * 0.3;
         const target: 0 | 1 = projected > 0.5 ? 1 : 0;
-        if (target !== (expanded ? 1 : 0)) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        onSettle(target);
+        if (target !== (expandedRef.current ? 1 : 0)) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        onSettleRef.current(target);
       },
-      onPanResponderTerminate: () => onSettle(lastE.current > 0.5 ? 1 : 0),
+      onPanResponderTerminate: () => onSettleRef.current(lastE.current > 0.5 ? 1 : 0),
     });
 
   // мини-плеер: свайп вверх раскрывает плеер, свайп влево/вправо переключает трек как в Spotify
@@ -220,7 +224,7 @@ export const NowPlayingCard: React.FC<Props> = ({
         }
 
         if (miniDragMode.current === 'vertical') {
-          e.setValue(clamp(base.current - g.dy / range, 0, 1));
+          e.setValue(clamp(base.current - g.dy / rangeRef.current, 0, 1));
         } else if (miniDragMode.current === 'horizontal') {
           const n = queueRef.current.length;
           const resist = n <= 1 ? 0.25 : 0.85;
@@ -235,11 +239,11 @@ export const NowPlayingCard: React.FC<Props> = ({
         miniDragMode.current = 'none';
 
         if (mode === 'vertical') {
-          const now = clamp(base.current - g.dy / range, 0, 1);
+          const now = clamp(base.current - g.dy / rangeRef.current, 0, 1);
           const projected = now + -g.vy * 0.3;
           const target: 0 | 1 = projected > 0.5 ? 1 : 0;
           if (target !== (expandedRef.current ? 1 : 0)) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          onSettle(target);
+          onSettleRef.current(target);
           return;
         }
 
@@ -316,7 +320,7 @@ export const NowPlayingCard: React.FC<Props> = ({
       },
       onPanResponderTerminate: () => {
         if (miniDragMode.current === 'vertical') {
-          onSettle(lastE.current > 0.5 ? 1 : 0);
+          onSettleRef.current(lastE.current > 0.5 ? 1 : 0);
         } else {
           Animated.parallel([
             Animated.spring(miniSwipeX, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 280 }),

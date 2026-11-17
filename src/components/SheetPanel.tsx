@@ -70,6 +70,9 @@ export const SheetPanel: React.FC<Props> = ({
     return () => progress.removeListener(id);
   }, [progress]);
 
+  const onSettleRef = useRef(onSettle);
+  onSettleRef.current = onSettle;
+
   // Свайп ВНИЗ по шапке → закрытие (переход в большой плеер)
   const panGesture = useRef(
     PanResponder.create({
@@ -91,9 +94,9 @@ export const SheetPanel: React.FC<Props> = ({
         const projected = now + g.vy * 0.25;
         const target: 0 | 1 = projected > 0.45 ? 1 : 0;
         if (target === 1) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        onSettle(target);
+        onSettleRef.current(target);
       },
-      onPanResponderTerminate: () => onSettle(lastVal.current > 0.45 ? 1 : 0),
+      onPanResponderTerminate: () => onSettleRef.current(lastVal.current > 0.45 ? 1 : 0),
     })
   ).current;
 
