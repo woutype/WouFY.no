@@ -26,8 +26,166 @@ import kotlin.math.min
 
 internal data class LyricEntry(val time: Double, val text: String)
 
+/**
+ * Плавная «лента» текста для видео — та же логика, что во вкладке «Текст» основного плеера:
+ * пружина damping 22 / stiffness 240 / mass 0.7, активная строка 1.03, остальные 0.95,
+ * прозрачность падает с расстоянием до активной строки [1, .62, .46, .34, .26, .2].
+ * Видео рендерится покадрово, поэтому пружина интегрируется детерминированно (шаг 1/480 с).
+ */
+internal class LyricsAnimator(private val lines: List<LyricEntry>, startTime: Double) {
+  private val mass = 0.7
+  private val stiffness = 240.0
+  private val damping = 22.0
+  private val distOpacity = floatArrayOf(1f, 0.62f, 0.46f, 0.34f, 0.26f, 0.2f)
+
+  private var simTime = startTime
+  private var targetTime = startTime
+  private var focusVel = 0.0
+  var focus: Double = activeIndexAt(startTime).toDouble()
+    private set
+  private var scrollY = 0.0
+  private var scrollVel = 0.0
+  private var scrollInitialized = false
+  private val lineAct = DoubleArray(lines.size) { if (it == activeIndexAt(startTime)) 1.0 else 0.0 }
+  private val lineVel = DoubleArray(lines.size)
+
+  private class Built(val paint: TextPaint, val layouts: List<StaticLayout>)
+  private val built = HashMap<String, Built>()
+
+  /** Как activeLineIndex() в плеере: строка включается чуть раньше своего времени (lookahead 0.12 с) */
+  private fun activeIndexAt(t: Double): Int {
+    var idx = 0
+    for (i in lines.indices) {
+      if (t + 0.12 >= lines[i].time) idx = i else break
+    }
+    return idx
+  }
+
+  fun advance(t: Double) {
+    targetTime = max(targetTime, t)
+  }
+
+  private fun stepSimulation(t: Double, centers: FloatArray) {
+    if (lines.isEmpty()) return
+    val n = lines.size
+    val idx0 = activeIndexAt(simTime).coerceIn(0, n - 1)
+    if (!scrollInitialized) {
+      scrollY = centers[idx0].toDouble()
+      scrollInitialized = true
+    }
+    if (t <= simTime) return
+    val h = 1.0 / 480.0
+    while (simTime < t) {
+      val activeIdx = activeIndexAt(simTime).coerceIn(0, n - 1)
+      val targetF = activeIdx.toDouble()
+      val accF = (stiffness * (targetF - focus) - damping * focusVel) / mass
+      focusVel += accF * h
+      focus += focusVel * h
+
+      val targetY = centers[activeIdx].toDouble()
+      val accY = (stiffness * (targetY - scrollY) - damping * scrollVel) / mass
+      scrollVel += accY * h
+      scrollY += scrollVel * h
+
+      for (i in 0 until n) {
+        val targetA = if (i == activeIdx) 1.0 else 0.0
+        val accA = (stiffness * (targetA - lineAct[i]) - damping * lineVel[i]) / mass
+        lineVel[i] += accA * h
+        lineAct[i] += lineVel[i] * h
+      }
+
+      simTime += h
+    }
+  }
+
+  private fun opacityFor(d: Double): Float {
+    if (d <= 0.0) return distOpacity[0]
+    if (d >= 5.0) return distOpacity[5]
+    val lo = d.toInt()
+    val frac = (d - lo).toFloat()
+    return distOpacity[lo] + (distOpacity[lo + 1] - distOpacity[lo]) * frac
+  }
+
+  fun draw(canvas: Canvas, rect: RectF, fontSize: Float, centered: Boolean) {
+    if (lines.isEmpty()) return
+    // Запас по ширине под масштаб 1.03, чтобы активная строка не переносилась иначе, чем неактивная
+    val layoutW = max(10, (rect.width() / 1.06f).toInt())
+    val key = "$layoutW-${(fontSize * 10f).toInt()}-$centered"
+    val b = built.getOrPut(key) {
+      val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textSize = fontSize
+        letterSpacing = -0.018f
+        color = Color.WHITE
+      }
+      val align = if (centered) Layout.Alignment.ALIGN_CENTER else Layout.Alignment.ALIGN_NORMAL
+      Built(
+        paint,
+        lines.map {
+          StaticLayout.Builder
+            .obtain(it.text, 0, it.text.length, paint, layoutW)
+            .setAlignment(align)
+            .setIncludePad(false)
+            .setLineSpacing(fontSize * 0.08f, 1f)
+            .build()
+        }
+      )
+    }
+
+    val gap = fontSize * 0.56f
+    val n = lines.size
+    val centers = FloatArray(n)
+    var y = 0f
+    for (i in 0 until n) {
+      val h = b.layouts[i].height.toFloat()
+      centers[i] = y + h / 2f
+      y += h + gap
+    }
+
+    stepSimulation(targetTime, centers)
+
+    val curScrollY = scrollY.toFloat()
+    val fadeZone = max(fontSize * 1.15f, rect.height() * 0.15f)
+
+    canvas.save()
+    canvas.clipRect(rect)
+    for (i in 0 until n) {
+      val layout = b.layouts[i]
+      val h = layout.height.toFloat()
+      val cy = rect.centerY() + (centers[i] - curScrollY)
+      if (cy + h * 0.55f < rect.top || cy - h * 0.55f > rect.bottom) continue
+
+      val a = lineAct[i].coerceIn(0.0, 1.0).toFloat()
+      val s = 0.95f + 0.08f * lineAct[i].coerceIn(0.0, 1.05).toFloat()
+      val d = max(1.0, abs(i - focus))
+      val rest = opacityFor(d)
+      val baseAlpha = rest + (1f - rest) * a
+
+      val lineTop = cy - h * 0.45f
+      val lineBot = cy + h * 0.45f
+      val rawTop = (lineTop - rect.top + fontSize * 0.35f) / fadeZone
+      val rawBot = (rect.bottom - lineBot + fontSize * 0.35f) / fadeZone
+      val tEdge = min(rawTop, rawBot).coerceIn(0f, 1f)
+      val edgeFade = tEdge * tEdge * (3f - 2f * tEdge)
+
+      val alpha = baseAlpha * edgeFade
+      if (alpha < 0.01f) continue
+
+      b.paint.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
+      canvas.save()
+      canvas.translate(if (centered) rect.centerX() else rect.left, cy)
+      canvas.scale(s, s)
+      canvas.translate(if (centered) -layoutW / 2f else 0f, -h / 2f)
+      layout.draw(canvas)
+      canvas.restore()
+    }
+    canvas.restore()
+  }
+}
+
 private class FrameRenderCache {
   val boldTypeface: Typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+  var lyrics: LyricsAnimator? = null
   val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
   val pillBitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
   val darkPaint = Paint()
@@ -251,6 +409,7 @@ internal object VideoCardGeneratorAndroid {
     val frameBmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val frameCanvas = Canvas(frameBmp)
     val renderCache = FrameRenderCache()
+    renderCache.lyrics = LyricsAnimator(lines, startSec)
 
     val outFile = File(context.cacheDir, "WouFY_Clip_${System.currentTimeMillis()}.mp4")
     if (outFile.exists()) outFile.delete()
@@ -360,6 +519,7 @@ internal object VideoCardGeneratorAndroid {
       for (frameIdx in 0 until totalFrames) {
         val currentTime = startSec + frameIdx.toDouble() / fps.toDouble()
         val elapsed = frameIdx.toDouble() / fps.toDouble()
+        renderCache.lyrics?.advance(currentTime)
         drawFrame(
           canvas = frameCanvas,
           W = width.toFloat(),
@@ -668,32 +828,12 @@ internal object VideoCardGeneratorAndroid {
     val isLandscape = W > H * 1.15f
     val isSquare = abs(W - H) < 40f
 
-    var activeIdx = 0
-    for (i in lines.indices) {
-      if (currentTime + 0.1 >= lines[i].time) {
-        activeIdx = i
-      } else {
-        break
-      }
-    }
-
-    var transition = 1f
-    if (lines.isNotEmpty() && activeIdx < lines.size) {
-      val since = max(0.0, currentTime - lines[activeIdx].time).toFloat()
-      val t = min(1f, since / 0.42f)
-      val inv = 1f - t
-      transition = 1f - inv * inv * inv
-    }
-
     if (styleMode == "textOnly") {
       drawHeaderPill(canvas, coverBmp, title, artist, W / 2f, H * 0.08f, W * 0.84f, scale, cache)
       cache.lyricsRect.set(W * 0.08f, H * 0.20f, W * 0.92f, H * 0.86f)
       drawLyricsBlock(
         canvas = canvas,
         rect = cache.lyricsRect,
-        lines = lines,
-        activeIdx = activeIdx,
-        transition = transition,
         fontSize = minDim * 0.056f,
         centered = true,
         cache = cache
@@ -716,9 +856,6 @@ internal object VideoCardGeneratorAndroid {
       drawLyricsBlock(
         canvas = canvas,
         rect = cache.innerRect,
-        lines = lines,
-        activeIdx = activeIdx,
-        transition = transition,
         fontSize = coverSize * 0.068f,
         centered = true,
         cache = cache
@@ -758,23 +895,17 @@ internal object VideoCardGeneratorAndroid {
         drawLyricsBlock(
           canvas = canvas,
           rect = cache.lyricsRect,
-          lines = lines,
-          activeIdx = activeIdx,
-          transition = transition,
           fontSize = minDim * 0.052f,
           centered = false,
           cache = cache
         )
       } else {
-        val coverSize = if (isSquare) minDim * 0.44f else W * 0.56f
-        val metaH = minDim * 0.095f
-        val coverToMetaGap = H * 0.020f
-        val metaToLyricsGap = H * 0.024f
+        val coverSize = if (isSquare) minDim * 0.38f else min(W * 0.50f, H * 0.36f)
+        val metaH = minDim * 0.090f
+        val coverToMetaGap = H * 0.018f
+        val metaToLyricsGap = H * 0.014f
         val fontSize = minDim * 0.052f
-        val lyricsH = fontSize * 2.45f * 2.5f
-
-        val totalStackH = coverSize + coverToMetaGap + metaH + metaToLyricsGap + lyricsH
-        val topY = maxOf(H * 0.06f, (H * 0.90f - totalStackH) / 2f)
+        val topY = if (isSquare) H * 0.055f else H * 0.068f
 
         val coverX = (W - coverSize) / 2f
         cache.coverRect.set(coverX, topY, coverX + coverSize, topY + coverSize)
@@ -794,13 +925,11 @@ internal object VideoCardGeneratorAndroid {
         )
 
         val lyricsTop = metaY + metaH + metaToLyricsGap
+        val lyricsH = max(fontSize * 4.2f, H * 0.895f - lyricsTop)
         cache.lyricsRect.set(W * 0.08f, lyricsTop, W * 0.92f, lyricsTop + lyricsH)
         drawLyricsBlock(
           canvas = canvas,
           rect = cache.lyricsRect,
-          lines = lines,
-          activeIdx = activeIdx,
-          transition = transition,
           fontSize = fontSize,
           centered = true,
           cache = cache
@@ -850,47 +979,11 @@ internal object VideoCardGeneratorAndroid {
   private fun drawLyricsBlock(
     canvas: Canvas,
     rect: RectF,
-    lines: List<LyricEntry>,
-    activeIdx: Int,
-    transition: Float,
     fontSize: Float,
     centered: Boolean,
-    cache: FrameRenderCache = FrameRenderCache()
+    cache: FrameRenderCache
   ) {
-    if (lines.isEmpty()) return
-    canvas.save()
-    canvas.clipRect(rect)
-
-    val centerY = rect.centerY()
-    val slotStep = fontSize * 2.45f
-    val slideOffset = (1f - transition) * (slotStep * 0.42f)
-    val align = if (centered) Layout.Alignment.ALIGN_CENTER else Layout.Alignment.ALIGN_NORMAL
-    val widthPx = rect.width().toInt().coerceAtLeast(10)
-
-    for (idx in (activeIdx - 1)..(activeIdx + 1)) {
-      if (idx < 0 || idx >= lines.size) continue
-      val dist = idx - activeIdx
-      val isCurrent = dist == 0
-      val scale = if (isCurrent) (0.94f + 0.06f * transition) else 0.84f
-      val alpha = if (isCurrent) ((0.55f + 0.45f * transition) * 255).toInt() else (0.34f * 255).toInt()
-
-      cache.lyricPaint.color = Color.argb(alpha.coerceIn(0, 255), 255, 255, 255)
-      cache.lyricPaint.textSize = fontSize * scale
-
-      val layout = StaticLayout.Builder
-        .obtain(lines[idx].text, 0, lines[idx].text.length, cache.lyricPaint, widthPx)
-        .setAlignment(align)
-        .setIncludePad(false)
-        .build()
-
-      val targetY = centerY + dist * slotStep + slideOffset - layout.height / 2f
-      canvas.save()
-      canvas.translate(rect.left, targetY)
-      layout.draw(canvas)
-      canvas.restore()
-    }
-
-    canvas.restore()
+    cache.lyrics?.draw(canvas, rect, fontSize, centered)
   }
 
   private fun drawTrackMeta(

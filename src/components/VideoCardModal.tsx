@@ -6,7 +6,6 @@ import {
   Dimensions,
   Easing,
   Image,
-  LayoutAnimation,
   Modal,
   PanResponder,
   Platform,
@@ -36,6 +35,9 @@ export type ClipAspect = '9:16' | '1:1' | '16:9' | '4:3' | '3:4';
 
 /** Лимит строк для статичной фото-карточки, чтобы цитата всегда красиво помещалась */
 const MAX_IMAGE_LINES = 5;
+
+/** Прозрачность неактивных строк по расстоянию до активной — точь-в-точь как в LyricsView */
+const DIST_OPACITY = [1, 0.62, 0.46, 0.34, 0.26, 0.2];
 
 interface Props {
   visible: boolean;
@@ -74,12 +76,15 @@ const SHEET_H = 790;
 
 type LayoutRect = { x: number; y: number; width: number; height: number };
 
+/**
+ * Плавный индикатор выбранного пункта исключительно на native driver (translateX / translateY),
+ * а ширина/высота хранятся обычными числами в state — ноль конфликтов JS/native анимаций.
+ */
 function useSlidingIndicator(activeKey: string, resetKey?: unknown) {
   const layouts = useRef<Record<string, LayoutRect>>({});
   const animX = useRef(new Animated.Value(0)).current;
   const animY = useRef(new Animated.Value(0)).current;
-  const animW = useRef(new Animated.Value(0)).current;
-  const animH = useRef(new Animated.Value(0)).current;
+  const [box, setBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const ready = useRef(false);
 
   useEffect(() => {
@@ -89,19 +94,21 @@ function useSlidingIndicator(activeKey: string, resetKey?: unknown) {
   }, [resetKey]);
 
   const moveTo = (l: LayoutRect, immediate = false) => {
+    if (l.width <= 0 || l.height <= 0) return;
+    const w = Math.round(l.width);
+    const h = Math.round(l.height);
+    setBox((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
     if (immediate || !ready.current) {
       ready.current = true;
+      animX.stopAnimation();
+      animY.stopAnimation();
       animX.setValue(l.x);
       animY.setValue(l.y);
-      animW.setValue(l.width);
-      animH.setValue(l.height);
       return;
     }
     Animated.parallel([
-      Animated.spring(animX, { toValue: l.x, useNativeDriver: false, tension: 115, friction: 15 }),
-      Animated.spring(animY, { toValue: l.y, useNativeDriver: false, tension: 115, friction: 15 }),
-      Animated.spring(animW, { toValue: l.width, useNativeDriver: false, tension: 115, friction: 15 }),
-      Animated.spring(animH, { toValue: l.height, useNativeDriver: false, tension: 115, friction: 15 }),
+      Animated.spring(animX, { toValue: l.x, useNativeDriver: true, damping: 20, stiffness: 240, mass: 0.8 }),
+      Animated.spring(animY, { toValue: l.y, useNativeDriver: true, damping: 20, stiffness: 240, mass: 0.8 }),
     ]).start();
   };
 
@@ -115,6 +122,7 @@ function useSlidingIndicator(activeKey: string, resetKey?: unknown) {
     (key: string) =>
     (e: { nativeEvent: { layout: LayoutRect } }) => {
       const l = e.nativeEvent.layout;
+      if (![l.x, l.y, l.width, l.height].every((v) => Number.isFinite(v))) return;
       layouts.current[key] = l;
       if (key === activeKey) {
         moveTo(l, !ready.current);
@@ -125,13 +133,212 @@ function useSlidingIndicator(activeKey: string, resetKey?: unknown) {
     position: 'absolute' as const,
     left: 0,
     top: 0,
-    width: animW,
-    height: animH,
+    width: box.width,
+    height: box.height,
+    opacity: box.width > 0 ? 1 : 0,
     transform: [{ translateX: animX }, { translateY: animY }],
   };
 
   return { onItemLayout, indicatorStyle };
 }
+
+/**
+ * Одна строка в превью видео — точная копия LyricRow из LyricsView:
+ * пружина damping 22 / stiffness 240 / mass 0.7, масштаб 0.95 -> 1.03,
+ * прозрачность по расстоянию DIST_OPACITY -> 1.
+ */
+const PreviewLyricItem = React.memo(function PreviewLyricItem(p: {
+  text: string;
+  active: boolean;
+  dist: number;
+  fontSize: number;
+  slotHeight: number;
+  align: 'center' | 'left';
+}) {
+  const a = useRef(new Animated.Value(p.active ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.spring(a, {
+      toValue: p.active ? 1 : 0,
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 240,
+      mass: 0.7,
+    }).start();
+  }, [p.active, a]);
+
+  const rest = DIST_OPACITY[Math.min(5, p.dist)];
+
+  return (
+    <View
+      style={{
+        height: p.slotHeight,
+        justifyContent: 'center',
+        alignItems: p.align === 'center' ? 'center' : 'flex-start',
+        paddingHorizontal: 4,
+      }}
+    >
+      <Animated.Text
+        numberOfLines={2}
+        style={{
+          fontSize: p.fontSize,
+          lineHeight: Math.round(p.fontSize * 1.22),
+          fontWeight: '700',
+          letterSpacing: -0.3,
+          color: '#FFFFFF',
+          textAlign: p.align,
+          opacity: a.interpolate({ inputRange: [0, 1], outputRange: [rest, 1] }),
+          transform: [{ scale: a.interpolate({ inputRange: [0, 1], outputRange: [0.95, 1.03] }) }],
+        }}
+      >
+        {p.text}
+      </Animated.Text>
+    </View>
+  );
+});
+
+/**
+ * Плавная «лента» текста в живом превью карточки (как во вкладке «Текст» основного плеера).
+ */
+const PreviewLyricsRibbon: React.FC<{
+  lines: LyricLine[];
+  activeIdx: number;
+  placeholder: string;
+  fontSize: number;
+  height: number;
+  align?: 'center' | 'left';
+}> = ({ lines, activeIdx, placeholder, fontSize, height, align = 'center' }) => {
+  const slotHeight = Math.max(22, Math.round(fontSize * 2.45));
+  const clampedActive = lines.length > 0 ? Math.max(0, Math.min(lines.length - 1, activeIdx)) : 0;
+  const scrollY = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.spring(scrollY, {
+      toValue: -clampedActive * slotHeight,
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 240,
+      mass: 0.7,
+    }).start();
+  }, [clampedActive, slotHeight, scrollY]);
+
+  if (lines.length === 0) {
+    return (
+      <View
+        style={{
+          height,
+          width: '100%',
+          justifyContent: 'center',
+          alignItems: align === 'center' ? 'center' : 'flex-start',
+          paddingHorizontal: 6,
+        }}
+      >
+        <Text
+          numberOfLines={2}
+          style={{
+            fontSize,
+            fontWeight: '700',
+            color: 'rgba(255,255,255,0.75)',
+            textAlign: align,
+          }}
+        >
+          {placeholder}
+        </Text>
+      </View>
+    );
+  }
+
+  const centerOffset = Math.round((height - slotHeight) / 2);
+
+  return (
+    <View style={{ height, width: '100%', overflow: 'hidden' }}>
+      <Animated.View
+        style={{
+          width: '100%',
+          paddingTop: centerOffset,
+          transform: [{ translateY: scrollY }],
+        }}
+      >
+        {lines.map((l, i) => (
+          <PreviewLyricItem
+            key={`${i}-${l.time}`}
+            text={l.text}
+            active={i === clampedActive}
+            dist={Math.min(5, Math.abs(i - clampedActive))}
+            fontSize={fontSize}
+            slotHeight={slotHeight}
+            align={align}
+          />
+        ))}
+      </Animated.View>
+    </View>
+  );
+};
+
+/**
+ * Вращающийся слой. Владеет СВОИМ Animated.Value и только нативной анимацией (transform),
+ * на этом же view нет ни одного JS-анимируемого свойства.
+ */
+const SpinLayer: React.FC<{ spin: boolean; children?: React.ReactNode }> = ({ spin, children }) => {
+  const rot = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    rot.stopAnimation();
+    rot.setValue(0);
+    if (!spin) return;
+    const loop = Animated.loop(
+      Animated.timing(rot, {
+        toValue: 1,
+        duration: 7500,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+    };
+  }, [spin, rot]);
+
+  const deg = rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+
+  return (
+    <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ rotate: deg }] }]}>
+      {children}
+    </Animated.View>
+  );
+};
+
+/** Обложка превью: статичная рамка со скруглением (обычный View) + опционально вращающееся содержимое */
+const PreviewCover: React.FC<{
+  uri?: string;
+  size: number;
+  radius: number;
+  spin: boolean;
+  borderColor?: string;
+  children?: React.ReactNode;
+}> = ({ uri, size, radius, spin, borderColor = 'rgba(255,255,255,0.22)', children }) => {
+  const s = Math.max(1, Math.round(size));
+  const r = Math.max(0, Math.round(radius));
+  return (
+    <View
+      style={{
+        width: s,
+        height: s,
+        borderRadius: r,
+        overflow: 'hidden',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 1,
+        borderColor,
+      }}
+    >
+      <SpinLayer spin={spin}>
+        <CoverArt uri={uri} size={s} radius={0} />
+      </SpinLayer>
+      {children}
+    </View>
+  );
+};
 
 export const VideoCardModal: React.FC<Props> = ({
   visible,
@@ -154,12 +361,15 @@ export const VideoCardModal: React.FC<Props> = ({
   const [coverShape, setCoverShape] = useState<ClipCoverShape>('vinyl');
   const [aspect, setAspect] = useState<ClipAspect>('9:16');
 
+  // Синхронно приводим стиль к допустимому для текущего режима (без промежуточного кадра)
+  const effectiveStyle: ClipStyle = !isImage && clipStyle === 'glassQuote' ? 'underCover' : clipStyle;
+
   // Диапазон выбранных строчек (для Видео) и произвольные строки (для Фото); -1 / [] = ничего не выбрано
   const [startIdx, setStartIdx] = useState(-1);
   const [endIdx, setEndIdx] = useState(-1);
   const [selectedImageIndices, setSelectedImageIndices] = useState<number[]>([]);
 
-  // Предпрослуслушивание фрагмента
+  // Предпрослушивание фрагмента
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewPos, setPreviewPos] = useState(0);
   const wasPlayingBeforeModal = useRef(false);
@@ -168,13 +378,10 @@ export const VideoCardModal: React.FC<Props> = ({
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  // Анимация вращения пластинки в живом превью (только для видео)
-  const spinAnim = useRef(new Animated.Value(0)).current;
-
-  // Плавные анимированные индикаторы для переключателей параметров
+  // Плавные анимированные индикаторы для переключателей параметров (100% native driver)
   const modeIndicator = useSlidingIndicator(mode, visible);
-  const styleIndicator = useSlidingIndicator(clipStyle, visible);
-  const shapeIndicator = useSlidingIndicator(coverShape, visible);
+  const styleIndicator = useSlidingIndicator(effectiveStyle, visible);
+  const shapeIndicator = useSlidingIndicator(coverShape, visible && effectiveStyle !== 'textOnly');
   const aspectIndicator = useSlidingIndicator(aspect, visible);
 
   // Вычисляем размеры окна превью под выбранное соотношение сторон и размер экрана
@@ -191,7 +398,7 @@ export const VideoCardModal: React.FC<Props> = ({
   const isLandscape = aspectObj.ratio > 1.15;
   const isSquare = Math.abs(aspectObj.ratio - 1) < 0.1;
   const coverSize =
-    clipStyle === 'inCover'
+    effectiveStyle === 'inCover'
       ? Math.min(previewW * 0.78, previewH * 0.72)
       : isLandscape
       ? previewH * 0.60
@@ -200,41 +407,24 @@ export const VideoCardModal: React.FC<Props> = ({
       : previewH * 0.40;
   const coverRadius = coverShape === 'vinyl' ? coverSize / 2 : coverSize * 0.12;
 
-  const previewWAnim = useRef(new Animated.Value(previewW)).current;
-  const previewHAnim = useRef(new Animated.Value(previewH)).current;
-  const coverRadiusAnim = useRef(new Animated.Value(coverRadius)).current;
   const previewContentAnim = useRef(new Animated.Value(1)).current;
   const didMountPreviewRef = useRef(false);
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.spring(previewWAnim, { toValue: previewW, useNativeDriver: false, tension: 95, friction: 14 }),
-      Animated.spring(previewHAnim, { toValue: previewH, useNativeDriver: false, tension: 95, friction: 14 }),
-    ]).start();
-  }, [previewW, previewH, previewWAnim, previewHAnim]);
-
-  useEffect(() => {
-    Animated.spring(coverRadiusAnim, {
-      toValue: coverRadius,
-      useNativeDriver: false,
-      tension: 110,
-      friction: 14,
-    }).start();
-  }, [coverRadius, coverRadiusAnim]);
+  const spinning = visible && !isImage && effectiveStyle !== 'textOnly' && coverShape === 'vinyl';
 
   useEffect(() => {
     if (!didMountPreviewRef.current) {
       didMountPreviewRef.current = true;
       return;
     }
-    previewContentAnim.setValue(0.32);
+    previewContentAnim.stopAnimation();
+    previewContentAnim.setValue(0.38);
     Animated.timing(previewContentAnim, {
       toValue: 1,
-      duration: 240,
+      duration: 220,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start();
-  }, [clipStyle, isImage, previewContentAnim]);
+  }, [effectiveStyle, isImage, aspect, coverShape, previewContentAnim]);
 
   // При переключении режима Видео <-> Карточка корректируем стиль и форму обложки без сброса строк
   useEffect(() => {
@@ -317,25 +507,6 @@ export const VideoCardModal: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  // Вращение винила в превью (для видео-карточки)
-  useEffect(() => {
-    if (!visible || isImage || clipStyle === 'textOnly' || coverShape !== 'vinyl') {
-      spinAnim.stopAnimation();
-      spinAnim.setValue(0);
-      return;
-    }
-    const loop = Animated.loop(
-      Animated.timing(spinAnim, {
-        toValue: 1,
-        duration: 7500,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      })
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [visible, isImage, clipStyle, coverShape, spinAnim]);
-
   // Таймер предпрослушивания отрывка (зацикливает выбранный фрагмент)
   useEffect(() => {
     if (!visible || !previewPlaying) return;
@@ -395,8 +566,6 @@ export const VideoCardModal: React.FC<Props> = ({
   ).current;
 
   const handleLineTap = (idx: number) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-
     if (isImage) {
       // В режиме фото-карточки — выбор любых отдельных строк (до MAX_IMAGE_LINES = 5)
       if (selectedImageIndices.includes(idx)) {
@@ -458,7 +627,6 @@ export const VideoCardModal: React.FC<Props> = ({
 
   const resetSelectedLines = () => {
     Haptics.selectionAsync();
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     if (isImage) {
       setSelectedImageIndices([]);
     } else {
@@ -509,7 +677,7 @@ export const VideoCardModal: React.FC<Props> = ({
           artworkUri: fullArt,
           title: track.title,
           artist: track.artist,
-          style: clipStyle,
+          style: effectiveStyle,
           coverShape,
           aspect,
           lines: selectedTexts.length > 0 ? selectedTexts : [track.title],
@@ -564,7 +732,7 @@ export const VideoCardModal: React.FC<Props> = ({
       }));
 
       const videoStyle: 'inCover' | 'underCover' | 'textOnly' =
-        clipStyle === 'glassQuote' ? 'underCover' : clipStyle;
+        effectiveStyle === 'glassQuote' ? 'underCover' : effectiveStyle;
 
       const videoUri = await fx.generateVideoCard({
         audioUri,
@@ -614,17 +782,11 @@ export const VideoCardModal: React.FC<Props> = ({
   const selectedLinesCount = clipLines.length;
   const hasSelection = selectedLinesCount > 0;
 
-  const relIdx = Math.max(0, activeLineIndex(clipLines, previewPos, 0.15));
-  const prevLine = clipLines[relIdx - 1]?.text;
-  const curLine = clipLines[relIdx]?.text ?? clipLines[0]?.text ?? (lines.length > 0 ? 'Выберите строки ниже' : track.title);
-  const nextLine = clipLines[relIdx + 1]?.text;
+  const relIdx = Math.max(0, activeLineIndex(clipLines, previewPos, 0.12));
+  const placeholderText = lines.length > 0 ? 'Выберите строки ниже' : track.title;
 
-  const spinDeg = spinAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
   const previewContentScale = previewContentAnim.interpolate({
-    inputRange: [0.32, 1],
+    inputRange: [0.38, 1],
     outputRange: [0.96, 1],
   });
 
@@ -680,7 +842,8 @@ export const VideoCardModal: React.FC<Props> = ({
                     onPress={() => {
                       if (isImage) {
                         Haptics.selectionAsync();
-                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                        if (clipStyle === 'glassQuote') setClipStyle('underCover');
+                        setCoverShape('vinyl');
                         onModeChange('video');
                       }
                     }}
@@ -696,7 +859,8 @@ export const VideoCardModal: React.FC<Props> = ({
                     onPress={() => {
                       if (!isImage) {
                         Haptics.selectionAsync();
-                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                        if (clipStyle === 'underCover') setClipStyle('glassQuote');
+                        setCoverShape('square');
                         onModeChange('image');
                       }
                     }}
@@ -715,7 +879,7 @@ export const VideoCardModal: React.FC<Props> = ({
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
             {/* 1. ЖИВОЕ ПРЕВЬЮ КАРТОЧКИ */}
             <View style={styles.previewStage}>
-              <Animated.View style={[styles.previewCard, { width: previewWAnim, height: previewHAnim }]}>
+              <View style={[styles.previewCard, { width: Math.round(previewW), height: Math.round(previewH) }]}>
                 {/* Размытый фон из обложки трека */}
                 {track.artworkUri ? (
                   <Image
@@ -739,7 +903,7 @@ export const VideoCardModal: React.FC<Props> = ({
                   ]}
                 >
                 {/* Стеклянная карточка цитаты (для WouFY Card) */}
-                {clipStyle === 'glassQuote' ? (
+                {effectiveStyle === 'glassQuote' ? (
                   <View style={styles.previewGlassQuoteBox}>
                     <View style={styles.previewGlassQuoteHeader}>
                       <CoverArt
@@ -758,7 +922,7 @@ export const VideoCardModal: React.FC<Props> = ({
                     </View>
                     <View style={styles.previewQuoteDivider} />
                     <View style={{ gap: 3 }}>
-                      {clipLines.slice(0, MAX_IMAGE_LINES).map((l, i) => (
+                      {(clipLines.length > 0 ? clipLines.slice(0, MAX_IMAGE_LINES) : [{ text: placeholderText, time: 0, section: false }]).map((l, i) => (
                         <Text
                           key={i}
                           style={[
@@ -772,7 +936,7 @@ export const VideoCardModal: React.FC<Props> = ({
                       ))}
                     </View>
                   </View>
-                ) : clipStyle === 'textOnly' ? (
+                ) : effectiveStyle === 'textOnly' ? (
                   <View style={styles.previewTextOnlyWrap}>
                     <View style={styles.previewHeaderPill}>
                       <CoverArt uri={track.artworkUri} size={18} radius={9} />
@@ -783,7 +947,7 @@ export const VideoCardModal: React.FC<Props> = ({
                     <View style={styles.previewTextOnlyCenter}>
                       {isImage ? (
                         <View style={styles.previewStaticLinesCol}>
-                          {clipLines.slice(0, MAX_IMAGE_LINES).map((l, i) => (
+                          {(clipLines.length > 0 ? clipLines.slice(0, MAX_IMAGE_LINES) : [{ text: placeholderText, time: 0, section: false }]).map((l, i) => (
                             <Text
                               key={i}
                               style={[
@@ -797,50 +961,30 @@ export const VideoCardModal: React.FC<Props> = ({
                           ))}
                         </View>
                       ) : (
-                        <View style={styles.previewKaraokeCol}>
-                          {prevLine ? (
-                            <Text style={styles.previewLineDim} numberOfLines={1}>
-                              {prevLine}
-                            </Text>
-                          ) : null}
-                          <Text style={styles.previewLineActive} numberOfLines={2}>
-                            {curLine}
-                          </Text>
-                          {nextLine ? (
-                            <Text style={styles.previewLineDim} numberOfLines={1}>
-                              {nextLine}
-                            </Text>
-                          ) : null}
-                        </View>
+                        <PreviewLyricsRibbon
+                          lines={clipLines}
+                          activeIdx={relIdx}
+                          placeholder={placeholderText}
+                          fontSize={11.5}
+                          height={Math.max(82, Math.round(previewH * 0.56))}
+                          align="center"
+                        />
                       )}
                     </View>
                   </View>
-                ) : clipStyle === 'inCover' ? (
+                ) : effectiveStyle === 'inCover' ? (
                   <View style={styles.previewInCoverWrap}>
-                    <Animated.View
-                      style={{
-                        width: coverSize,
-                        height: coverSize,
-                        borderRadius: coverRadiusAnim,
-                        overflow: 'hidden',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        borderWidth: 1,
-                        borderColor: 'rgba(255,255,255,0.25)',
-                      }}
+                    <PreviewCover
+                      uri={track.artworkUri}
+                      size={coverSize}
+                      radius={coverRadius}
+                      spin={spinning}
+                      borderColor="rgba(255,255,255,0.25)"
                     >
-                      <Animated.View
-                        style={[
-                          StyleSheet.absoluteFill,
-                          !isImage && coverShape === 'vinyl' && { transform: [{ rotate: spinDeg }] },
-                        ]}
-                      >
-                        <CoverArt uri={track.artworkUri} size={coverSize} radius={0} />
-                      </Animated.View>
                       <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(8,8,10,0.58)' }]} />
                       {isImage ? (
                         <View style={{ paddingHorizontal: 10, alignItems: 'center', gap: 2 }}>
-                          {clipLines.slice(0, MAX_IMAGE_LINES).map((l, i) => (
+                          {(clipLines.length > 0 ? clipLines.slice(0, MAX_IMAGE_LINES) : [{ text: placeholderText, time: 0, section: false }]).map((l, i) => (
                             <Text
                               key={i}
                               style={[
@@ -854,23 +998,18 @@ export const VideoCardModal: React.FC<Props> = ({
                           ))}
                         </View>
                       ) : (
-                        <View style={{ paddingHorizontal: 10, alignItems: 'center', gap: 2 }}>
-                          {prevLine ? (
-                            <Text style={[styles.previewLineDim, { fontSize: 8 }]} numberOfLines={1}>
-                              {prevLine}
-                            </Text>
-                          ) : null}
-                          <Text style={[styles.previewLineActive, { fontSize: 11 }]} numberOfLines={2}>
-                            {curLine}
-                          </Text>
-                          {nextLine ? (
-                            <Text style={[styles.previewLineDim, { fontSize: 8 }]} numberOfLines={1}>
-                              {nextLine}
-                            </Text>
-                          ) : null}
+                        <View style={{ width: '88%', alignItems: 'center', justifyContent: 'center' }}>
+                          <PreviewLyricsRibbon
+                            lines={clipLines}
+                            activeIdx={relIdx}
+                            placeholder={placeholderText}
+                            fontSize={10}
+                            height={Math.max(64, Math.round(coverSize * 0.76))}
+                            align="center"
+                          />
                         </View>
                       )}
-                    </Animated.View>
+                    </PreviewCover>
                     <Text style={styles.previewMetaTitle} numberOfLines={1}>
                       {track.title}
                     </Text>
@@ -881,21 +1020,12 @@ export const VideoCardModal: React.FC<Props> = ({
                 ) : isLandscape ? (
                   <View style={styles.previewLandscapeRow}>
                     <View style={{ alignItems: 'center', width: coverSize + 10 }}>
-                      <Animated.View
-                        style={[
-                          {
-                            width: coverSize,
-                            height: coverSize,
-                            borderRadius: coverRadiusAnim,
-                            overflow: 'hidden',
-                            borderWidth: 1,
-                            borderColor: 'rgba(255,255,255,0.22)',
-                          },
-                          !isImage && coverShape === 'vinyl' && { transform: [{ rotate: spinDeg }] },
-                        ]}
-                      >
-                        <CoverArt uri={track.artworkUri} size={coverSize} radius={0} />
-                      </Animated.View>
+                      <PreviewCover
+                        uri={track.artworkUri}
+                        size={coverSize}
+                        radius={coverRadius}
+                        spin={spinning}
+                      />
                       <Text style={[styles.previewMetaTitle, { marginTop: 4 }]} numberOfLines={1}>
                         {track.title}
                       </Text>
@@ -905,7 +1035,7 @@ export const VideoCardModal: React.FC<Props> = ({
                     </View>
                     {isImage ? (
                       <View style={[styles.previewStaticLinesCol, { flex: 1, alignItems: 'flex-start', paddingLeft: 10 }]}>
-                        {clipLines.slice(0, MAX_IMAGE_LINES).map((l, i) => (
+                        {(clipLines.length > 0 ? clipLines.slice(0, MAX_IMAGE_LINES) : [{ text: placeholderText, time: 0, section: false }]).map((l, i) => (
                           <Text
                             key={i}
                             style={[
@@ -919,40 +1049,26 @@ export const VideoCardModal: React.FC<Props> = ({
                         ))}
                       </View>
                     ) : (
-                      <View style={[styles.previewKaraokeCol, { flex: 1, alignItems: 'flex-start', paddingLeft: 10 }]}>
-                        {prevLine ? (
-                          <Text style={[styles.previewLineDim, { textAlign: 'left' }]} numberOfLines={1}>
-                            {prevLine}
-                          </Text>
-                        ) : null}
-                        <Text style={[styles.previewLineActive, { textAlign: 'left' }]} numberOfLines={2}>
-                          {curLine}
-                        </Text>
-                        {nextLine ? (
-                          <Text style={[styles.previewLineDim, { textAlign: 'left' }]} numberOfLines={1}>
-                            {nextLine}
-                          </Text>
-                        ) : null}
+                      <View style={{ flex: 1, paddingLeft: 10, justifyContent: 'center' }}>
+                        <PreviewLyricsRibbon
+                          lines={clipLines}
+                          activeIdx={relIdx}
+                          placeholder={placeholderText}
+                          fontSize={10.5}
+                          height={Math.max(76, Math.round(previewH * 0.68))}
+                          align="left"
+                        />
                       </View>
                     )}
                   </View>
                 ) : (
                   <View style={styles.previewPortraitCol}>
-                    <Animated.View
-                      style={[
-                        {
-                          width: coverSize,
-                          height: coverSize,
-                          borderRadius: coverRadiusAnim,
-                          overflow: 'hidden',
-                          borderWidth: 1,
-                          borderColor: 'rgba(255,255,255,0.22)',
-                        },
-                        !isImage && coverShape === 'vinyl' && { transform: [{ rotate: spinDeg }] },
-                      ]}
-                    >
-                      <CoverArt uri={track.artworkUri} size={coverSize} radius={0} />
-                    </Animated.View>
+                    <PreviewCover
+                      uri={track.artworkUri}
+                      size={coverSize}
+                      radius={coverRadius}
+                      spin={spinning}
+                    />
                     <Text style={[styles.previewMetaTitle, { marginTop: 4 }]} numberOfLines={1}>
                       {track.title}
                     </Text>
@@ -961,7 +1077,7 @@ export const VideoCardModal: React.FC<Props> = ({
                     </Text>
                     {isImage ? (
                       <View style={[styles.previewStaticLinesCol, { marginTop: 4 }]}>
-                        {clipLines.slice(0, MAX_IMAGE_LINES).map((l, i) => (
+                        {(clipLines.length > 0 ? clipLines.slice(0, MAX_IMAGE_LINES) : [{ text: placeholderText, time: 0, section: false }]).map((l, i) => (
                           <Text
                             key={i}
                             style={[
@@ -975,20 +1091,15 @@ export const VideoCardModal: React.FC<Props> = ({
                         ))}
                       </View>
                     ) : (
-                      <View style={[styles.previewKaraokeCol, { marginTop: 4 }]}>
-                        {prevLine ? (
-                          <Text style={styles.previewLineDim} numberOfLines={1}>
-                            {prevLine}
-                          </Text>
-                        ) : null}
-                        <Text style={styles.previewLineActive} numberOfLines={2}>
-                          {curLine}
-                        </Text>
-                        {nextLine ? (
-                          <Text style={styles.previewLineDim} numberOfLines={1}>
-                            {nextLine}
-                          </Text>
-                        ) : null}
+                      <View style={{ width: '94%', marginTop: 4, alignItems: 'center' }}>
+                        <PreviewLyricsRibbon
+                          lines={clipLines}
+                          activeIdx={relIdx}
+                          placeholder={placeholderText}
+                          fontSize={10.5}
+                          height={Math.max(66, Math.round(previewH - coverSize - 64))}
+                          align="center"
+                        />
                       </View>
                     )}
                   </View>
@@ -999,7 +1110,7 @@ export const VideoCardModal: React.FC<Props> = ({
                 <View style={styles.previewWatermark}>
                   <Text style={styles.previewWatermarkText}>{isImage ? 'WouFY Card' : 'WouFY Clip'}</Text>
                 </View>
-              </Animated.View>
+              </View>
 
               {/* Кнопка предпрослушивания отрывка (для видео) */}
               {!isImage && (
@@ -1031,14 +1142,13 @@ export const VideoCardModal: React.FC<Props> = ({
                   style={[styles.segmentActiveBg, styleIndicator.indicatorStyle]}
                 />
                 {styleOptions.map((opt) => {
-                  const active = clipStyle === opt.key;
+                  const active = effectiveStyle === opt.key;
                   return (
                     <PressableScale
                       key={opt.key}
                       onLayout={styleIndicator.onItemLayout(opt.key)}
                       onPress={() => {
                         Haptics.selectionAsync();
-                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                         setClipStyle(opt.key);
                       }}
                       scaleTo={0.96}
@@ -1057,7 +1167,7 @@ export const VideoCardModal: React.FC<Props> = ({
             </Glass>
 
             {/* 3. ВИД ОБЛОЖКИ (только если стиль с обложкой) */}
-            {clipStyle !== 'textOnly' && (
+            {effectiveStyle !== 'textOnly' && (
               <>
                 <Text style={styles.sectionLabel}>Форма обложки</Text>
                 <Glass radius={22} style={styles.segmentedGlass}>
@@ -1121,7 +1231,6 @@ export const VideoCardModal: React.FC<Props> = ({
                     onLayout={aspectIndicator.onItemLayout(opt.key)}
                     onPress={() => {
                       Haptics.selectionAsync();
-                      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                       setAspect(opt.key);
                     }}
                     scaleTo={0.94}

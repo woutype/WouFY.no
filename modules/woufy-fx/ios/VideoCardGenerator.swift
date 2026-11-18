@@ -23,6 +23,188 @@ struct LyricItem {
   let text: String
 }
 
+/// Плавная «лента» текста для видео — та же логика, что во вкладке «Текст» основного плеера (LyricsView):
+/// пружина damping 22 / stiffness 240 / mass 0.7, активная строка 1.03, остальные 0.95,
+/// прозрачность падает с расстоянием до активной строки [1, .62, .46, .34, .26, .2], строки едут по ленте.
+/// Видео рендерится покадрово, поэтому пружина интегрируется детерминированно (шаг 1/480 с).
+final class LyricsAnimator {
+  private let lines: [LyricItem]
+  private let startTime: Double
+  private(set) var focus: Double
+  private var focusVel: Double = 0
+  private var scrollY: Double = 0
+  private var scrollVel: Double = 0
+  private var scrollInitialized: Bool = false
+  private var lineAct: [Double]
+  private var lineVel: [Double]
+  private var simTime: Double
+  private var targetTime: Double
+  private var heightCache: [String: [CGFloat]] = [:]
+
+  private let mass = 0.7
+  private let stiffness = 240.0
+  private let damping = 22.0
+  private static let distOpacity: [CGFloat] = [1, 0.62, 0.46, 0.34, 0.26, 0.2]
+
+  init(lines: [LyricItem], startTime: Double) {
+    self.lines = lines
+    self.startTime = startTime
+    self.simTime = startTime
+    self.targetTime = startTime
+    let idx0 = LyricsAnimator.activeIndex(lines, at: startTime)
+    self.focus = Double(idx0)
+    self.lineAct = (0..<lines.count).map { $0 == idx0 ? 1.0 : 0.0 }
+    self.lineVel = Array(repeating: 0.0, count: lines.count)
+  }
+
+  /// Как activeLineIndex() в плеере: строка включается чуть раньше своего времени (lookahead 0.12 с)
+  static func activeIndex(_ lines: [LyricItem], at t: Double) -> Int {
+    var idx = 0
+    for (i, l) in lines.enumerated() {
+      if t + 0.12 >= l.time { idx = i } else { break }
+    }
+    return idx
+  }
+
+  func advance(to t: Double) {
+    targetTime = max(targetTime, t)
+  }
+
+  private func stepSimulation(to t: Double, centers: [CGFloat]) {
+    guard !lines.isEmpty else { return }
+    let idx0 = LyricsAnimator.activeIndex(lines, at: simTime)
+    if !scrollInitialized {
+      scrollY = Double(centers[min(max(idx0, 0), centers.count - 1)])
+      scrollInitialized = true
+    }
+    guard t > simTime else { return }
+    let h = 1.0 / 480.0
+    let n = lines.count
+    while simTime < t {
+      let activeIdx = LyricsAnimator.activeIndex(lines, at: simTime)
+      let targetF = Double(activeIdx)
+      let accF = (stiffness * (targetF - focus) - damping * focusVel) / mass
+      focusVel += accF * h
+      focus += focusVel * h
+
+      let targetY = Double(centers[min(max(activeIdx, 0), n - 1)])
+      let accY = (stiffness * (targetY - scrollY) - damping * scrollVel) / mass
+      scrollVel += accY * h
+      scrollY += scrollVel * h
+
+      for i in 0..<n {
+        let targetA = (i == activeIdx) ? 1.0 : 0.0
+        let accA = (stiffness * (targetA - lineAct[i]) - damping * lineVel[i]) / mass
+        lineVel[i] += accA * h
+        lineAct[i] += lineVel[i] * h
+      }
+
+      simTime += h
+    }
+  }
+
+  private static func opacity(forDistance d: Double) -> CGFloat {
+    if d <= 0 { return distOpacity[0] }
+    if d >= 5 { return distOpacity[5] }
+    let lo = Int(floor(d))
+    let frac = CGFloat(d - Double(lo))
+    return distOpacity[lo] + (distOpacity[lo + 1] - distOpacity[lo]) * frac
+  }
+
+  private func heights(width: CGFloat, fontSize: CGFloat, attrs: [NSAttributedString.Key: Any]) -> [CGFloat] {
+    let key = "\(Int(width))-\(Int(fontSize * 10))"
+    if let cached = heightCache[key] { return cached }
+    let hs: [CGFloat] = lines.map { l in
+      let r = (l.text as NSString).boundingRect(
+        with: CGSize(width: width, height: .greatestFiniteMagnitude),
+        options: [.usesLineFragmentOrigin, .usesFontLeading],
+        attributes: attrs,
+        context: nil
+      )
+      return ceil(r.height)
+    }
+    heightCache[key] = hs
+    return hs
+  }
+
+  func draw(in ctx: CGContext, rect: CGRect, fontSize: CGFloat, centered: Bool) {
+    guard !lines.isEmpty else { return }
+
+    // Запас по ширине под масштаб 1.03, чтобы активная строка не переносилась иначе, чем неактивная
+    let layoutW = max(10, rect.width / 1.06)
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.alignment = centered ? .center : .left
+    paragraph.lineBreakMode = .byWordWrapping
+    paragraph.lineSpacing = fontSize * 0.08
+    let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+    let kern = -fontSize * 0.018
+
+    let baseAttrs: [NSAttributedString.Key: Any] = [
+      .font: font,
+      .foregroundColor: UIColor.white,
+      .paragraphStyle: paragraph,
+      .kern: kern
+    ]
+    let hs = heights(width: layoutW, fontSize: fontSize, attrs: baseAttrs)
+    let gap = fontSize * 0.56
+
+    var centers: [CGFloat] = []
+    var y: CGFloat = 0
+    for h in hs {
+      centers.append(y + h / 2)
+      y += h + gap
+    }
+
+    stepSimulation(to: targetTime, centers: centers)
+
+    let n = lines.count
+    let curScrollY = CGFloat(scrollY)
+    let fadeZone = max(fontSize * 1.15, rect.height * 0.15)
+
+    ctx.saveGState()
+    UIRectClip(rect)
+
+    for i in 0..<n {
+      let h = hs[i]
+      let cy = rect.midY + (centers[i] - curScrollY)
+      if cy + h * 0.55 < rect.minY || cy - h * 0.55 > rect.maxY { continue }
+
+      let a = CGFloat(min(max(lineAct[i], 0.0), 1.0))
+      let s: CGFloat = 0.95 + 0.08 * CGFloat(min(max(lineAct[i], 0.0), 1.05))
+      let d = max(1.0, abs(Double(i) - focus))
+      let rest = LyricsAnimator.opacity(forDistance: d)
+      let baseAlpha = rest + (1.0 - rest) * a
+
+      // Мягкое растворение у верхней и нижней границ rect (как LinearGradient в LyricsView), без резкого обрезания букв
+      let lineTop = cy - h * 0.45
+      let lineBot = cy + h * 0.45
+      let rawTop = (lineTop - rect.minY + fontSize * 0.35) / fadeZone
+      let rawBot = (rect.maxY - lineBot + fontSize * 0.35) / fadeZone
+      let tEdge = min(1.0, max(0.0, min(rawTop, rawBot)))
+      let edgeFade = tEdge * tEdge * (3.0 - 2.0 * tEdge)
+
+      let alpha = baseAlpha * edgeFade
+      if alpha < 0.01 { continue }
+
+      var attrs = baseAttrs
+      attrs[.foregroundColor] = UIColor(white: 1.0, alpha: alpha)
+
+      ctx.saveGState()
+      ctx.translateBy(x: centered ? rect.midX : rect.minX, y: cy)
+      ctx.scaleBy(x: s, y: s)
+      (lines[i].text as NSString).draw(
+        with: CGRect(x: centered ? -layoutW / 2 : 0, y: -h / 2, width: layoutW, height: h + 4),
+        options: [.usesLineFragmentOrigin, .usesFontLeading],
+        attributes: attrs,
+        context: nil
+      )
+      ctx.restoreGState()
+    }
+
+    ctx.restoreGState()
+  }
+}
+
 final class VideoCardGenerator {
 
   static func dimensions(for aspect: String) -> (Int, Int) {
@@ -110,6 +292,7 @@ final class VideoCardGenerator {
         writer.startSession(atSourceTime: .zero)
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let lyricsAnimator = LyricsAnimator(lines: lines, startTime: startSec)
 
         for frameIdx in 0..<totalFrames {
           while !writerInput.isReadyForMoreMediaData && writer.status == .writing {
@@ -148,6 +331,7 @@ final class VideoCardGenerator {
             UIGraphicsPushContext(ctx)
             let currentTime = startSec + (Double(frameIdx) / Double(fps))
             let elapsed = Double(frameIdx) / Double(fps)
+            lyricsAnimator.advance(to: currentTime)
 
             drawFrame(
               in: ctx,
@@ -157,6 +341,7 @@ final class VideoCardGenerator {
               title: title,
               artist: artist,
               lines: lines,
+              lyrics: lyricsAnimator,
               currentTime: currentTime,
               elapsed: elapsed,
               duration: duration,
@@ -546,6 +731,7 @@ final class VideoCardGenerator {
     title: String,
     artist: String,
     lines: [LyricItem],
+    lyrics: LyricsAnimator,
     currentTime: Double,
     elapsed: Double,
     duration: Double,
@@ -562,26 +748,6 @@ final class VideoCardGenerator {
 
     let isLandscape = W > H * 1.15
     let isSquare = abs(W - H) < 40
-
-    // Находим индекс активной строчки и прогресс внутри неё
-    var activeIdx = 0
-    for (i, line) in lines.enumerated() {
-      if currentTime + 0.1 >= line.time {
-        activeIdx = i
-      } else {
-        break
-      }
-    }
-
-    // Плавный сдвиг при смене строчки (за первые 0.42с от начала строчки)
-    var transitionProgress: CGFloat = 1.0
-    if !lines.isEmpty && activeIdx < lines.count {
-      let sinceLineStart = max(0.0, currentTime - lines[activeIdx].time)
-      transitionProgress = CGFloat(min(1.0, sinceLineStart / 0.42))
-      // easeOutCubic
-      let inv = 1.0 - transitionProgress
-      transitionProgress = 1.0 - inv * inv * inv
-    }
 
     if styleMode == "textOnly" {
       // Только текст: крупно по центру + шапка трека сверху
@@ -602,15 +768,7 @@ final class VideoCardGenerator {
         width: W * 0.84,
         height: H * 0.66
       )
-      drawLyricsBlock(
-        in: ctx,
-        rect: lyricsRect,
-        lines: lines,
-        activeIdx: activeIdx,
-        transition: transitionProgress,
-        fontSize: minDim * 0.056,
-        centered: true
-      )
+      lyrics.draw(in: ctx, rect: lyricsRect, fontSize: minDim * 0.056, centered: true)
     } else if styleMode == "inCover" {
       // Текст переключается прямо внутри крупной обложки
       let coverSize = isLandscape ? H * 0.76 : (isSquare ? minDim * 0.78 : W * 0.82)
@@ -630,15 +788,7 @@ final class VideoCardGenerator {
       // Текст внутри обложки
       let inset = coverSize * 0.10
       let innerRect = coverRect.insetBy(dx: inset, dy: inset)
-      drawLyricsBlock(
-        in: ctx,
-        rect: innerRect,
-        lines: lines,
-        activeIdx: activeIdx,
-        transition: transitionProgress,
-        fontSize: coverSize * 0.068,
-        centered: true
-      )
+      lyrics.draw(in: ctx, rect: innerRect, fontSize: coverSize * 0.068, centered: true)
 
       // Название и артист под обложкой
       drawTrackMeta(
@@ -676,25 +826,14 @@ final class VideoCardGenerator {
         let rightX = coverRect.maxX + W * 0.06
         let rightW = W - rightX - W * 0.06
         let lyricsRect = CGRect(x: rightX, y: H * 0.14, width: rightW, height: H * 0.70)
-        drawLyricsBlock(
-          in: ctx,
-          rect: lyricsRect,
-          lines: lines,
-          activeIdx: activeIdx,
-          transition: transitionProgress,
-          fontSize: minDim * 0.052,
-          centered: false
-        )
+        lyrics.draw(in: ctx, rect: lyricsRect, fontSize: minDim * 0.052, centered: false)
       } else {
-        let coverSize = isSquare ? minDim * 0.44 : W * 0.56
-        let metaH = minDim * 0.095
-        let coverToMetaGap = H * 0.020
-        let metaToLyricsGap = H * 0.024
+        let coverSize = isSquare ? minDim * 0.38 : min(W * 0.50, H * 0.36)
+        let metaH = minDim * 0.090
+        let coverToMetaGap = H * 0.018
+        let metaToLyricsGap = H * 0.014
         let fontSize = minDim * 0.052
-        let lyricsH = fontSize * 2.45 * 2.5
-
-        let totalStackH = coverSize + coverToMetaGap + metaH + metaToLyricsGap + lyricsH
-        let topY = max(H * 0.06, (H * 0.90 - totalStackH) / 2.0)
+        let topY = isSquare ? H * 0.055 : H * 0.068
 
         let coverX = (W - coverSize) / 2
         let coverRect = CGRect(x: coverX, y: topY, width: coverSize, height: coverSize)
@@ -718,16 +857,9 @@ final class VideoCardGenerator {
         )
 
         let lyricsTop = metaY + metaH + metaToLyricsGap
+        let lyricsH = max(fontSize * 4.2, H * 0.895 - lyricsTop)
         let lyricsRect = CGRect(x: W * 0.08, y: lyricsTop, width: W * 0.84, height: lyricsH)
-        drawLyricsBlock(
-          in: ctx,
-          rect: lyricsRect,
-          lines: lines,
-          activeIdx: activeIdx,
-          transition: transitionProgress,
-          fontSize: fontSize,
-          centered: true
-        )
+        lyrics.draw(in: ctx, rect: lyricsRect, fontSize: fontSize, centered: true)
       }
     }
 
@@ -791,76 +923,6 @@ final class VideoCardGenerator {
     borderPath.lineWidth = 2.0
     UIColor(white: 1.0, alpha: 0.22).setStroke()
     borderPath.stroke()
-
-    ctx.restoreGState()
-  }
-
-  private static func drawLyricsBlock(
-    in ctx: CGContext,
-    rect: CGRect,
-    lines: [LyricItem],
-    activeIdx: Int,
-    transition: CGFloat,
-    fontSize: CGFloat,
-    centered: Bool
-  ) {
-    guard !lines.isEmpty else { return }
-    ctx.saveGState()
-    UIRectClip(rect)
-
-    let paragraph = NSMutableParagraphStyle()
-    paragraph.alignment = centered ? .center : .left
-    paragraph.lineBreakMode = .byWordWrapping
-    paragraph.lineSpacing = 3
-
-    let centerY = rect.midY
-    let slotStep = fontSize * 2.45
-    let slideOffset = (1.0 - transition) * slotStep
-
-    let indices = [activeIdx - 1, activeIdx, activeIdx + 1]
-    for idx in indices {
-      guard idx >= 0 && idx < lines.count else { continue }
-      let dist = idx - activeIdx
-      let text = lines[idx].text
-
-      let isCurrent = (dist == 0)
-      let isPrev = (dist == -1)
-      let scale: CGFloat
-      let alpha: CGFloat
-      if isCurrent {
-        scale = 0.86 + 0.14 * transition
-        alpha = 0.36 + 0.64 * transition
-      } else if isPrev && activeIdx > 0 {
-        scale = 1.0 - 0.16 * transition
-        alpha = 1.0 - 0.66 * transition
-      } else {
-        scale = 0.84
-        alpha = 0.34 * transition
-      }
-      let actualFont = UIFont.systemFont(ofSize: fontSize * scale, weight: isCurrent ? .heavy : .bold)
-
-      let attrs: [NSAttributedString.Key: Any] = [
-        .font: actualFont,
-        .foregroundColor: UIColor(white: 1.0, alpha: alpha),
-        .paragraphStyle: paragraph
-      ]
-
-      let attrStr = NSAttributedString(string: text, attributes: attrs)
-      let bounding = attrStr.boundingRect(
-        with: CGSize(width: rect.width, height: rect.height * 0.45),
-        options: [.usesLineFragmentOrigin, .usesFontLeading],
-        context: nil
-      )
-
-      let targetY = centerY + CGFloat(dist) * slotStep + slideOffset - bounding.height / 2.0
-      let drawRect = CGRect(
-        x: rect.minX,
-        y: targetY,
-        width: rect.width,
-        height: ceil(bounding.height) + 8
-      )
-      attrStr.draw(in: drawRect)
-    }
 
     ctx.restoreGState()
   }
