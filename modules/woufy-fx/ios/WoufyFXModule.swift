@@ -245,7 +245,11 @@ public class WoufyFXModule: Module {
         DispatchQueue.main.async {
           self.installRemote()
           self.enforceLockScreenCommands()
-          MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+          let center = MPNowPlayingInfoCenter.default()
+          center.nowPlayingInfo = info
+          // Явно сообщаем системе состояние воспроизведения (свой AVAudioEngine делает это не так, как AVPlayer),
+          // чтобы iOS однозначно связала Now Playing / Dynamic Island с этим приложением
+          center.playbackState = .playing
         }
       }
     }
@@ -258,12 +262,15 @@ public class WoufyFXModule: Module {
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position
         info[MPNowPlayingInfoPropertyPlaybackRate] = rate
         center.nowPlayingInfo = info
+        center.playbackState = rate > 0 ? .playing : .paused
       }
     }
 
     Function("clearNowPlaying") { () -> Void in
       DispatchQueue.main.async {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        let center = MPNowPlayingInfoCenter.default()
+        center.nowPlayingInfo = nil
+        center.playbackState = .stopped
       }
     }
 
