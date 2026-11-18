@@ -52,3 +52,6 @@ SideStore.conf
 # local test audio tracks (never commit or include in releases)
 test-tracks/
 
+# python
+__pycache__/
+*.py[cod]

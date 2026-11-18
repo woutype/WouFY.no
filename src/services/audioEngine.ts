@@ -10,8 +10,6 @@ import { statsService } from './statsService';
 import { resolveTrackUri } from './library';
 import { getFullArtwork, peekFullArtwork } from './artwork';
 
-/** пропуск раньше этого порога (сек) понижает приоритет трека в текущей очереди Smart Shuffle */
-const SKIP_DEMOTE_SEC = 10;
 
 type AudioPlayer = PlayerLike;
 type AudioStatus = PlayerStatus;
@@ -200,6 +198,8 @@ export class AudioEngine {
   private audioSessionConfigured = false;
   private lastSeekTarget: { time: number; requestedAt: number } | null = null;
   private lastPrevTapTime = 0;
+  /** стек реально проигранных треков (id): «назад» возвращает именно на них, даже если очередь перемешана/пересобрана */
+  private playHistory: string[] = [];
   private trackStartedAt = 0;
 
   constructor() {
@@ -864,33 +864,17 @@ export class AudioEngine {
     this.playIndex(d.index);
   }
 
-  /**
-   * Smart Shuffle: трек, пропущенный в первые SKIP_DEMOTE_SEC секунд, уходит ближе к концу оставшейся очереди.
-   * Возвращает актуальный индекс целевого трека (очередь могла сдвинуться).
-   */
-  private demoteEarlySkip(targetId: string, fallbackIndex: number): number {
-    const leaving = this.currentTrack;
-    if (!leaving || leaving.id === targetId || !this.state.shuffle || this.sortMode !== 'default') return fallbackIndex;
-    const listened = statsService.currentListened(leaving.id);
-    if (listened === null || listened >= SKIP_DEMOTE_SEC) return fallbackIndex;
-    const perm = this.shufflePerm.filter((id) => id !== leaving.id);
-    const at = perm.indexOf(targetId);
-    if (at < 0) return fallbackIndex;
-    // в последнюю треть оставшейся части очереди (не в самый конец — чтобы не был предсказуем)
-    const tail = perm.length - (at + 1);
-    const pos = perm.length - Math.floor(Math.random() * Math.max(1, Math.ceil(tail / 3)));
-    perm.splice(Math.max(at + 1, pos), 0, leaving.id);
-    this.shufflePerm = perm;
-    const d = this.deriveQueue(targetId, true);
-    if (d.index < 0) return fallbackIndex;
-    this.set({ queue: d.queue, index: d.index, pinned: d.pinned });
-    return d.index;
+  private pushHistory(id: string | undefined, nextId: string) {
+    if (!id || id === nextId) return;
+    if (this.playHistory[this.playHistory.length - 1] === id) return;
+    this.playHistory.push(id);
+    if (this.playHistory.length > 200) this.playHistory.splice(0, this.playHistory.length - 200);
   }
 
-  playIndex(index: number, seekTo?: number, isAutoSkip = false) {
-    if (!isAutoSkip && this.state.queue[index]) index = this.demoteEarlySkip(this.state.queue[index].id, index);
+  playIndex(index: number, seekTo?: number, isAutoSkip = false, fromHistory = false) {
     const t = this.state.queue[index];
     if (!t) return;
+    if (!fromHistory) this.pushHistory(this.currentTrack?.id, t.id);
     statsService.finalizeCurrent(false);
     // отложенный пропуск «битого» трека не должен сработать поверх нового выбора (иначе лишний +1)
     if (this.errorSkipTimer) {
@@ -1065,7 +1049,7 @@ export class AudioEngine {
 
     // Свайп обложки или повторное нажатие кнопки в течение 2 секунд: всегда переключаем на предыдущий трек
     if (forceTrackChange || isDoubleTap) {
-      this.playIndex((this.state.index - 1 + n) % n);
+      this.playPreviousTrack();
       return;
     }
 
@@ -1076,7 +1060,24 @@ export class AudioEngine {
       return;
     }
 
-    this.playIndex((this.state.index - 1 + n) % n);
+    this.playPreviousTrack();
+  }
+
+  /** Предыдущий трек: сначала из истории прослушивания, иначе соседний в очереди */
+  private playPreviousTrack() {
+    const n = this.state.queue.length;
+    if (n === 0) return;
+    const curId = this.currentTrack?.id;
+    while (this.playHistory.length > 0) {
+      const id = this.playHistory.pop()!;
+      if (id === curId) continue;
+      const idx = this.state.queue.findIndex((t) => t.id === id);
+      if (idx >= 0) {
+        this.playIndex(idx, undefined, false, true);
+        return;
+      }
+    }
+    this.playIndex((this.state.index - 1 + n) % n, undefined, false, true);
   }
 
   seek(seconds: number) {
@@ -1544,6 +1545,7 @@ export class AudioEngine {
     const idx = this.state.queue.findIndex((x) => x.id === t.toId);
     if (idx < 0) return;
     t.uiSwitched = true;
+    this.pushHistory(this.currentTrack?.id, t.toId);
     const track = this.state.queue[idx];
     safe(() => t.from.clearLockScreenControls());
     this.updateLockScreen(t.to, track);

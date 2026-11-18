@@ -176,8 +176,10 @@ final class LyricsAnimator {
       let baseAlpha = rest + (1.0 - rest) * a
 
       // Мягкое растворение у верхней и нижней границ rect (как LinearGradient в LyricsView), без резкого обрезания букв
-      let lineTop = cy - h * 0.45
-      let lineBot = cy + h * 0.45
+      // длинная (многострочная) строка не должна гаснуть целиком: учитываем не больше ~30% высоты окна
+      let halfH = min(h * 0.45, rect.height * 0.30)
+      let lineTop = cy - halfH
+      let lineBot = cy + halfH
       let rawTop = (lineTop - rect.minY + fontSize * 0.35) / fadeZone
       let rawBot = (rect.maxY - lineBot + fontSize * 0.35) / fadeZone
       let tEdge = min(1.0, max(0.0, min(rawTop, rawBot)))
@@ -238,7 +240,8 @@ final class VideoCardGenerator {
 
         let duration = max(3.0, min(60.0, endSec - startSec))
         let (width, height) = dimensions(for: aspect)
-        let fps = 30
+        // 60 к/с: плавный скролл текста и вращение винила (при 30 к/с лента выглядела «рваной»)
+        let fps = 60
         let totalFrames = max(1, Int(duration * Double(fps)))
 
         let lines: [LyricItem] = rawLines.compactMap { dict in
@@ -261,9 +264,17 @@ final class VideoCardGenerator {
           AVVideoCodecKey: AVVideoCodecType.h264,
           AVVideoWidthKey: width,
           AVVideoHeightKey: height,
+          AVVideoColorPropertiesKey: [
+            AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+            AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+            AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+          ],
           AVVideoCompressionPropertiesKey: [
-            AVVideoAverageBitRateKey: width * height * 5,
-            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            AVVideoAverageBitRateKey: width * height * 9,
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+            AVVideoExpectedSourceFrameRateKey: fps,
+            AVVideoMaxKeyFrameIntervalKey: fps,
+            AVVideoAllowFrameReorderingKey: false
           ]
         ]
         let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
@@ -302,16 +313,26 @@ final class VideoCardGenerator {
             throw writer.error ?? VideoCardError.failedToStartWriter
           }
 
+          var frameError: Error? = nil
           autoreleasepool {
-            guard let pool = adaptor.pixelBufferPool else { return }
+            guard let pool = adaptor.pixelBufferPool else {
+              frameError = VideoCardError.failedToCreatePixelBuffer
+              return
+            }
             var pixelBufferOut: CVPixelBuffer?
             CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBufferOut)
-            guard let pixelBuffer = pixelBufferOut else { return }
+            guard let pixelBuffer = pixelBufferOut else {
+              frameError = VideoCardError.failedToCreatePixelBuffer
+              return
+            }
 
             CVPixelBufferLockBaseAddress(pixelBuffer, [])
             defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
 
-            guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+            guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+              frameError = VideoCardError.failedToCreatePixelBuffer
+              return
+            }
             let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
 
             guard let ctx = CGContext(
@@ -322,7 +343,21 @@ final class VideoCardGenerator {
               bytesPerRow: bytesPerRow,
               space: colorSpace,
               bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
-            ) else { return }
+            ) else {
+              frameError = VideoCardError.failedToCreatePixelBuffer
+              return
+            }
+
+            // Субпиксельное позиционирование глифов: без него текст при плавном скролле «шагает» по целым пикселям
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldAntialias(true)
+            ctx.setAllowsFontSmoothing(false)
+            ctx.setShouldSmoothFonts(false)
+            ctx.setAllowsFontSubpixelPositioning(true)
+            ctx.setShouldSubpixelPositionFonts(true)
+            ctx.setAllowsFontSubpixelQuantization(false)
+            ctx.setShouldSubpixelQuantizeFonts(false)
+            ctx.interpolationQuality = .high
 
             // Переворачиваем систему координат под UIKit (0,0 сверху слева)
             ctx.translateBy(x: 0, y: CGFloat(height))
@@ -352,8 +387,11 @@ final class VideoCardGenerator {
             UIGraphicsPopContext()
 
             let presentationTime = CMTime(value: CMTimeValue(frameIdx), timescale: CMTimeScale(fps))
-            adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+            if !adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
+              frameError = writer.error ?? VideoCardError.failedToStartWriter
+            }
           }
+          if let frameError = frameError { throw frameError }
 
           if frameIdx % 5 == 0 || frameIdx == totalFrames - 1 {
             let p = Double(frameIdx + 1) / Double(totalFrames) * 0.82
@@ -530,7 +568,7 @@ final class VideoCardGenerator {
         .paragraphStyle: paragraph
       ]
       let textPad = 40 * scale
-      let headerH = 82 * scale
+      let headerH = (coverShape == "vinyl" ? 98 : 82) * scale
       let bound = (joinedText as NSString).boundingRect(
         with: CGSize(width: cardW - textPad * 2, height: cardMaxH - headerH - textPad * 2),
         options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -554,13 +592,9 @@ final class VideoCardGenerator {
       strokePath.stroke()
 
       // Шапка внутри карточки: обложка + название + артист
-      let thumbSize = 56 * scale
+      let thumbSize = (coverShape == "vinyl" ? 72 : 56) * scale
       let thumbRect = CGRect(x: cardRect.minX + textPad, y: cardRect.minY + textPad * 0.85, width: thumbSize, height: thumbSize)
-      ctx.saveGState()
-      let thumbRadius = (coverShape == "vinyl") ? thumbSize / 2 : 14 * scale
-      UIBezierPath(roundedRect: thumbRect, cornerRadius: thumbRadius).addClip()
-      coverImage.draw(in: thumbRect)
-      ctx.restoreGState()
+      drawCover(in: ctx, rect: thumbRect, image: coverImage, shape: coverShape, elapsed: 0, darkenOverlay: 0.0, vinylDetails: true)
 
       let metaX = thumbRect.maxX + 16 * scale
       let metaW = cardRect.maxX - metaX - textPad
@@ -569,7 +603,7 @@ final class VideoCardGenerator {
       pMeta.lineBreakMode = .byTruncatingTail
 
       (title as NSString).draw(
-        in: CGRect(x: metaX, y: thumbRect.minY + 6 * scale, width: metaW, height: 26 * scale),
+        in: CGRect(x: metaX, y: thumbRect.minY + (thumbSize - 48 * scale) / 2, width: metaW, height: 26 * scale),
         withAttributes: [
           .font: UIFont.systemFont(ofSize: 20 * scale, weight: .bold),
           .foregroundColor: UIColor.white,
@@ -577,7 +611,7 @@ final class VideoCardGenerator {
         ]
       )
       (artist as NSString).draw(
-        in: CGRect(x: metaX, y: thumbRect.minY + 32 * scale, width: metaW, height: 22 * scale),
+        in: CGRect(x: metaX, y: thumbRect.minY + (thumbSize - 48 * scale) / 2 + 26 * scale, width: metaW, height: 22 * scale),
         withAttributes: [
           .font: UIFont.systemFont(ofSize: 15 * scale, weight: .medium),
           .foregroundColor: UIColor(white: 1.0, alpha: 0.62),
@@ -623,7 +657,7 @@ final class VideoCardGenerator {
       let coverY = isLandscape ? (H - coverSize) / 2 - H * 0.02 : H * 0.10
       let coverRect = CGRect(x: coverX, y: coverY, width: coverSize, height: coverSize)
 
-      drawCover(in: ctx, rect: coverRect, image: coverImage, shape: coverShape, elapsed: 0, darkenOverlay: 0.58)
+      drawCover(in: ctx, rect: coverRect, image: coverImage, shape: coverShape, elapsed: 0, darkenOverlay: 0.58, vinylDetails: true)
       let inset = coverSize * 0.10
       let innerRect = coverRect.insetBy(dx: inset, dy: inset)
       drawStaticLinesList(in: ctx, rect: innerRect, lines: lines, baseFontSize: coverSize * 0.062, centered: true)
@@ -643,7 +677,7 @@ final class VideoCardGenerator {
         let coverY = (H - coverSize) / 2 - H * 0.04
         let coverRect = CGRect(x: leftMargin, y: coverY, width: coverSize, height: coverSize)
 
-        drawCover(in: ctx, rect: coverRect, image: coverImage, shape: coverShape, elapsed: 0, darkenOverlay: 0.0)
+        drawCover(in: ctx, rect: coverRect, image: coverImage, shape: coverShape, elapsed: 0, darkenOverlay: 0.0, vinylDetails: true)
         drawTrackMeta(
           title: title,
           artist: artist,
@@ -662,7 +696,7 @@ final class VideoCardGenerator {
         let coverY = H * 0.07
         let coverRect = CGRect(x: coverX, y: coverY, width: coverSize, height: coverSize)
 
-        drawCover(in: ctx, rect: coverRect, image: coverImage, shape: coverShape, elapsed: 0, darkenOverlay: 0.0)
+        drawCover(in: ctx, rect: coverRect, image: coverImage, shape: coverShape, elapsed: 0, darkenOverlay: 0.0, vinylDetails: true)
         let metaY = coverRect.maxY + H * 0.02
         let metaH = H * 0.075
         drawTrackMeta(
@@ -873,7 +907,8 @@ final class VideoCardGenerator {
     image: UIImage,
     shape: String,
     elapsed: Double,
-    darkenOverlay: CGFloat
+    darkenOverlay: CGFloat,
+    vinylDetails: Bool = false
   ) {
     ctx.saveGState()
 
@@ -916,6 +951,23 @@ final class VideoCardGenerator {
       let ring1 = UIBezierPath(arcCenter: center, radius: rect.width * 0.47, startAngle: 0, endAngle: .pi * 2, clockwise: true)
       ring1.lineWidth = 1.5
       ring1.stroke()
+
+      if vinylDetails {
+        // Для фото-карточки: дорожки пластинки и центральное отверстие, чтобы круглая форма читалась как пластинка
+        for (k, f) in [0.40, 0.33, 0.26].enumerated() {
+          let ring = UIBezierPath(arcCenter: center, radius: rect.width * CGFloat(f), startAngle: 0, endAngle: .pi * 2, clockwise: true)
+          ring.lineWidth = max(1.0, rect.width * 0.0035)
+          UIColor(white: 1.0, alpha: 0.10 - CGFloat(k) * 0.02).setStroke()
+          ring.stroke()
+        }
+        let holeR = rect.width * 0.045
+        let hole = UIBezierPath(arcCenter: center, radius: holeR, startAngle: 0, endAngle: .pi * 2, clockwise: true)
+        UIColor(white: 0.05, alpha: 0.92).setFill()
+        hole.fill()
+        hole.lineWidth = max(1.5, rect.width * 0.006)
+        UIColor(white: 1.0, alpha: 0.35).setStroke()
+        hole.stroke()
+      }
     }
 
     // Тонкая стеклянная рамка

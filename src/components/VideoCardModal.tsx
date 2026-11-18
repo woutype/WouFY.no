@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
-  Dimensions,
   Easing,
   Image,
   Modal,
@@ -15,8 +14,10 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { AudioEngine } from '../services/audioEngine';
@@ -72,7 +73,10 @@ const IMAGE_STYLE_OPTIONS: { key: ClipStyle; label: string; icon: keyof typeof I
   { key: 'textOnly', label: 'Только текст', icon: 'text-outline' },
 ];
 
-const SHEET_H = 790;
+/** Высота списка строк: ~3–4 строки выше прежних 190 px */
+const PICKER_MAX_H = 340;
+/** Высота одной строки в списке (padding 9*2 + текст ~18 + gap 4) — для автопрокрутки к выбранной строке */
+const PICKER_ROW_H = 40;
 
 type LayoutRect = { x: number; y: number; width: number; height: number };
 
@@ -80,7 +84,11 @@ type LayoutRect = { x: number; y: number; width: number; height: number };
  * Плавный индикатор выбранного пункта исключительно на native driver (translateX / translateY),
  * а ширина/высота хранятся обычными числами в state — ноль конфликтов JS/native анимаций.
  */
-function useSlidingIndicator(activeKey: string, resetKey?: unknown) {
+function useSlidingIndicator(
+  activeKey: string,
+  resetKey?: unknown,
+  scroll?: { ref: React.RefObject<React.ElementRef<typeof ScrollView> | null>; viewportW: number }
+) {
   const layouts = useRef<Record<string, LayoutRect>>({});
   const animX = useRef(new Animated.Value(0)).current;
   const animY = useRef(new Animated.Value(0)).current;
@@ -97,6 +105,11 @@ function useSlidingIndicator(activeKey: string, resetKey?: unknown) {
     if (l.width <= 0 || l.height <= 0) return;
     const w = Math.round(l.width);
     const h = Math.round(l.height);
+    // горизонтальный список не влезает в экран: подкручиваем так, чтобы активная кнопка была по центру
+    if (scroll?.ref.current) {
+      const x = Math.max(0, Math.round(l.x + l.width / 2 - scroll.viewportW / 2));
+      scroll.ref.current.scrollTo({ x, y: 0, animated: ready.current && !immediate });
+    }
     setBox((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
     if (immediate || !ready.current) {
       ready.current = true;
@@ -352,7 +365,12 @@ export const VideoCardModal: React.FC<Props> = ({
   onClose,
 }) => {
   const [render, setRender] = useState(visible);
-  const panY = useRef(new Animated.Value(SHEET_H)).current;
+  const { width: winW, height: winH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const sheetH = Math.round(winH * 0.93);
+  // стартуем строго за экраном (раньше 790 px < высоты шторки на больших iPhone — шторка «выглядывала» до анимации)
+  const panY = useRef(new Animated.Value(winH)).current;
+  const pickerRef = useRef<React.ElementRef<typeof ScrollView>>(null);
   const fade = useRef(new Animated.Value(0)).current;
 
   const isImage = mode === 'image';
@@ -380,13 +398,19 @@ export const VideoCardModal: React.FC<Props> = ({
 
   // Плавные анимированные индикаторы для переключателей параметров (100% native driver)
   const modeIndicator = useSlidingIndicator(mode, visible);
-  const styleIndicator = useSlidingIndicator(effectiveStyle, visible);
-  const shapeIndicator = useSlidingIndicator(coverShape, visible && effectiveStyle !== 'textOnly');
-  const aspectIndicator = useSlidingIndicator(aspect, visible);
+  const styleScrollRef = useRef<React.ElementRef<typeof ScrollView>>(null);
+  const aspectScrollRef = useRef<React.ElementRef<typeof ScrollView>>(null);
+  const rowViewportW = Math.max(200, winW - 40);
+  const styleIndicator = useSlidingIndicator(effectiveStyle, visible, { ref: styleScrollRef, viewportW: rowViewportW });
+  // У «Цитаты» и «Только текста» нет большой обложки — выбор формы обложки скрыт
+  const showShapePicker = effectiveStyle !== 'textOnly' && effectiveStyle !== 'glassQuote';
+  // «Цитата» всегда со скруглённым квадратом, независимо от ранее выбранной формы
+  const outShape: ClipCoverShape = effectiveStyle === 'glassQuote' ? 'square' : coverShape;
+  const shapeIndicator = useSlidingIndicator(coverShape, visible && showShapePicker);
+  const aspectIndicator = useSlidingIndicator(aspect, visible, { ref: aspectScrollRef, viewportW: rowViewportW });
 
   // Вычисляем размеры окна превью под выбранное соотношение сторон и размер экрана
-  const { width: winW, height: winH } = Dimensions.get('window');
-  const MAX_PREVIEW_H = Math.min(280, Math.max(190, Math.round(winH * 0.27)));
+  const MAX_PREVIEW_H = Math.min(270, Math.max(170, Math.round(winH * 0.25)));
   const MAX_PREVIEW_W = Math.min(340, Math.round(winW * 0.78));
   const aspectObj = ASPECT_OPTIONS.find((a) => a.key === aspect) ?? ASPECT_OPTIONS[0];
   let previewW = MAX_PREVIEW_H * aspectObj.ratio;
@@ -466,6 +490,16 @@ export const VideoCardModal: React.FC<Props> = ({
     }
   }, [visible, track?.id, lines.length, initialLineIndex, isImage, lines]);
 
+  // При открытии прокручиваем список к строке, которая сейчас играет
+  useEffect(() => {
+    if (!visible || lines.length === 0) return;
+    const idx = Math.max(0, Math.min(lines.length - 1, initialLineIndex));
+    const t = setTimeout(() => {
+      pickerRef.current?.scrollTo({ y: Math.max(0, (idx - 2) * PICKER_ROW_H), animated: false });
+    }, 60);
+    return () => clearTimeout(t);
+  }, [visible, track?.id, lines.length, initialLineIndex]);
+
   // Вычисляем границы времени фрагмента (без жёсткого верхнего лимита для видео)
   const { startSec, endSec, clipDuration } = useMemo(() => {
     if (lines.length === 0 || startIdx < 0 || endIdx < 0) {
@@ -490,7 +524,7 @@ export const VideoCardModal: React.FC<Props> = ({
     if (visible) {
       setRender(true);
       wasPlayingBeforeModal.current = engine.getState().isPlaying;
-      panY.setValue(SHEET_H);
+      panY.setValue(winH);
       Animated.parallel([
         Animated.spring(panY, { toValue: 0, useNativeDriver: true, damping: 25, stiffness: 230, mass: 0.95 }),
         Animated.timing(fade, { toValue: 1, duration: 220, useNativeDriver: true }),
@@ -498,7 +532,7 @@ export const VideoCardModal: React.FC<Props> = ({
     } else if (render) {
       setPreviewPlaying(false);
       Animated.parallel([
-        Animated.timing(panY, { toValue: SHEET_H, duration: 220, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+        Animated.timing(panY, { toValue: winH, duration: 220, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
         Animated.timing(fade, { toValue: 0, duration: 200, useNativeDriver: true }),
       ]).start(({ finished }) => {
         if (finished) setRender(false);
@@ -678,7 +712,7 @@ export const VideoCardModal: React.FC<Props> = ({
           title: track.title,
           artist: track.artist,
           style: effectiveStyle,
-          coverShape,
+          coverShape: outShape,
           aspect,
           lines: selectedTexts.length > 0 ? selectedTexts : [track.title],
         });
@@ -742,7 +776,7 @@ export const VideoCardModal: React.FC<Props> = ({
         startSec,
         endSec,
         style: videoStyle,
-        coverShape,
+        coverShape: outShape,
         aspect,
         lines: selectedLines,
       });
@@ -799,7 +833,7 @@ export const VideoCardModal: React.FC<Props> = ({
           <Pressable style={StyleSheet.absoluteFill} onPress={handleClose} />
         </Animated.View>
 
-        <Animated.View style={[styles.sheet, { transform: [{ translateY: panY }] }]}>
+        <Animated.View style={[styles.sheet, { height: sheetH, transform: [{ translateY: panY }] }]}>
           <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
           <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(16,16,20,0.84)' }]} />
 
@@ -909,7 +943,7 @@ export const VideoCardModal: React.FC<Props> = ({
                       <CoverArt
                         uri={track.artworkUri}
                         size={22}
-                        radius={coverShape === 'vinyl' ? 11 : 6}
+                        radius={outShape === 'vinyl' ? 11 : 6}
                       />
                       <View style={{ flex: 1 }}>
                         <Text style={styles.previewQuoteTitle} numberOfLines={1}>
@@ -1133,6 +1167,7 @@ export const VideoCardModal: React.FC<Props> = ({
             <Text style={styles.sectionLabel}>Стиль оформления</Text>
             <Glass radius={22} style={styles.segmentedGlass}>
               <ScrollView
+                ref={styleScrollRef}
                 horizontal
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={styles.segmentedScrollRow}
@@ -1167,7 +1202,7 @@ export const VideoCardModal: React.FC<Props> = ({
             </Glass>
 
             {/* 3. ВИД ОБЛОЖКИ (только если стиль с обложкой) */}
-            {effectiveStyle !== 'textOnly' && (
+            {showShapePicker && (
               <>
                 <Text style={styles.sectionLabel}>Форма обложки</Text>
                 <Glass radius={22} style={styles.segmentedGlass}>
@@ -1218,7 +1253,12 @@ export const VideoCardModal: React.FC<Props> = ({
 
             {/* 4. СООТНОШЕНИЕ СТОРОН */}
             <Text style={styles.sectionLabel}>Соотношение сторон</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.aspectRow}>
+            <ScrollView
+              ref={aspectScrollRef}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.aspectRow}
+            >
               <Animated.View
                 pointerEvents="none"
                 style={[styles.aspectPillActiveBg, aspectIndicator.indicatorStyle]}
@@ -1246,85 +1286,115 @@ export const VideoCardModal: React.FC<Props> = ({
 
             {/* 5. ВЫБОР СТРОК ПЕСНИ */}
             <View style={styles.fragmentHeaderRow}>
-              <Text style={styles.sectionLabel}>
-                {isImage
-                  ? `Строки для карточки — любые до ${MAX_IMAGE_LINES} (выбрано ${selectedLinesCount} / ${MAX_IMAGE_LINES})`
-                  : `Фрагмент текста (${selectedLinesCount} стр. · ${Math.round(clipDuration)} сек)`}
+              <Text style={[styles.sectionLabel, styles.fragmentLabel]} numberOfLines={1}>
+                {isImage ? 'Строки для карточки' : 'Фрагмент текста'}
               </Text>
-            </View>
-            <Glass radius={24} style={styles.linesPickerGlass}>
-              <ScrollView nestedScrollEnabled style={{ maxHeight: 190 }} contentContainerStyle={{ padding: 8, gap: 4 }}>
-                {lines.map((l, idx) => {
-                  const selected = isImage ? imageSet.has(idx) : hasVideoSelection && idx >= s && idx <= e;
-                  const isEdge = isImage ? selected : hasVideoSelection && (idx === s || idx === e);
-                  return (
-                    <PressableScale key={idx} onPress={() => handleLineTap(idx)} scaleTo={0.98}>
-                      <View
-                        style={[
-                          styles.pickerLineRow,
-                          selected && styles.pickerLineRowSelected,
-                          isEdge && styles.pickerLineRowEdge,
-                        ]}
-                      >
-                        <Text style={[styles.pickerLineTime, selected && { color: colors.text }]}>
-                          {formatTime(l.time)}
-                        </Text>
-                        <Text
-                          style={[styles.pickerLineText, selected && styles.pickerLineTextSelected]}
-                          numberOfLines={1}
-                        >
-                          {l.text}
-                        </Text>
-                        {selected && (
-                          <Ionicons
-                            name={isEdge ? 'checkmark-circle' : 'ellipse'}
-                            size={isEdge ? 16 : 8}
-                            color={colors.accent}
-                          />
-                        )}
-                      </View>
-                    </PressableScale>
-                  );
-                })}
-              </ScrollView>
-            </Glass>
-
-            {hasSelection && (
-              <View style={styles.resetLinesWrap}>
-                <PressableScale onPress={resetSelectedLines} scaleTo={0.96} haptic="light">
-                  <View style={styles.resetLinesPill}>
-                    <Ionicons name="refresh-outline" size={14} color={colors.text} />
-                    <Text style={styles.resetLinesText}>Сбросить выбранный текст</Text>
-                  </View>
-                </PressableScale>
-              </View>
-            )}
-
-            {/* 6. КНОПКА ГЕНЕРАЦИИ И СОХРАНЕНИЯ */}
-            <View style={{ marginTop: 18, marginBottom: 30 }}>
-              <PressableScale onPress={handleGenerate} disabled={generating} scaleTo={0.97} haptic="medium">
-                <View style={[styles.generateBtn, generating && { opacity: 0.85 }]}>
-                  {generating ? (
-                    <View style={styles.generateBtnInner}>
-                      <ActivityIndicator size="small" color={colors.onAccent} />
-                      <Text style={styles.generateBtnText}>
-                        {isImage
-                          ? 'Создаём WouFY Card…'
-                          : `Создаём WouFY Clip… ${Math.round(progress * 100)}%`}
-                      </Text>
-                    </View>
-                  ) : (
-                    <View style={styles.generateBtnInner}>
-                      <Ionicons name={isImage ? 'image-outline' : 'film-outline'} size={20} color={colors.onAccent} />
-                      <Text style={styles.generateBtnText}>
-                        {isImage ? 'Сохранить и поделиться карточкой' : 'Сгенерировать и сохранить видео'}
-                      </Text>
-                    </View>
-                  )}
+              <View style={styles.fragmentHeaderRight}>
+                <View style={styles.countChip}>
+                  <Text style={styles.countChipText}>
+                    {isImage
+                      ? `${selectedLinesCount} / ${MAX_IMAGE_LINES}`
+                      : `${selectedLinesCount} стр. · ${Math.round(clipDuration)} сек`}
+                  </Text>
                 </View>
-              </PressableScale>
+                {hasSelection && (
+                  <PressableScale onPress={resetSelectedLines} scaleTo={0.92} haptic="light" hitSlop={8}>
+                    <View style={styles.resetChip}>
+                      <Ionicons name="refresh-outline" size={13} color={colors.text} />
+                      <Text style={styles.resetLinesText}>Сбросить</Text>
+                    </View>
+                  </PressableScale>
+                )}
+              </View>
             </View>
+            {lines.length > 0 && !hasSelection && (
+              <Text style={styles.pickerHint}>
+                {isImage
+                  ? `Нажмите на любые строки — до ${MAX_IMAGE_LINES}`
+                  : 'Нажмите на первую строку, затем на последнюю — выделится весь фрагмент'}
+              </Text>
+            )}
+            <Glass radius={24} style={styles.linesPickerGlass}>
+              {lines.length === 0 ? (
+                <View style={styles.noLinesBox}>
+                  <Ionicons name="text-outline" size={18} color={colors.text3} />
+                  <Text style={styles.noLinesText}>
+                    У трека нет текста — {isImage ? 'карточка' : 'видео'} будет с названием и обложкой
+                  </Text>
+                </View>
+              ) : (
+                <ScrollView
+                  ref={pickerRef}
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={false}
+                  style={{ maxHeight: Math.min(PICKER_MAX_H, Math.round(winH * 0.42)) }}
+                  contentContainerStyle={{ padding: 8, gap: 4 }}
+                >
+                  {lines.map((l, idx) => {
+                    const selected = isImage ? imageSet.has(idx) : hasVideoSelection && idx >= s && idx <= e;
+                    const isEdge = isImage ? selected : hasVideoSelection && (idx === s || idx === e);
+                    return (
+                      <PressableScale key={idx} onPress={() => handleLineTap(idx)} scaleTo={0.98}>
+                        <View
+                          style={[
+                            styles.pickerLineRow,
+                            selected && styles.pickerLineRowSelected,
+                            isEdge && styles.pickerLineRowEdge,
+                          ]}
+                        >
+                          <Text style={[styles.pickerLineTime, selected && { color: colors.text }]}>
+                            {formatTime(l.time)}
+                          </Text>
+                          <Text
+                            style={[styles.pickerLineText, selected && styles.pickerLineTextSelected]}
+                            numberOfLines={1}
+                          >
+                            {l.text}
+                          </Text>
+                          {selected && (
+                            <Ionicons
+                              name={isEdge ? 'checkmark-circle' : 'ellipse'}
+                              size={isEdge ? 16 : 8}
+                              color={colors.accent}
+                            />
+                          )}
+                        </View>
+                      </PressableScale>
+                    );
+                  })}
+                </ScrollView>
+              )}
+            </Glass>
           </ScrollView>
+
+          {/* 6. КНОПКА ГЕНЕРАЦИИ — закреплена внизу, всегда под рукой */}
+          <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+            <PressableScale onPress={handleGenerate} disabled={generating} scaleTo={0.97} haptic="medium">
+              <View style={[styles.generateBtn, generating && { opacity: 0.92 }]}>
+                {generating && !isImage && (
+                  <View
+                    pointerEvents="none"
+                    style={[styles.generateProgress, { width: `${Math.round(progress * 100)}%` }]}
+                  />
+                )}
+                {generating ? (
+                  <View style={styles.generateBtnInner}>
+                    <ActivityIndicator size="small" color={colors.onAccent} />
+                    <Text style={styles.generateBtnText}>
+                      {isImage ? 'Создаём WouFY Card…' : `Создаём WouFY Clip… ${Math.round(progress * 100)}%`}
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.generateBtnInner}>
+                    <Ionicons name={isImage ? 'image-outline' : 'film-outline'} size={20} color={colors.onAccent} />
+                    <Text style={styles.generateBtnText}>
+                      {isImage ? 'Сохранить и поделиться карточкой' : 'Сгенерировать и сохранить видео'}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </PressableScale>
+          </View>
         </Animated.View>
       </View>
     </Modal>
@@ -1337,7 +1407,6 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   sheet: {
-    height: '91%',
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
     overflow: 'hidden',
@@ -1448,7 +1517,73 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 20,
     paddingTop: 14,
-    paddingBottom: 40,
+    paddingBottom: 20,
+  },
+  footer: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(16,16,20,0.92)',
+  },
+  generateProgress: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.14)',
+  },
+  fragmentLabel: {
+    flex: 1,
+    minWidth: 0,
+  },
+  fragmentHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 12,
+    marginBottom: 7,
+  },
+  countChip: {
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  countChipText: {
+    ...type.mono,
+    fontSize: 10,
+    color: colors.text,
+    fontWeight: '700',
+  },
+  resetChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  pickerHint: {
+    ...type.caption,
+    fontSize: 12,
+    color: colors.text3,
+    marginBottom: 8,
+  },
+  noLinesBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 16,
+  },
+  noLinesText: {
+    ...type.caption,
+    flex: 1,
+    fontSize: 13,
+    color: colors.text2,
   },
   previewStage: {
     alignItems: 'center',

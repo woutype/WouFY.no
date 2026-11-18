@@ -32,6 +32,17 @@ jobs:
           node-version: 20
           cache: 'npm'
       - run: npm ci
+      - name: Unique build number (иначе iOS не обновляет иконку при установке поверх)
+        run: |
+          node -e '
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync("app.json", "utf8"));
+            const n = 1000 + Number(process.env.GITHUB_RUN_NUMBER);
+            a.expo.ios.buildNumber = String(n);
+            a.expo.android.versionCode = n;
+            fs.writeFileSync("app.json", JSON.stringify(a, null, 2));
+            console.log("buildNumber =", n);
+          '
       - name: Patch ExpoModulesJSI for Swift 6.2 concurrency
         run: |
           node -e '
@@ -88,6 +99,17 @@ jobs:
           distribution: temurin
           java-version: 17
       - run: npm ci
+      - name: Unique build number (иначе iOS не обновляет иконку при установке поверх)
+        run: |
+          node -e '
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync("app.json", "utf8"));
+            const n = 1000 + Number(process.env.GITHUB_RUN_NUMBER);
+            a.expo.ios.buildNumber = String(n);
+            a.expo.android.versionCode = n;
+            fs.writeFileSync("app.json", JSON.stringify(a, null, 2));
+            console.log("buildNumber =", n);
+          '
       - name: Prebuild Android project
         run: npx expo prebuild --platform android --clean
       - name: Cache Gradle caches

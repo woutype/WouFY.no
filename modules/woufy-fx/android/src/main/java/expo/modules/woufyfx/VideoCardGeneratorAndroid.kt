@@ -395,7 +395,7 @@ internal object VideoCardGeneratorAndroid {
 
     val duration = max(3.0, min(60.0, endSec - startSec))
     val (width, height) = dimensions(aspect)
-    val fps = 30
+    val fps = 60
     val totalFrames = max(1, (duration * fps).toInt())
 
     val lines = rawLines.mapNotNull { m ->
@@ -430,7 +430,7 @@ internal object VideoCardGeneratorAndroid {
       val mime = MediaFormat.MIMETYPE_VIDEO_AVC
       val format = MediaFormat.createVideoFormat(mime, width, height).apply {
         setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        setInteger(MediaFormat.KEY_BIT_RATE, width * height * 5)
+        setInteger(MediaFormat.KEY_BIT_RATE, width * height * 9)
         setInteger(MediaFormat.KEY_FRAME_RATE, fps)
         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
       }
