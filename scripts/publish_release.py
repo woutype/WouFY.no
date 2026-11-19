@@ -21,7 +21,7 @@ import urllib.request
 import zipfile
 
 BUILD_REPO = 'woutype/WouFY.no'
-PUBLIC_REPO = 'woutype/WouFY-source'
+PUBLIC_REPO = 'woutype/WouFY.no'
 WORKFLOW = 'build.yml'
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -149,7 +149,7 @@ def main():
     apk = fetch_artifact(run['id'], 'woufy-apk', '.apk')
     print(f'📦 IPA {len(ipa) / 1e6:.1f} МБ, APK {len(apk) / 1e6:.1f} МБ')
 
-    repos = [PUBLIC_REPO] + ([BUILD_REPO] if also_private else [])
+    repos = list(dict.fromkeys([PUBLIC_REPO] + ([BUILD_REPO] if also_private else [])))
     for repo in repos:
         print(f'🚀 Релиз {tag} -> {repo}')
         rel = get_or_create_release(repo, tag, f'WouFY {tag}', notes)

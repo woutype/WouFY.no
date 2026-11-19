@@ -5,9 +5,9 @@ import appConfig from '../../app.json';
 
 export const CURRENT_VERSION: string = appConfig?.expo?.version || '1.2.8';
 
-const APPS_JSON_URL = 'https://raw.githubusercontent.com/woutype/WouFY-source/main/apps.json';
-const GITHUB_RELEASE_API = 'https://api.github.com/repos/woutype/WouFY-source/releases/latest';
-const PUBLIC_REPO_RELEASES = 'https://github.com/woutype/WouFY-source/releases';
+const APPS_JSON_URL = 'https://raw.githubusercontent.com/woutype/WouFY.no/main/apps.json';
+const GITHUB_RELEASE_API = 'https://api.github.com/repos/woutype/WouFY.no/releases/latest';
+const PUBLIC_REPO_RELEASES = 'https://github.com/woutype/WouFY.no/releases';
 
 export interface UpdateInfo {
   hasUpdate: boolean;
@@ -80,12 +80,12 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo> {
         ipaUrl =
           latestEntry?.downloadURL ||
           app?.downloadURL ||
-          `https://github.com/woutype/WouFY-source/releases/download/v${ver}/woufy.ipa`;
+          `https://github.com/woutype/WouFY.no/releases/download/v${ver}/woufy.ipa`;
         apkUrl =
           latestEntry?.apkDownloadURL ||
           app?.apkDownloadURL ||
-          `https://github.com/woutype/WouFY-source/releases/download/v${ver}/woufy.apk`;
-        releaseUrl = `https://github.com/woutype/WouFY-source/releases/tag/v${ver}`;
+          `https://github.com/woutype/WouFY.no/releases/download/v${ver}/woufy.apk`;
+        releaseUrl = `https://github.com/woutype/WouFY.no/releases/tag/v${ver}`;
       }
     }
   } catch {
@@ -116,10 +116,10 @@ export async function checkForUpdate(force = false): Promise<UpdateInfo> {
   }
 
   if (!ipaUrl) {
-    ipaUrl = `https://github.com/woutype/WouFY-source/releases/download/v${latestVersion}/woufy.ipa`;
+    ipaUrl = `https://github.com/woutype/WouFY.no/releases/download/v${latestVersion}/woufy.ipa`;
   }
   if (!apkUrl) {
-    apkUrl = `https://github.com/woutype/WouFY-source/releases/download/v${latestVersion}/woufy.apk`;
+    apkUrl = `https://github.com/woutype/WouFY.no/releases/download/v${latestVersion}/woufy.apk`;
   }
 
   const hasUpdate = compareVersions(latestVersion, CURRENT_VERSION) > 0;

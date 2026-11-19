@@ -3,8 +3,8 @@
   "identifier": "com.woufy.source",
   "subtitle": "Официальный источник обновлений WouFY.no",
   "description": "Автономный музыкальный плеер для iOS с нативным аудиодвижком, эффектами и беспроводным обновлением.",
-  "iconURL": "https://raw.githubusercontent.com/woutype/WouFY-source/main/assets/icon.png",
-  "website": "https://github.com/woutype/WouFY-source",
+  "iconURL": "https://raw.githubusercontent.com/woutype/WouFY.no/main/assets/icon.png",
+  "website": "https://github.com/woutype/WouFY.no",
   "apps": [
     {
       "name": "WouFY.no",
@@ -12,37 +12,37 @@
       "developerName": "WouFY",
       "subtitle": "Офлайн-плеер со студийным звуком",
       "localizedDescription": "Офлайн-плеер с нативным аудиодвижком, поддержкой кнопок экрана блокировки и мгновенным чтением треков.",
-      "iconURL": "https://raw.githubusercontent.com/woutype/WouFY-source/main/assets/icon.png",
+      "iconURL": "https://raw.githubusercontent.com/woutype/WouFY.no/main/assets/icon.png",
       "tintColor": "1ED760",
       "versions": [
         {
           "version": "1.3.2",
           "date": "2026-11-18",
-          "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.2/woufy.ipa",
-          "apkDownloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.2/woufy.apk",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.3.2/woufy.ipa",
+          "apkDownloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.3.2/woufy.apk",
           "localizedDescription": "Плавные 60 FPS видео-карточки, субпиксельный текст, детализация пластинки, история воспроизведения и фикс иконки iOS",
           "size": 12089119
         },
         {
           "version": "1.3.1",
           "date": "2026-11-18",
-          "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.1/woufy.ipa",
-          "apkDownloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.1/woufy.apk",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.3.1/woufy.ipa",
+          "apkDownloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.3.1/woufy.apk",
           "localizedDescription": "Исправлен краш при генерации видео-карточки и оптимизирована плавная лента текста",
           "size": 12082043
         },
         {
           "version": "1.3.0",
           "date": "2026-11-17",
-          "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.0/woufy.ipa",
-          "apkDownloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.3.0/woufy.apk",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.3.0/woufy.ipa",
+          "apkDownloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.3.0/woufy.apk",
           "localizedDescription": "Исправления багов, гонок потоков и оптимизаций",
           "size": 12080998
         },
         {
           "version": "1.2.7",
           "date": "2026-11-17",
-          "downloadURL": "https://github.com/woutype/WouFY-source/releases/download/v1.2.7/woufy.ipa",
+          "downloadURL": "https://github.com/woutype/WouFY.no/releases/download/v1.2.7/woufy.ipa",
           "localizedDescription": "Новый скомпилированный нативный бинарник с аппаратной генерацией миниатюр и оригиналов обложек, синхронный показ обложек без мигания, точный учёт повторов и переключений в Топ-10, исправление таймингов и поиска по текстам.",
           "size": 12967080
         }
