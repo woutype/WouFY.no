@@ -18,6 +18,11 @@ import {
   resolveYtTrack,
   searchYtTracks,
 } from './providers/ytdlp.js';
+import {
+  downloadHybridTrackToMp3,
+  resolveHybridTrack,
+  searchHybridTracks,
+} from './providers/hybrid.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const API_KEY = (process.env.API_KEY || '').trim();
@@ -26,7 +31,8 @@ const MUSIC_PROVIDER = (process.env.MUSIC_PROVIDER || 'auto').toLowerCase();
 function activeProvider() {
   if (MUSIC_PROVIDER === 'vk') return 'vk';
   if (MUSIC_PROVIDER === 'ytdlp') return 'ytdlp';
-  return isVkConfigured() ? 'vk' : 'ytdlp';
+  if (MUSIC_PROVIDER === 'hybrid') return 'hybrid';
+  return isVkConfigured() ? 'vk' : 'hybrid';
 }
 
 function safeEqual(a, b) {
@@ -61,6 +67,12 @@ function sanitizeDownloadFilename(artist, title) {
   return `${raw || 'track'}.mp3`;
 }
 
+async function resolveTrackById(id) {
+  if (id.startsWith('vk:')) return { kind: 'vk', track: await resolveVkTrack(id) };
+  if (id.startsWith('dz:') || id.startsWith('it:')) return { kind: 'hybrid', track: await resolveHybridTrack(id) };
+  return { kind: 'ytdlp', track: resolveYtTrack(id) };
+}
+
 const app = express();
 app.disable('x-powered-by');
 app.use(cors());
@@ -87,7 +99,7 @@ app.get('/api/search', authMiddleware, async (req, res) => {
   const q = String(req.query.q || '').trim();
   const title = String(req.query.title || '').trim();
   const artist = String(req.query.artist || '').trim();
-  const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 20));
+  const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 25));
 
   const combined = q || [artist, title].filter(Boolean).join(' ').trim();
   if (combined.length < 2) {
@@ -96,10 +108,14 @@ app.get('/api/search', authMiddleware, async (req, res) => {
 
   const provider = activeProvider();
   try {
-    const items =
-      provider === 'vk'
-        ? await searchVkTracks({ q: combined, title, artist, limit })
-        : await searchYtTracks({ q: combined, title, artist, limit });
+    let items;
+    if (provider === 'vk') {
+      items = await searchVkTracks({ q: combined, title, artist, limit });
+    } else if (provider === 'ytdlp') {
+      items = await searchYtTracks({ q: combined, title, artist, limit });
+    } else {
+      items = await searchHybridTracks({ q: combined, title, artist, limit });
+    }
 
     return res.json({ provider, items });
   } catch (err) {
@@ -116,8 +132,7 @@ app.get('/api/tracks/:id/metadata', authMiddleware, async (req, res) => {
   if (!id) return res.status(400).json({ error: 'Missing track id' });
 
   try {
-    const isVk = id.startsWith('vk:');
-    const track = isVk ? await resolveVkTrack(id) : resolveYtTrack(id);
+    const { kind, track } = await resolveTrackById(id);
     if (!track) {
       return res.status(404).json({ error: 'Track not found' });
     }
@@ -129,7 +144,7 @@ app.get('/api/tracks/:id/metadata', authMiddleware, async (req, res) => {
         album: track.album,
         duration: track.duration,
       }),
-      isVk && track.lyricsId ? fetchVkLyrics(track.lyricsId) : Promise.resolve(undefined),
+      kind === 'vk' && track.lyricsId ? fetchVkLyrics(track.lyricsId) : Promise.resolve(undefined),
     ]);
 
     return res.json({
@@ -139,6 +154,9 @@ app.get('/api/tracks/:id/metadata', authMiddleware, async (req, res) => {
       album: track.album,
       year: track.year,
       genre: track.genre,
+      bpm: track.bpm,
+      trackNumber: track.trackNumber,
+      discNumber: track.discNumber,
       duration: track.duration,
       coverUrl: track.coverUrl,
       lyrics: lrclib?.lyrics || vkLyrics,
@@ -166,14 +184,15 @@ app.get('/api/tracks/:id/download', authMiddleware, async (req, res) => {
   };
 
   try {
-    const isVk = id.startsWith('vk:');
-    const track = isVk ? await resolveVkTrack(id) : resolveYtTrack(id);
+    const { kind, track } = await resolveTrackById(id);
     if (!track) {
       return res.status(404).json({ error: 'Track not found' });
     }
 
-    if (isVk) {
+    if (kind === 'vk') {
       await downloadVkTrackToMp3(track, tempPath);
+    } else if (kind === 'hybrid') {
+      await downloadHybridTrackToMp3(track, tempPath);
     } else {
       await downloadYtTrackToMp3(track, tempPath);
     }
