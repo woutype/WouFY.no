@@ -382,9 +382,24 @@ export const TrackDownloadModal: React.FC<Props> = ({
         }
       };
 
+      const fillWidth =
+        task?.phase === 'tagging'
+          ? '100%'
+          : task?.phase === 'downloading'
+            ? `${Math.max(10, pct)}%`
+            : '12%';
+
       return (
         <View style={styles.resultItem}>
-          <Glass radius={28} intensity={40} style={styles.resultGlass}>
+          <Glass radius={999} intensity={40} style={styles.resultGlass}>
+            {/* Плавное заполнение фона карточки слева направо по мере загрузки */}
+            {isBusy && (
+              <View
+                pointerEvents="none"
+                style={[styles.progressBgFill, { width: fillWidth }]}
+              />
+            )}
+
             <Pressable style={styles.resultRow} onPress={handleRowPress}>
               <CoverArt uri={item.thumbnailUrl || item.coverUrl} size={48} radius={24} />
 
@@ -406,35 +421,35 @@ export const TrackDownloadModal: React.FC<Props> = ({
                   {item.album ? ` · ${item.album}` : ''}
                 </Text>
 
-                <View style={styles.badgesRow}>
-                  {item.duration ? (
-                    <Text style={styles.metaText}>{formatTime(item.duration)}</Text>
-                  ) : null}
-                  {item.bitrate ? (
-                    <View style={styles.metaPill}>
-                      <Text style={styles.metaPillText}>{item.bitrate} kbps</Text>
-                    </View>
-                  ) : null}
-                  {item.hasLyrics ? (
-                    <View style={styles.metaPill}>
-                      <Text style={styles.metaPillText}>Текст</Text>
-                    </View>
-                  ) : null}
-                  {existingTrack && !isBusy ? (
-                    <View style={[styles.metaPill, styles.inLibPill]}>
-                      <Ionicons name="checkmark" size={10} color={colors.accent} />
-                      <Text style={[styles.metaPillText, { color: colors.accent }]}>
-                        {isDone ? 'Добавлен' : 'В библиотеке'}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-
                 {isError && task?.error ? (
-                  <Text style={styles.errorInline} numberOfLines={2}>
+                  <Text style={styles.errorInline} numberOfLines={1}>
                     {task.error}
                   </Text>
-                ) : null}
+                ) : (
+                  <View style={styles.badgesRow}>
+                    {item.duration ? (
+                      <Text style={styles.metaText}>{formatTime(item.duration)}</Text>
+                    ) : null}
+                    {item.bitrate ? (
+                      <View style={styles.metaPill}>
+                        <Text style={styles.metaPillText}>{item.bitrate} kbps</Text>
+                      </View>
+                    ) : null}
+                    {item.hasLyrics ? (
+                      <View style={styles.metaPill}>
+                        <Text style={styles.metaPillText}>Текст</Text>
+                      </View>
+                    ) : null}
+                    {existingTrack && !isBusy ? (
+                      <View style={[styles.metaPill, styles.inLibPill]}>
+                        <Ionicons name="checkmark" size={10} color={colors.accent} />
+                        <Text style={[styles.metaPillText, { color: colors.accent }]}>
+                          {isDone ? 'Добавлен' : 'В библиотеке'}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                )}
               </View>
 
               {/* Кнопка скачивания / индикатор прогресса / статус */}
@@ -474,27 +489,6 @@ export const TrackDownloadModal: React.FC<Props> = ({
                 )}
               </PressableScale>
             </Pressable>
-
-            {/* Округлая полоса прогресса внизу карточки */}
-            {isBusy && (
-              <View style={styles.progressTrackWrap}>
-                <View style={styles.progressTrack}>
-                  <View
-                    style={[
-                      styles.progressFill,
-                      {
-                        width:
-                          task?.phase === 'tagging'
-                            ? '100%'
-                            : task?.phase === 'downloading'
-                              ? `${Math.max(8, pct)}%`
-                              : '14%',
-                      },
-                    ]}
-                  />
-                </View>
-              </View>
-            )}
           </Glass>
         </View>
       );
@@ -1016,21 +1010,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.text,
   },
-  progressTrackWrap: {
-    paddingHorizontal: 16,
-    paddingBottom: 10,
-  },
-  progressTrack: {
-    height: 3,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    overflow: 'hidden',
-    width: '100%',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 999,
-    backgroundColor: colors.accent,
+  progressBgFill: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(255,255,255,0.11)',
   },
   emptyBox: {
     alignItems: 'center',
