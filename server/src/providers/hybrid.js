@@ -419,9 +419,9 @@ function scoreCandidate(cand, track) {
     score -= 20;
   }
 
-  // При равном балле слегка предпочитаем SoundCloud (отдаёт готовый MP3 без перекодирования на 0.1 vCPU)
+  // Приоритет SoundCloud (не блокируется датацентрами Render/AWS, отдаёт чистый аудиопоток без капчи и бот-чеков)
   if (cand.source === 'sc') {
-    score += 8;
+    score += 80;
   }
 
   return score;
@@ -449,10 +449,17 @@ async function fetchCandidatesFromYtDlp(searchSpec, source, extraArgs = []) {
       if (!trimmed) continue;
       try {
         const entry = JSON.parse(trimmed);
-        const url =
+        let url =
           entry.webpage_url ||
+          entry.permalink_url ||
           entry.url ||
           (source === 'yt' && entry.id ? `https://www.youtube.com/watch?v=${entry.id}` : null);
+        if (source === 'sc' && url && url.includes('api-v2.soundcloud.com')) {
+          url = entry.permalink_url || entry.webpage_url || null;
+        }
+        if (!url && source === 'sc' && entry.title) {
+          url = `scsearch1:${entry.uploader || ''} ${entry.title}`.trim();
+        }
         if (!url) continue;
         out.push({
           source,
@@ -566,11 +573,8 @@ async function downloadAudioFromCandidate(bestCandidate, query, tempBasePath) {
   const prefix = `${path.basename(tempBasePath)}.`;
 
   const commonFlags = [
-    // Предпочитаем готовый MP3 поток (на SoundCloud он есть нативно -> 0 сек перекодирования в ffmpeg!)
     '-f',
-    'bestaudio[acodec=mp3]/bestaudio[ext=mp3]/bestaudio/best',
-    '--concurrent-fragments',
-    '4',
+    'bestaudio/best',
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificates',
@@ -581,37 +585,44 @@ async function downloadAudioFromCandidate(bestCandidate, query, tempBasePath) {
     template,
   ];
 
-  const attempts = [
-    bestCandidate.source === 'yt'
-      ? {
-          label: 'resolved-yt',
-          args: [
-            ...commonFlags,
-            '--extractor-args',
-            'youtube:player_client=tv_embedded,android_vr,ios',
-            bestCandidate.url,
-          ],
-        }
-      : {
-          label: 'resolved-sc',
-          args: [...commonFlags, bestCandidate.url],
-        },
-    // Резервный источник, если первый URL вдруг недоступен
-    bestCandidate.source === 'yt'
-      ? {
-          label: 'fallback-sc',
-          args: [...commonFlags, `scsearch1:${query}`],
-        }
-      : {
-          label: 'fallback-yt',
-          args: [
-            ...commonFlags,
-            '--extractor-args',
-            'youtube:player_client=tv_embedded,android_vr,ios',
-            `ytsearch1:${query} official audio`,
-          ],
-        },
-  ];
+  const attempts = [];
+  if (bestCandidate.source === 'sc') {
+    attempts.push({
+      label: 'resolved-sc',
+      args: [...commonFlags, bestCandidate.url],
+    });
+    attempts.push({
+      label: 'fallback-scsearch',
+      args: [...commonFlags, `scsearch1:${bestCandidate.uploader || ''} ${bestCandidate.title || query}`.trim()],
+    });
+  } else {
+    attempts.push({
+      label: 'resolved-yt',
+      args: [
+        ...commonFlags,
+        '--extractor-args',
+        'youtube:player_client=android,web',
+        bestCandidate.url,
+      ],
+    });
+  }
+
+  // Запасной SoundCloud поиск по исходному поисковому запросу трека (SoundCloud никогда не банит датацентры)
+  attempts.push({
+    label: 'fallback-sc-query',
+    args: [...commonFlags, `scsearch1:${query}`],
+  });
+
+  // Запасной YouTube поиск с мобильным клиентом
+  attempts.push({
+    label: 'fallback-yt',
+    args: [
+      ...commonFlags,
+      '--extractor-args',
+      'youtube:player_client=android,web',
+      `ytsearch1:${query} audio`,
+    ],
+  });
 
   let lastErr = new Error('Не удалось скачать аудиопоток');
   for (const attempt of attempts) {
