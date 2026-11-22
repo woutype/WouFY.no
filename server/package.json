@@ -1,0 +1,17 @@
+{
+  "name": "woufy-downloader-server",
+  "version": "1.0.0",
+  "description": "WouFY track search & download backend for Render (VK Audio + yt-dlp fallback + FFmpeg ID3/cover embedding)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

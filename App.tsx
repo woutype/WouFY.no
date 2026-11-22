@@ -344,6 +344,19 @@ function Root() {
     [engine]
   );
 
+  const handleTrackDownloaded = useCallback(
+    async (downloaded: TrackFile) => {
+      libRef.current.set(downloaded.id, downloaded);
+      const nextTracks = [...libRef.current.values()];
+      bpmService.registerTags([downloaded]);
+      setLibCount(nextTracks.length);
+      const st = getState();
+      engine.setLibrary(nextTracks, st.order, st.lastTrackId);
+      await saveCachedTracks(nextTracks).catch(() => {});
+    },
+    [engine]
+  );
+
   const shareFileUri = useCallback(async (uri: string, target: TrackFile, suffix = '') => {
     try {
       const label = `${target.artist} — ${target.title}${suffix}`;
@@ -522,6 +535,7 @@ function Root() {
             onRefresh={async () => {
               await rescan();
             }}
+            onTrackDownloaded={handleTrackDownloaded}
             bottomPad={bottomPad}
             scrollToCurrentTrigger={scrollToCurrentTrigger}
             onGestureActiveChange={(active) => setSheetScrollEnabled(!active)}

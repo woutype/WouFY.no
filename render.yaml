@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: woufy-downloader
+    runtime: docker
+    rootDir: server
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MUSIC_PROVIDER
+        value: auto
+      - key: API_KEY
+        sync: false
+      - key: VK_TOKEN
+        sync: false

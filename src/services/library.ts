@@ -37,6 +37,8 @@ export interface PersistedState {
   samplesSeeded?: boolean;
   /** смещение синхро-текста для конкретного трека, сек */
   lyricsOffset?: Record<string, number>;
+  /** пользовательский URL бэкенда скачивания (переопределяет EXPO_PUBLIC_DOWNLOAD_API_URL) */
+  downloadApiUrl?: string;
 }
 
 export function getDocRoot(): string {

@@ -8,6 +8,7 @@ import { colors, type } from '../theme';
 import { CoverArt, Glass, PressableScale } from './ui';
 import { SortOption } from '../services/queueOrder';
 import { LyricsSearchModal } from './LyricsSearchModal';
+import { TrackDownloadModal } from './TrackDownloadModal';
 
 export type { SortOption };
 
@@ -563,6 +564,7 @@ interface Props {
   onPlayTrackWithSeek?: (track: TrackFile, seekTime?: number) => void;
   onMove: (from: number, to: number) => void;
   onRefresh: () => Promise<void>;
+  onTrackDownloaded?: (track: TrackFile) => Promise<void> | void;
   bottomPad: number;
   scrollToCurrentTrigger?: number;
   onGestureActiveChange?: (active: boolean) => void;
@@ -600,6 +602,7 @@ export const QueueView: React.FC<Props> = ({
   onPlayTrackWithSeek,
   onMove,
   onRefresh,
+  onTrackDownloaded,
   bottomPad,
   scrollToCurrentTrigger,
   onGestureActiveChange,
@@ -618,6 +621,7 @@ export const QueueView: React.FC<Props> = ({
   const [droplet, setDroplet] = useState<DropletFlight | null>(null);
   const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [showLyricsSearch, setShowLyricsSearch] = useState(false);
+  const [showDownloadModal, setShowDownloadModal] = useState(false);
 
   // Анимационные параметры «капли» при свайпе трека в следующие
   const dropY = useRef(new Animated.Value(0)).current;
@@ -1081,9 +1085,9 @@ export const QueueView: React.FC<Props> = ({
               </View>
             </Glass>
           </View>
-          <PressableScale onPress={() => setShowLyricsSearch(true)} hitSlop={6}>
-            <View style={[styles.filterBtn, showLyricsSearch && styles.filterBtnActive]}>
-              <Ionicons name="document-text-outline" size={17} color={showLyricsSearch ? colors.onAccent : colors.text} />
+          <PressableScale onPress={() => setShowDownloadModal(true)} hitSlop={6}>
+            <View style={[styles.filterBtn, showDownloadModal && styles.filterBtnActive]}>
+              <Ionicons name="download-outline" size={18} color={showDownloadModal ? colors.onAccent : colors.text} />
             </View>
           </PressableScale>
           <PressableScale onPress={() => setShowFilterMenu((v) => !v)} hitSlop={6}>
@@ -1348,6 +1352,25 @@ export const QueueView: React.FC<Props> = ({
             }
           }}
           onClose={() => setShowLyricsSearch(false)}
+        />
+        <TrackDownloadModal
+          visible={showDownloadModal}
+          existingTracks={allTracks ?? tracks}
+          onTrackDownloaded={async (track) => {
+            if (onTrackDownloaded) {
+              await onTrackDownloaded(track);
+            } else {
+              await onRefresh();
+            }
+          }}
+          onPlayTrack={(track) => {
+            if (onPlayTrackWithSeek) {
+              onPlayTrackWithSeek(track);
+            } else {
+              onPlay(-1, track);
+            }
+          }}
+          onClose={() => setShowDownloadModal(false)}
         />
       </View>
 
