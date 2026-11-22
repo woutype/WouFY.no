@@ -142,3 +142,41 @@ jobs:
           name: woufy-apk
           path: woufy.apk
           retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: [ipa, apk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: woufy-ipa
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: woufy-apk
+          path: dist
+      - name: Publish Release with IPA and APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version")
+          TAG="v${VERSION}"
+          NOTES=$(node -e "
+            const apps = require('./apps.json');
+            const v = apps.apps?.[0]?.versions?.find((x) => x.version === '${VERSION}');
+            console.log(v?.localizedDescription || 'WouFY.no ${TAG}');
+          ")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/woufy.ipa dist/woufy.apk --clobber
+            gh release edit "$TAG" --title "WouFY.no $TAG" --notes "$NOTES" --latest
+          else
+            gh release create "$TAG" dist/woufy.ipa dist/woufy.apk \
+              --title "WouFY.no $TAG" \
+              --notes "$NOTES" \
+              --target "${{ github.sha }}" \
+              --latest
+          fi
