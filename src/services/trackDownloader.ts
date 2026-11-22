@@ -490,43 +490,15 @@ export async function downloadRemoteTrack(
     throw new DownloadApiError('Скачивание отменено', { code: 'ABORTED' });
   }
 
-  onProgress?.({ phase: 'preparing', progress: 0 });
-  await ensureAppFolders();
+  onProgress?.({ phase: 'downloading', progress: 0 });
 
-  // 1. Опционально подтягиваем расширенные метаданные (текст, обложку, ссылку)
-  const extraMeta = await fetchRemoteTrackMetadata(track, signal);
-  if (signal?.aborted) {
-    throw new DownloadApiError('Скачивание отменено', { code: 'ABORTED' });
-  }
-
-  const fullTitle = (() => {
-    const t = extraMeta?.title || track.title;
-    const sub = extraMeta?.subtitle || track.subtitle;
-    if (sub && !t.toLowerCase().includes(sub.toLowerCase())) {
-      return `${t} (${sub})`;
-    }
-    return t;
-  })();
-
-  const artist = extraMeta?.artist || track.artist;
-  const album = extraMeta?.album || track.album;
-  const year = extraMeta?.year ?? track.year;
-  const genre = extraMeta?.genre || track.genre;
-  const bpm = extraMeta?.bpm ?? track.bpm;
-  const trackNumber = extraMeta?.trackNumber ?? track.trackNumber;
-  const discNumber = extraMeta?.discNumber ?? track.discNumber;
-  const ext = extraMeta?.extension ?? track.extension ?? 'mp3';
-  const coverUrl = extraMeta?.coverUrl || track.coverUrl || track.thumbnailUrl;
+  const initialExt = track.extension ?? 'mp3';
+  const cacheDir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? '';
+  const tempPath = `${cacheDir}woufy_dl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${initialExt}.part`;
 
   const rawDownloadUrl =
-    extraMeta?.downloadUrl ||
-    track.downloadUrl ||
-    `${baseUrl}/api/tracks/${encodeURIComponent(track.id)}/download`;
+    track.downloadUrl || `${baseUrl}/api/tracks/${encodeURIComponent(track.id)}/download`;
   const downloadUrl = resolveEndpointUrl(baseUrl, rawDownloadUrl);
-
-  // 2. Загружаем во временный файл, чтобы не оставить битый файл в Music/ при ошибке или отмене
-  const cacheDir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? '';
-  const tempPath = `${cacheDir}woufy_dl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}.part`;
 
   const resumable = FileSystem.createDownloadResumable(
     downloadUrl,
@@ -536,7 +508,9 @@ export async function downloadRemoteTrack(
       const ratio =
         dp.totalBytesExpectedToWrite > 0
           ? Math.max(0, Math.min(1, dp.totalBytesWritten / dp.totalBytesExpectedToWrite))
-          : 0;
+          : dp.totalBytesWritten > 0
+            ? Math.min(0.92, dp.totalBytesWritten / (8 * 1024 * 1024))
+            : 0;
       onProgress?.({
         phase: 'downloading',
         progress: ratio,
@@ -551,10 +525,29 @@ export async function downloadRemoteTrack(
   };
   signal?.addEventListener('abort', onAbort);
 
+  // Запускаем подготовку папок, скачивание аудио, запрос текста/метаданных и кэширование ТОЧНОЙ обложки из поиска ПАРАЛЛЕЛЬНО
+  const foldersPromise = ensureAppFolders();
+  const metaPromise = fetchRemoteTrackMetadata(track, signal).catch(() => null);
+  const searchCoverCandidates = [track.coverUrl, track.thumbnailUrl].filter(Boolean) as string[];
+  const initialCoverPromise =
+    searchCoverCandidates.length > 0
+      ? foldersPromise.then(() => downloadCoverToCache(searchCoverCandidates, track.id)).catch(() => null)
+      : Promise.resolve(null);
+
   let downloadResult: FileSystem.FileSystemDownloadResult | undefined;
+  let extraMeta: RemoteTrackMetadata | null = null;
+  let cachedCoverUri: string | null = null;
+
   try {
-    onProgress?.({ phase: 'downloading', progress: 0 });
-    downloadResult = await resumable.downloadAsync();
+    const [, dlRes, metaRes, coverRes] = await Promise.all([
+      foldersPromise,
+      resumable.downloadAsync(),
+      metaPromise,
+      initialCoverPromise,
+    ]);
+    downloadResult = dlRes;
+    extraMeta = metaRes;
+    cachedCoverUri = coverRes;
   } catch (e: any) {
     await FileSystem.deleteAsync(tempPath, { idempotent: true }).catch(() => {});
     if (signal?.aborted) {
@@ -585,19 +578,49 @@ export async function downloadRemoteTrack(
     throw new DownloadApiError('Скачанный файл пуст или повреждён.', { code: 'EMPTY_FILE' });
   }
 
-  // 3. Переносим готовый файл в папку Music/ и сохраняем метаданные
   onProgress?.({ phase: 'tagging', progress: 1 });
+
+  // Если у элемента поиска не было обложки, пробуем обложку из метаданных
+  if (!cachedCoverUri && extraMeta?.coverUrl) {
+    cachedCoverUri = await downloadCoverToCache([extraMeta.coverUrl], track.id).catch(() => null);
+  }
+
+  // Читаем ID3 из файла только если обложка ещё не получена
+  const embeddedTags = !cachedCoverUri
+    ? await parseAudioTags(tempPath, track.id, initialExt).catch(() => null)
+    : null;
+
+  const fullTitle = (() => {
+    const t = track.title || extraMeta?.title || 'Track';
+    const sub = track.subtitle || extraMeta?.subtitle;
+    if (sub && !t.toLowerCase().includes(sub.toLowerCase())) {
+      return `${t} (${sub})`;
+    }
+    return t;
+  })();
+
+  const artist = track.artist || extraMeta?.artist || 'Неизвестный исполнитель';
+  const album = track.album || extraMeta?.album;
+  const year = track.year ?? extraMeta?.year;
+  const genre = track.genre || extraMeta?.genre;
+  const bpm = track.bpm ?? extraMeta?.bpm;
+  const trackNumber = track.trackNumber ?? extraMeta?.trackNumber;
+  const discNumber = track.discNumber ?? extraMeta?.discNumber;
+  const ext = extraMeta?.extension ?? track.extension ?? 'mp3';
+
+  // Переносим готовый файл в Music/ в самом конце, когда обложка и метаданные уже готовы
   const { uri: destUri, filename } = await allocateUniqueFilePath(artist, fullTitle, ext);
   await FileSystem.moveAsync({ from: tempPath, to: destUri });
 
+  const destInfo = await FileSystem.getInfoAsync(destUri).catch(() => null);
+  const actualMtime =
+    destInfo && destInfo.exists && 'modificationTime' in destInfo && typeof destInfo.modificationTime === 'number'
+      ? Math.round(destInfo.modificationTime)
+      : Date.now();
+
   const id = normalizeTrackId(destUri);
   const canonicalUri = resolveTrackUri(id);
-
-  // Параллельно кэшируем обложку и читаем встроенные ID3-теги из скачанного файла (если бэкенд их вшил)
-  const [cachedCoverUri, embeddedTags] = await Promise.all([
-    coverUrl ? downloadCoverToCache(coverUrl, id).catch(() => null) : Promise.resolve(null),
-    parseAudioTags(canonicalUri, id, ext).catch(() => null),
-  ]);
+  const finalArtworkUri = cachedCoverUri || embeddedTags?.artworkUri || undefined;
 
   const rawLyrics = extraMeta?.syncedLyrics || extraMeta?.lyrics || embeddedTags?.lyrics || undefined;
   const parsedSynced =
@@ -613,15 +636,15 @@ export async function downloadRemoteTrack(
     album: album || embeddedTags?.album || 'Сингл',
     year,
     genre,
-    artworkUri: cachedCoverUri || embeddedTags?.artworkUri || undefined,
-    thumbDone: true,
+    artworkUri: finalArtworkUri,
+    thumbDone: Boolean(finalArtworkUri),
     lyrics: rawLyrics,
     syncedLyrics: parsedSynced
       ? parsedSynced.map((l) => ({ time: l.time, text: l.text }))
       : embeddedTags?.syncedLyrics,
     bpmTag: bpm ?? embeddedTags?.bpm,
     size: fileSize,
-    mtime: Date.now(),
+    mtime: actualMtime,
     trackNumber: trackNumber ?? embeddedTags?.trackNumber,
     discNumber: discNumber ?? embeddedTags?.discNumber,
     extension: ext,

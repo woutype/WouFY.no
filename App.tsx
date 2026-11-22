@@ -7,6 +7,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 import { enrichTracks, scanLibrary, startLibraryWatcher } from './src/services/fileScanner';
+import { isUserCover } from './src/services/artwork';
 import { sampleBus } from './src/services/sampleBus';
 import { musicHaptics } from './src/services/musicHaptics';
 import { bpmService } from './src/services/bpm';
@@ -68,10 +69,17 @@ function Root() {
   // Список файлов показывается МГНОВЕННО (по именам файлов); теги и обложки дочитываются в фоне пачками.
   const rescan = useCallback(async (): Promise<string> => {
     const res = await scanLibrary();
-    // не откатываем уже прочитанные теги, если кэш на диске ещё не успели обновить
+    // не откатываем уже прочитанные теги и онлайн-обложки, если кэш на диске ещё не успели обновить
     const merged = res.tracks.map((t) => {
       const known = libRef.current.get(t.id);
-      return known && known.tagged && t.tagged === false ? { ...known, uri: t.uri, lrcUri: t.lrcUri } : t;
+      if (!known) return t;
+      if (known.tagged && t.tagged === false) {
+        return { ...known, uri: t.uri, lrcUri: t.lrcUri, size: t.size ?? known.size, mtime: t.mtime ?? known.mtime };
+      }
+      if (isUserCover(known.artworkUri) && known.artworkUri !== t.artworkUri) {
+        return { ...t, artworkUri: known.artworkUri, thumbDone: true };
+      }
+      return t;
     });
     const prev = libRef.current;
     const same = prev.size === merged.length && merged.every((t) => {
@@ -92,9 +100,16 @@ function Root() {
     const prio = [curTrackId, ...s.queue.slice(Math.max(0, s.index - 2), s.index + 20).map((t) => t.id)].filter(Boolean) as string[];
 
     enrichTracks(merged, (upd) => {
-      for (const u of upd) libRef.current.set(u.id, u);
+      const safeUpd = upd.map((u) => {
+        const cur = libRef.current.get(u.id);
+        if (cur && isUserCover(cur.artworkUri)) {
+          return { ...u, artworkUri: cur.artworkUri, thumbDone: true };
+        }
+        return u;
+      });
+      for (const u of safeUpd) libRef.current.set(u.id, u);
       bpmService.registerTags([...libRef.current.values()]);
-      engine.patchTracks(upd);
+      engine.patchTracks(safeUpd);
     }, undefined, prio);
     const parts = [`Найдено: ${merged.length}`];
     if (res.added) parts.push(`новых: ${res.added}`);
@@ -346,6 +361,7 @@ function Root() {
 
   const handleTrackDownloaded = useCallback(
     async (downloaded: TrackFile) => {
+      lastScanAt.current = Date.now();
       libRef.current.set(downloaded.id, downloaded);
       const nextTracks = [...libRef.current.values()];
       bpmService.registerTags([downloaded]);

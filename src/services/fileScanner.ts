@@ -6,7 +6,7 @@ import { WoufyFX } from '../../modules/woufy-fx';
 import { cleanupOrphanCovers, cleanupOrphanLyrics, cleanupTrash, cleanupTempCache } from './storageService';
 import { cachePathFor } from './lyrics';
 import { statsService } from './statsService';
-import { needsThumb, THUMB_PX } from './artwork';
+import { isUserCover, needsThumb, THUMB_PX } from './artwork';
 import { seedExpoGoTestTracks } from './devTestTracks';
 
 /** Основная папка для музыки (пользователь может класть треки и сюда, и прямо в корень WouFY.no) */
@@ -226,10 +226,12 @@ async function doScan(): Promise<ScanResult> {
 
     const cached = cacheMap.get(id);
     if (cached) {
-      // Инкрементальная сверка: если размер и дата изменения не менялись, берём готовые теги из кэша
-      const changed =
-        (f.mtime && cached.mtime && f.mtime !== cached.mtime) ||
-        (f.size && cached.size && f.size !== cached.size);
+      // Инкрементальная сверка: если размер и дата изменения не менялись (или трек только что скачан с онлайн-обложкой), берём готовые теги из кэша
+      const sizeChanged = Boolean(f.size && cached.size && f.size !== cached.size);
+      const mtimeChanged = Boolean(
+        !isUserCover(cached.artworkUri) && f.mtime && cached.mtime && f.mtime !== cached.mtime
+      );
+      const changed = sizeChanged || mtimeChanged;
 
       if (!changed && cached.tagged) {
         tracks.push({

@@ -60,22 +60,38 @@ export async function searchOnlineCovers(artist: string, title: string): Promise
 }
 
 /**
- * Скачивание выбранной обложки в локальный кэш приложения
+ * Скачивание выбранной обложки в локальный кэш приложения (с поддержкой фоллбека по списку URL и проверкой целостности файла)
  */
-export async function downloadCoverToCache(remoteUrl: string, trackId: string): Promise<string | null> {
+export async function downloadCoverToCache(
+  remoteUrlOrUrls: string | (string | undefined)[],
+  trackId: string
+): Promise<string | null> {
+  const urls = (Array.isArray(remoteUrlOrUrls) ? remoteUrlOrUrls : [remoteUrlOrUrls]).filter(
+    (u): u is string => typeof u === 'string' && /^https?:\/\//i.test(u.trim())
+  );
+  if (urls.length === 0) return null;
+
   const coversDir = `${DATA_DIR}covers/`;
   const info = await FileSystem.getInfoAsync(coversDir);
   if (!info.exists) {
     await FileSystem.makeDirectoryAsync(coversDir, { intermediates: true }).catch(() => {});
   }
 
-  const filename = `online_${hash(trackId)}_${Date.now()}.jpg`;
-  const targetPath = `${coversDir}${filename}`;
-
-  const res = await FileSystem.downloadAsync(remoteUrl, targetPath);
-  if (res.status < 200 || res.status >= 300) {
+  for (const url of urls) {
+    const filename = `online_${hash(`${trackId}_${url}`)}_${Date.now()}.jpg`;
+    const targetPath = `${coversDir}${filename}`;
+    try {
+      const res = await FileSystem.downloadAsync(url, targetPath);
+      if (res.status >= 200 && res.status < 300) {
+        const fileInfo = await FileSystem.getInfoAsync(targetPath);
+        if (fileInfo.exists && 'size' in fileInfo && (fileInfo.size ?? 0) > 512) {
+          return res.uri;
+        }
+      }
+    } catch {
+      /* пробуем следующий URL */
+    }
     await FileSystem.deleteAsync(targetPath, { idempotent: true }).catch(() => {});
-    return null;
   }
-  return res.uri;
+  return null;
 }

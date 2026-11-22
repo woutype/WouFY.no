@@ -1,13 +1,12 @@
 FROM node:20-slim
 
-# Устанавливаем ffmpeg (конвертация m3u8 -> mp3 и вшивание ID3/обложки) + yt-dlp (фоллбек без токена VK)
+# Устанавливаем ffmpeg и распакованный yt-dlp через pip (вместо сжатого zipapp, который тормозит на 0.1 vCPU Render)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     python3 \
-    curl \
+    python3-pip \
     ca-certificates \
-  && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
-  && chmod a+rx /usr/local/bin/yt-dlp \
+  && pip3 install --no-cache-dir --break-system-packages yt-dlp \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
