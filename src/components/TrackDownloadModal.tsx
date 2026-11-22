@@ -556,38 +556,6 @@ export const TrackDownloadModal: React.FC<Props> = ({
                 </View>
 
                 <View style={styles.headerActions}>
-                  <PressableScale
-                    onPress={() => {
-                      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                      setShowServerConfig((v) => !v);
-                    }}
-                    scaleTo={0.92}
-                    haptic="selection"
-                  >
-                    <View style={[styles.iconBtn, showServerConfig && styles.iconBtnActive]}>
-                      <Ionicons
-                        name="server-outline"
-                        size={17}
-                        color={showServerConfig ? colors.onAccent : colors.text}
-                      />
-                      <View
-                        style={[
-                          styles.statusDot,
-                          {
-                            borderColor: showServerConfig ? colors.accent : 'rgba(18,18,22,0.9)',
-                            backgroundColor: !configuredUrl
-                              ? colors.danger
-                              : healthStatus === 'ok'
-                                ? '#4ADE80'
-                                : healthStatus === 'fail'
-                                  ? colors.danger
-                                  : colors.text2,
-                          },
-                        ]}
-                      />
-                    </View>
-                  </PressableScale>
-
                   <PressableScale onPress={handleClose} scaleTo={0.92} haptic="light">
                     <View style={styles.iconBtn}>
                       <Ionicons name="close" size={19} color={colors.text2} />
@@ -595,44 +563,6 @@ export const TrackDownloadModal: React.FC<Props> = ({
                   </PressableScale>
                 </View>
               </View>
-
-              {/* Панель настройки URL бэкенда на Render */}
-              {showServerConfig && (
-                <Glass radius={26} intensity={45} style={styles.serverCard}>
-                  <Text style={styles.serverLabel}>БЭКЕНД НА RENDER</Text>
-                  <View style={styles.serverRow}>
-                    <TextInput
-                      style={styles.serverInput}
-                      placeholder="https://your-service.onrender.com"
-                      placeholderTextColor={colors.text3}
-                      value={apiUrlInput}
-                      onChangeText={setApiUrlInput}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      keyboardType="url"
-                      returnKeyType="done"
-                      onSubmitEditing={handleSaveServerUrl}
-                      selectionColor={colors.text}
-                    />
-                    <PressableScale onPress={handleSaveServerUrl} scaleTo={0.95} haptic="medium">
-                      <View style={styles.serverSaveBtn}>
-                        {checkingHealth ? (
-                          <ActivityIndicator size="small" color={colors.onAccent} />
-                        ) : (
-                          <Text style={styles.serverSaveText}>Сохранить</Text>
-                        )}
-                      </View>
-                    </PressableScale>
-                  </View>
-                  <Text style={styles.serverHint}>
-                    {healthStatus === 'ok'
-                      ? 'Сервер отвечает и готов к поиску.'
-                      : healthStatus === 'fail'
-                        ? 'Не удалось получить ответ от /health. Проверьте URL или подождите пробуждения Render.'
-                        : 'Можно задать через EXPO_PUBLIC_DOWNLOAD_API_URL в .env или указать здесь.'}
-                  </Text>
-                </Glass>
-              )}
 
               {/* Поля ввода: название трека и (опционально) исполнитель */}
               <View style={styles.inputsStack}>
