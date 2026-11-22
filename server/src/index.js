@@ -20,6 +20,7 @@ import {
 } from './providers/ytdlp.js';
 import {
   downloadHybridTrackToMp3,
+  fetchItunes3000Cover,
   resolveHybridTrack,
   searchHybridTracks,
 } from './providers/hybrid.js';
@@ -137,7 +138,7 @@ app.get('/api/tracks/:id/metadata', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Track not found' });
     }
 
-    const [lrclib, vkLyrics] = await Promise.all([
+    const [lrclib, vkLyrics, uhdCover] = await Promise.all([
       fetchLrclibLyrics({
         artist: track.artist,
         title: track.title,
@@ -145,6 +146,9 @@ app.get('/api/tracks/:id/metadata', authMiddleware, async (req, res) => {
         duration: track.duration,
       }),
       kind === 'vk' && track.lyricsId ? fetchVkLyrics(track.lyricsId) : Promise.resolve(undefined),
+      track.coverUrl && track.coverUrl.includes('3000x3000')
+        ? Promise.resolve(track.coverUrl)
+        : fetchItunes3000Cover(track.artist, track.title),
     ]);
 
     return res.json({
@@ -158,7 +162,7 @@ app.get('/api/tracks/:id/metadata', authMiddleware, async (req, res) => {
       trackNumber: track.trackNumber,
       discNumber: track.discNumber,
       duration: track.duration,
-      coverUrl: track.coverUrl,
+      coverUrl: uhdCover || track.coverUrl,
       lyrics: lrclib?.lyrics || vkLyrics,
       syncedLyrics: lrclib?.syncedLyrics,
       extension: 'mp3',

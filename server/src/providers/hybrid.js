@@ -124,7 +124,7 @@ function mapItunesTrack(raw) {
   if (!raw?.trackId || !raw?.trackName) return null;
   const id = `it:${raw.trackId}`;
   const thumb = typeof raw.artworkUrl100 === 'string' ? raw.artworkUrl100 : undefined;
-  const coverUrl = thumb ? thumb.replace('100x100bb.jpg', '1000x1000bb.jpg') : undefined;
+  const coverUrl = thumb ? thumb.replace(/\d+x\d+bb\.(jpg|png)$/i, '3000x3000bb.jpg') : undefined;
   const yearMatch = typeof raw.releaseDate === 'string' ? raw.releaseDate.match(/^(\d{4})/) : null;
   const year = yearMatch ? Number(yearMatch[1]) : undefined;
   const duration = Number.isFinite(Number(raw.trackTimeMillis))
@@ -142,10 +142,55 @@ function mapItunesTrack(raw) {
     trackNumber: Number.isFinite(Number(raw.trackNumber)) && Number(raw.trackNumber) > 0 ? Number(raw.trackNumber) : undefined,
     discNumber: Number.isFinite(Number(raw.discNumber)) && Number(raw.discNumber) > 0 ? Number(raw.discNumber) : undefined,
     coverUrl,
-    thumbnailUrl: thumb || coverUrl,
+    thumbnailUrl: thumb ? thumb.replace(/\d+x\d+bb\.(jpg|png)$/i, '300x300bb.jpg') : coverUrl,
     explicit: raw.trackExplicitness === 'explicit',
     extension: 'mp3',
   };
+}
+
+/**
+ * Ищет оригинальную 3000x3000 обложку в Apple iTunes / Apple Music CDN
+ * (используется для апгрейда 1000x1000 обложек Deezer до 3000x3000).
+ */
+export async function fetchItunes3000Cover(artist, title) {
+  const query = `${artist || ''} ${title || ''}`.replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!query) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const qs = new URLSearchParams({
+      term: query,
+      media: 'music',
+      entity: 'song',
+      limit: '5',
+    });
+    const res = await fetch(`https://itunes.apple.com/search?${qs.toString()}`, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const list = Array.isArray(json?.results) ? json.results : [];
+    const normTitle = (title || '').toLowerCase().trim();
+    const normArtist = (artist || '').toLowerCase().trim();
+
+    // Сначала ищем точное совпадение по артисту и названию, иначе берём первый результат с обложкой
+    const exact = list.find(
+      (r) =>
+        r?.artworkUrl100 &&
+        String(r.trackName || '').toLowerCase().includes(normTitle) &&
+        String(r.artistName || '').toLowerCase().includes(normArtist.split(',')[0].trim())
+    );
+    const chosen = exact || list.find((r) => r?.artworkUrl100);
+    if (!chosen?.artworkUrl100) return null;
+
+    return String(chosen.artworkUrl100).replace(/\d+x\d+bb\.(jpg|png)$/i, '3000x3000bb.jpg');
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function searchItunes(query, limit) {
@@ -309,22 +354,33 @@ export async function downloadHybridTrackToMp3(track, outPath) {
   let coverTempPath = null;
 
   try {
-    // Параллельно скачиваем исходное аудио и официальную HD-обложку (1000x1000)
+    // Параллельно скачиваем исходное аудио и оригинальную 3000x3000 обложку (Apple Music CDN → фоллбек Deezer)
     const [audioFile, coverFile] = await Promise.all([
       downloadAudioSource(query, tempBase),
       (async () => {
-        if (!track.coverUrl) return null;
-        try {
-          const res = await fetch(track.coverUrl);
-          if (!res.ok) return null;
-          const buf = Buffer.from(await res.arrayBuffer());
-          if (buf.length < 512) return null;
-          const p = `${tempBase}_cover.jpg`;
-          await fs.writeFile(p, buf);
-          return p;
-        } catch {
-          return null;
+        const candidates = [];
+        if (track.coverUrl && track.coverUrl.includes('3000x3000')) {
+          candidates.push(track.coverUrl);
+        } else {
+          const uhd = await fetchItunes3000Cover(track.artist, track.title);
+          if (uhd) candidates.push(uhd);
+          if (track.coverUrl) candidates.push(track.coverUrl);
         }
+
+        for (const url of candidates) {
+          try {
+            const res = await fetch(url);
+            if (!res.ok) continue;
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (buf.length < 512) continue;
+            const p = `${tempBase}_cover.jpg`;
+            await fs.writeFile(p, buf);
+            return p;
+          } catch {
+            /* try next candidate */
+          }
+        }
+        return null;
       })(),
     ]);
 
@@ -333,7 +389,8 @@ export async function downloadHybridTrackToMp3(track, outPath) {
 
     const args = ['-y', '-loglevel', 'error', '-i', rawAudioPath];
     if (coverTempPath) {
-      args.push('-i', coverTempPath, '-map', '0:a:0', '-map', '1:v:0', '-c:v', 'mjpeg', '-id3v2_version', '3');
+      // -c:v copy вшивает оригинальные 3000x3000 JPEG байты без пересжатия
+      args.push('-i', coverTempPath, '-map', '0:a:0', '-map', '1:v:0', '-c:v', 'copy', '-id3v2_version', '3');
       args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
     } else {
       args.push('-map', '0:a:0', '-id3v2_version', '3');
